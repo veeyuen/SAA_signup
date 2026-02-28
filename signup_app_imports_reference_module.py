@@ -91,8 +91,8 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb.save(bio)
     return bio.getvalue()
 
-st.set_page_config(page_title="Allcomers Meet Signup", layout="wide")
-st.title("Allcomers Meet Signup")
+st.set_page_config(page_title="Athletic Meet Signup", layout="wide")
+st.title("Athletic Meet Signup")
 
 if "entries" not in st.session_state:
     st.session_state.entries = []
