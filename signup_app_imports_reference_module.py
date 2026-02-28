@@ -9,6 +9,7 @@ import pandas as pd
 import openpyxl
 from io import BytesIO
 from datetime import date
+import re
 
 from reference_lists import (
     ENTRY_HEADERS,
@@ -29,10 +30,35 @@ DIVISIONS = {
     8: "A Div (17–19)",
 }
 
+IC_LAST4_RE = re.compile(r"^\d{3}[A-Za-z]$")
+
+def normalize_ic_last4(s: str) -> str:
+    """Normalize IC last-4 to uppercase trimmed string."""
+    return (s or "").strip().upper()
+
+def is_valid_ic_last4(s: str) -> bool:
+    """Valid if first 3 are digits and last is a letter (e.g., 123A)."""
+    return bool(IC_LAST4_RE.match((s or "").strip()))
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+def normalize_email(s: str) -> str:
+    """Normalize email by trimming whitespace."""
+    return (s or "").strip()
+
+def is_valid_email(s: str) -> bool:
+    """Basic email format check (not deliverability)."""
+    s = normalize_email(s)
+    if not s or len(s) > 254:
+        return False
+    return bool(EMAIL_RE.match(s))
+
+
 def compute_unique_id(first_name: str, ic_last4: str, dob: date) -> str:
     if not first_name or not ic_last4 or not dob:
         return ""
-    return f"{first_name.strip()[:1]}{ic_last4.strip()[:4]}{dob.year % 100:02d}".upper()
+    ic = normalize_ic_last4(ic_last4)
+    return f"{first_name.strip()[:1]}{ic[:4]}{dob.year % 100:02d}".upper()
 
 def allowed_events(gender: str, division_no: int):
     """Return list of (event_name, event_code) allowed for dropdown."""
@@ -91,8 +117,8 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb.save(bio)
     return bio.getvalue()
 
-st.set_page_config(page_title="Athletic Meet Signup", layout="wide")
-st.title("Athletic Meet Signup")
+st.set_page_config(page_title="Athletic Meet Signup Form", layout="wide")
+st.title("Athletic Meet Signup Form")
 
 if "entries" not in st.session_state:
     st.session_state.entries = []
@@ -106,6 +132,9 @@ with st.sidebar:
     billing_name = st.text_input("Billing contact name", value="")
     billing_email = st.text_input("Billing email", value="")
     charge_code = st.text_input("Charge code (optional)", value="")
+
+    if billing_email and not is_valid_email(billing_email):
+        st.warning("Billing email looks invalid. Please double-check it.")
 
 st.subheader("Add athlete entry")
 
@@ -151,13 +180,16 @@ with st.form("entry_form", clear_on_submit=False):
     coach_full_name = st.text_input("Coach Full Name", "")
     parq = st.selectbox("PAR-Q completed?", ["Y", "N"])
 
-    unique_id = compute_unique_id(first_name, ic_last4, birth_date) if birth_date else ""
+    ic_last4_norm_preview = normalize_ic_last4(ic_last4)
+    unique_id = compute_unique_id(first_name, ic_last4_norm_preview, birth_date) if birth_date else ""
     st.caption(f"Unique ID (auto): **{unique_id or '—'}**")
 
     waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False)
     submitted = st.form_submit_button("Add entry")
 
 if submitted:
+    ic_last4_norm = normalize_ic_last4(ic_last4)
+    email_norm = normalize_email(email)
     missing = []
     for k, v in [
         ("Last Name", last_name),
@@ -174,8 +206,10 @@ if submitted:
         st.error("Please tick the waiver acknowledgement.")
     elif missing:
         st.error("Missing: " + ", ".join(missing))
-    elif len(ic_last4.strip()) < 4:
-        st.error("IC last 4 should be at least 4 characters.")
+    elif not is_valid_email(email_norm):
+        st.error("Please enter a valid email address (e.g., name@example.com).")
+    elif not is_valid_ic_last4(ic_last4_norm):
+        st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
     elif not event_opts:
         st.error("No events available for that Gender + Division combination.")
     else:
@@ -185,11 +219,11 @@ if submitted:
             "first_name": first_name.strip(),
             "gender": gender,
             "birth_date": birth_date,
-            "ic_last4": ic_last4.strip(),
+            "ic_last4": ic_last4_norm,
             "unique_id": unique_id,
             "nationality": nationality,
             "contact_number": contact_number.strip(),
-            "email": email.strip(),
+            "email": email_norm,
             "team_code": team_code,
             "team_name": team_name_row,
             "event_code": event_code,
