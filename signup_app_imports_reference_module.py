@@ -15,6 +15,8 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
+from name_suggestions import suggested_text_input, unique_preserve
+
 from reference_lists import (
     ENTRY_HEADERS,
     TEAM_CODES,
@@ -128,19 +130,57 @@ with st.sidebar:
     default_team_name = get_team_name(default_team_code) if default_team_code else ""
 
     team_name_header = st.text_input("Team Name (for header)", value=default_team_name, key="team_name_header")
-    billing_name = st.text_input("Billing contact name", value="", key="billing_name")
+    # Billing contact name (with optional suggestions)
+    if "known_full_names" in locals() and known_full_names:
+        suggested_text_input("Billing contact name", key="billing_name", candidates=known_full_names)
+        billing_name = st.session_state.get("billing_name", "")
+    else:
+        billing_name = st.text_input("Billing contact name", value="", key="billing_name")
     billing_email = st.text_input("Billing email", value="", key="billing_email")
     charge_code = st.text_input("Charge code (optional)", value="", key="charge_code")
 
     if billing_email and not is_valid_email(billing_email):
         st.warning("Billing email looks invalid. Please double-check it.")
 
+    # Optional: load known names for suggestions
+    st.divider()
+    st.subheader("Name suggestions (optional)")
+    uploaded_names = st.file_uploader(
+        "Upload name list CSV (expects a column named NAME, or uses the first column)",
+        type=["csv"],
+        key="uploaded_names_csv",
+    )
+
+    known_full_names = []
+    if uploaded_names is not None:
+        try:
+            df_names = pd.read_csv(uploaded_names)
+            col = "NAME" if "NAME" in df_names.columns else df_names.columns[0]
+            known_full_names = unique_preserve(df_names[col].astype(str).tolist())
+        except Exception:
+            st.warning("Could not read CSV for name suggestions.")
+            known_full_names = []
+
+    # Derive simple first/last name pools (best-effort; useful for your split fields)
+    known_first_names = unique_preserve([n.split()[0] for n in known_full_names if str(n).strip()])
+    known_last_names = unique_preserve([n.split()[-1] for n in known_full_names if str(n).strip()])
+
 st.subheader("Athlete entry")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
 c1, c2, c3 = st.columns(3)
-last_name = c1.text_input("Last Name", key="last_name")
-first_name = c2.text_input("First Name", key="first_name")
+with c1:
+    if "known_last_names" in locals() and known_last_names:
+        suggested_text_input("Last Name", key="last_name", candidates=known_last_names)
+    else:
+        st.text_input("Last Name", key="last_name")
+last_name = st.session_state.get("last_name", "")
+with c2:
+    if "known_first_names" in locals() and known_first_names:
+        suggested_text_input("First Name", key="first_name", candidates=known_first_names)
+    else:
+        st.text_input("First Name", key="first_name")
+first_name = st.session_state.get("first_name", "")
 gender = c3.selectbox("Gender", ["M", "F"], key="gender")
 
 c4, c5, c6 = st.columns(3)
@@ -182,9 +222,17 @@ else:
 event_name = c12.selectbox("Event", event_names if event_names else ["(no events)"], key="event_name")
 
 season_best = st.text_input("Season Best (optional)", key="season_best")
-emergency_contact_name = st.text_input("Emergency Contact Name", key="emergency_contact_name")
+if "known_full_names" in locals() and known_full_names:
+    suggested_text_input("Emergency Contact Name", key="emergency_contact_name", candidates=known_full_names)
+else:
+    st.text_input("Emergency Contact Name", key="emergency_contact_name")
+emergency_contact_name = st.session_state.get("emergency_contact_name", "")
 emergency_contact_number = st.text_input("Emergency Contact Number", key="emergency_contact_number")
-coach_full_name = st.text_input("Coach Full Name", key="coach_full_name")
+if "known_full_names" in locals() and known_full_names:
+    suggested_text_input("Coach Full Name", key="coach_full_name", candidates=known_full_names)
+else:
+    st.text_input("Coach Full Name", key="coach_full_name")
+coach_full_name = st.session_state.get("coach_full_name", "")
 parq = st.selectbox("PAR-Q completed?", ["Y", "N"], key="parq")
 
 ic_last4_norm = normalize_ic_last4(ic_last4)
