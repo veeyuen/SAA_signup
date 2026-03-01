@@ -1,2 +1,5 @@
 openpyxl
+streamlit
 pandas
+requests
+Google-cloud-bigquery-storage
