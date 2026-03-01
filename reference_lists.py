@@ -1463,12 +1463,43 @@ EVENTS = [{'division': 4, 'event_code': '100', 'event_name': '100m', 'gender': '
 def get_team_name(team_code: str) -> str:
     return TEAM_CODE_TO_NAME.get((team_code or "").strip(), "")
 
-def get_events(gender: str, division: int):
-    """Return list of (event_name, event_code) for a given gender+division."""
-    g = (gender or "").strip().upper()
+
+
+# -----------------------------
+# Derived event indexes
+# -----------------------------
+# Built from EVENTS (extracted from "Event Codes (updated)" worksheet)
+
+EVENTS_BY_GENDER_DIV = {('M', 4): [('10000m', '10000'), ('10000mWalk', '10000W'), ('100m', '100'), ('110mH (1.067m)', '110H'), ('1500m', '1500'), ('200m', '200'), ('3000 Steeplechase (0.914m)', '3000s'), ('400m', '400'), ('400mH (0.914m)', '400h'), ('5000m', '5000'), ('5000mWalk', '5000RW'), ('800m', '800'), ('Discus (2kg)', 'DT'), ('Hammer (7.26kg)', 'HT'), ('High Jump', 'HJ'), ('Javelin (800g)', 'JT'), ('Long Jump', 'LJ'), ('Pole Vault', 'PV'), ('Shot Put (7.26kg)', 'SP'), ('Triple Jump (9m, 11m & 13m board)', 'TJ')], ('M', 3): [('10000mWalk', '10000W'), ('100m', '100'), ('110mH (0.991m)', '110H'), ('1500m', '1500'), ('200m', '200'), ('3000 Steeplechase (0.914m)', '3000s'), ('400m', '400'), ('400mH (0.914m)', '400h'), ('5000m', '5000'), ('5000mWalk', '5000W'), ('800m', '800'), ('Discus (1.75kg)', 'DT'), ('Hammer (6kg)', 'HT'), ('High Jump', 'HJ'), ('Javelin (800g)', 'JT'), ('Long Jump', 'LJ'), ('Pole Vault', 'PV'), ('Shot Put (6kg)', 'SP'), ('Triple Jump (9m, 11m & 13m board)', 'TJ')], ('M', 2): [('100m', '100'), ('110mH (0.914m)', '110H'), ('1500m', '1500'), ('2000 Steeplechase (0.838m)', '2000s'), ('200m', '200'), ('3000m', '3000'), ('3000mWalk', '3000W'), ('400m', '400'), ('400mH (0.838m)', '400h'), ('800m', '800'), ('Discus (1.5kg)', 'DT'), ('Hammer (5kg)', 'HT'), ('High Jump', 'HJ'), ('Javelin (700g)', 'JT'), ('Long Jump', 'LJ'), ('Pole Vault', 'PV'), ('Shot Put (5kg)', 'SP'), ('Triple Jump (9m, 10m & 11m board)', 'TJ')], ('M', 1): [('100m', '100'), ('100mH (0.838m)', '100H'), ('1500m', '1500'), ('1500mWalk', '1500W'), ('200m', '200'), ('200mH (.0762m)', '200h'), ('3000m', '3000'), ('400m', '400'), ('800m', '800'), ('Discus (1kg)', 'DT'), ('Hammer (4kg)', 'HT'), ('High Jump', 'HJ'), ('Javelin (600g)', 'JT'), ('Long Jump', 'LJ'), ('Pole Vault', 'PV'), ('Shot Put (4kg)', 'SP'), ('Triple Jump (7m, 8m & 9m board)', 'TJ')], ('M', 8): [('Discus (1.5kg)', 'DT'), ('Hammer (5kg)', 'HT'), ('Javelin (700g)', 'JT'), ('Shot Put (5kg)', 'SP')], ('F', 4): [('10000m', '10000'), ('10000mWalk', '10000W'), ('100m', '100'), ('100mH (0.838m)', '100H'), ('1500m', '1500'), ('200m', '200'), ('3000 Steeplechase (0.762m)', '3000s'), ('400m', '400'), ('400mH (0.762m)', '400h'), ('5000m', '5000'), ('5000mWalk', '5000W'), ('800m', '800'), ('Discus (1kg)', 'DT'), ('Hammer (4kg)', 'HT'), ('High Jump', 'HJ'), ('Javelin (600g)', 'JT'), ('Long Jump', 'LJ'), ('Pole Vault', 'PV'), ('Shot Put (4kg)', 'SP'), ('Triple Jump (9m, 10m & 11m board)', 'TJ')], ('F', 3): [('100m', '100'), ('100mH (0.838m)', '100H'), ('1500m', '1500'), ('2000 Steeplechase (0.762m)', '2000s'), ('200m', '200'), ('3000m', '3000'), ('3000mWalk', '3000W'), ('400m', '400'), ('400mH (0.762m)', '400h'), ('5000m', '5000'), ('800m', '800'), ('Discus (1kg)', 'DT'), ('Hammer (4kg)', 'HT'), ('High Jump', 'HJ'), ('Javelin (600g)', 'JT'), ('Long Jump', 'LJ'), ('Pole Vault', 'PV'), ('Shot Put (4kg)', 'SP'), ('Triple Jump (9m, 10m & 11m board)', 'TJ')], ('F', 2): [('100m', '100'), ('100mH (0.762m)', '100H'), ('1500m', '1500'), ('1500mWalk', '1500W'), ('2000 Steeplechase (0.762m)', '2000s'), ('200m', '200'), ('3000m', '3000'), ('400m', '400'), ('400mH (0.762m)', '400h'), ('800m', '800'), ('Discus (1kg)', 'DT'), ('Hammer (3kg)', 'HT'), ('High Jump', 'HJ'), ('Javelin (500g)', 'JT'), ('Long Jump', 'LJ'), ('Pole Vault', 'PV'), ('Shot Put (3kg)', 'SP'), ('Triple Jump (7m, 8m & 9m board)', 'TJ')], ('F', 1): [('100m', '100'), ('1500m', '1500'), ('1500mWalk', '1500W'), ('200m', '200'), ('200mH (0.762m)', '200h'), ('3000m', '3000'), ('400m', '400'), ('800m', '800'), ('80mH (0.762m)', '80H'), ('Discus (1kg)', 'DT'), ('Hammer (3kg)', 'HT'), ('High Jump', 'HJ'), ('Javelin (500g)', 'JT'), ('Long Jump', 'LJ'), ('Pole Vault', 'PV'), ('Shot Put (3kg)', 'SP'), ('Triple Jump (6m, 7m & 8m board)', 'TJ')]}
+
+EVENTS_BY_DIV = {4: ['10000m', '10000mWalk', '100m', '100mH (0.838m)', '110mH (1.067m)', '1500m', '200m', '3000 Steeplechase (0.762m)', '3000 Steeplechase (0.914m)', '400m', '400mH (0.762m)', '400mH (0.914m)', '5000m', '5000mWalk', '800m', 'Discus (1kg)', 'Discus (2kg)', 'Hammer (4kg)', 'Hammer (7.26kg)', 'High Jump', 'Javelin (600g)', 'Javelin (800g)', 'Long Jump', 'Pole Vault', 'Shot Put (4kg)', 'Shot Put (7.26kg)', 'Triple Jump (9m, 10m & 11m board)', 'Triple Jump (9m, 11m & 13m board)'], 3: ['10000mWalk', '100m', '100mH (0.838m)', '110mH (0.991m)', '1500m', '2000 Steeplechase (0.762m)', '200m', '3000 Steeplechase (0.914m)', '3000m', '3000mWalk', '400m', '400mH (0.762m)', '400mH (0.914m)', '5000m', '5000mWalk', '800m', 'Discus (1.75kg)', 'Discus (1kg)', 'Hammer (4kg)', 'Hammer (6kg)', 'High Jump', 'Javelin (600g)', 'Javelin (800g)', 'Long Jump', 'Pole Vault', 'Shot Put (4kg)', 'Shot Put (6kg)', 'Triple Jump (9m, 10m & 11m board)', 'Triple Jump (9m, 11m & 13m board)'], 2: ['100m', '100mH (0.762m)', '110mH (0.914m)', '1500m', '1500mWalk', '2000 Steeplechase (0.762m)', '2000 Steeplechase (0.838m)', '200m', '3000m', '3000mWalk', '400m', '400mH (0.762m)', '400mH (0.838m)', '800m', 'Discus (1.5kg)', 'Discus (1kg)', 'Hammer (3kg)', 'Hammer (5kg)', 'High Jump', 'Javelin (500g)', 'Javelin (700g)', 'Long Jump', 'Pole Vault', 'Shot Put (3kg)', 'Shot Put (5kg)', 'Triple Jump (7m, 8m & 9m board)', 'Triple Jump (9m, 10m & 11m board)'], 1: ['100m', '100mH (0.838m)', '1500m', '1500mWalk', '200m', '200mH (.0762m)', '200mH (0.762m)', '3000m', '400m', '800m', '80mH (0.762m)', 'Discus (1kg)', 'Hammer (3kg)', 'Hammer (4kg)', 'High Jump', 'Javelin (500g)', 'Javelin (600g)', 'Long Jump', 'Pole Vault', 'Shot Put (3kg)', 'Shot Put (4kg)', 'Triple Jump (6m, 7m & 8m board)', 'Triple Jump (7m, 8m & 9m board)'], 8: ['Discus (1.5kg)', 'Hammer (5kg)', 'Javelin (700g)', 'Shot Put (5kg)']}
+
+def get_event_names_for_division(division: int):
+    """Return a sorted list of event_name values available for a division (across genders)."""
+    return list(EVENTS_BY_DIV.get(int(division), []))
+
+def get_event_options(division: int, gender: str | None = None, include_gender_suffix: bool = False):
+    """Return event dropdown options.
+
+    If gender is provided ("M" or "F"), returns list of (event_name, event_code) for that gender+division.
+
+    If gender is None, returns list of (label, event_code) across both genders:
+      - label is event_name (or "event_name [M/F]" if include_gender_suffix=True)
+      - event_code comes from the source mapping for that gender.
+    """
+    d = int(division)
+    if gender:
+        g = (gender or "").strip().upper()
+        return list(EVENTS_BY_GENDER_DIV.get((g, d), []))
+
+    # union across genders
     out = []
-    for e in EVENTS:
-        if e["gender"] == g and e["division"] == int(division):
-            out.append((e["event_name"], e["event_code"]))
+    for g in ("M", "F"):
+        for name, code in EVENTS_BY_GENDER_DIV.get((g, d), []):
+            label = f"{name} [{g}]" if include_gender_suffix else name
+            out.append((label, code))
     out.sort(key=lambda x: x[0])
     return out
+def get_events(gender: str, division: int):
+    """Backward-compatible wrapper (gender + division)."""
+    return get_event_options(division=int(division), gender=(gender or '').strip().upper())
