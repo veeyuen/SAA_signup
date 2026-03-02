@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from name_suggestions import suggested_text_input, unique_preserve
+from name_suggestions_v3 import suggested_text_input, unique_preserve
 from bigquery_names import bq_name_matches
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -239,24 +239,25 @@ with st.sidebar:
 st.subheader("Athlete entry")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
-c1, c2, c3 = st.columns(3)
+c1, c2 = st.columns(2)
 with c1:
-    if "known_last_names" in locals() and known_last_names:
-        suggested_text_input("Last Name", key="last_name", candidates=known_last_names)
-        _bq_suggest_select("Last Name", "last_name")
+    # Full name (First + Last) with optional suggestions
+    if ("known_full_names" in locals() and known_full_names and st.session_state.get("name_source") == "CSV"):
+        suggested_text_input("Name (First + Last)", key="name", candidates=known_full_names)
     else:
-        st.text_input("Last Name", key="last_name")
-        _bq_suggest_select("Last Name", "last_name")
-last_name = st.session_state.get("last_name", "")
+        st.text_input("Name (First + Last)", key="name")
+    _bq_suggest_select("Name", "name")
 with c2:
-    if "known_first_names" in locals() and known_first_names:
-        suggested_text_input("First Name", key="first_name", candidates=known_first_names)
-        _bq_suggest_select("First Name", "first_name")
-    else:
-        st.text_input("First Name", key="first_name")
-        _bq_suggest_select("First Name", "first_name")
-first_name = st.session_state.get("first_name", "")
-gender = c3.selectbox("Gender", ["M", "F"], key="gender")
+    gender = st.selectbox("Gender", ["M", "F"], key="gender")
+full_name = (st.session_state.get("name", "") or "").strip()
+name_parts = [p for p in full_name.split() if p]
+# Split rule: last token is Last Name; everything before is First Name (can include middle names)
+derived_first_name = " ".join(name_parts[:-1]).strip() if len(name_parts) >= 2 else ""
+derived_last_name = name_parts[-1].strip() if len(name_parts) >= 2 else ""
+if full_name and len(name_parts) >= 2:
+    st.caption(f"Parsed: **First Name** = {derived_first_name} | **Last Name** = {derived_last_name}")
+elif full_name:
+    st.caption("Parsed: please enter at least 2 words (First + Last).")
 
 c4, c5, c6 = st.columns(3)
 birth_date = c4.date_input("Birth Date", value=None, key="birth_date")
@@ -316,7 +317,7 @@ parq = st.selectbox("PAR-Q completed?", ["Y", "N"], key="parq")
 
 ic_last4_norm = normalize_ic_last4(ic_last4)
 email_norm = normalize_email(email)
-unique_id = compute_unique_id(first_name, ic_last4_norm, birth_date) if birth_date else ""
+unique_id = compute_unique_id(derived_first_name, ic_last4_norm, birth_date) if birth_date else ""
 st.caption(f"Unique ID (auto): **{unique_id or '—'}**")
 
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
@@ -325,8 +326,7 @@ waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", 
 if st.button("Add entry", type="primary"):
     missing = []
     for k, v in [
-        ("Last Name", last_name),
-        ("First Name", first_name),
+        ("Name", full_name),
         ("Birth Date", birth_date),
         ("IC last 4", ic_last4),
         ("Email", email),
@@ -339,6 +339,8 @@ if st.button("Add entry", type="primary"):
         st.error("Please tick the waiver acknowledgement.")
     elif missing:
         st.error("Missing: " + ", ".join(missing))
+    elif full_name and len(name_parts) < 2:
+        st.error("Name must contain at least 2 words (First + Last).")
     elif not is_valid_email(email_norm):
         st.error("Please enter a valid email address (e.g., name@example.com).")
     elif not is_valid_ic_last4(ic_last4_norm):
@@ -348,8 +350,9 @@ if st.button("Add entry", type="primary"):
     else:
         event_code = dict(event_opts).get(event_name, "")
         st.session_state.entries.append({
-            "last_name": (last_name or "").strip(),
-            "first_name": (first_name or "").strip(),
+            "name": full_name,
+            "last_name": derived_last_name,
+            "first_name": derived_first_name,
             "gender": gender,
             "birth_date": birth_date,
             "ic_last4": ic_last4_norm,
