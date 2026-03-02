@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from name_suggestions import suggested_text_input, unique_preserve
-from bigquery_names import bq_name_matches
+from name_suggestions_v3 import suggested_text_input, unique_preserve
+from bigquery_names_v2 import bq_name_matches, bq_person_matches
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -207,7 +207,10 @@ with st.sidebar:
     bq_project = st.text_input("BigQuery Project (for suggestions)", value=(st.secrets.get("bq_project", "") if hasattr(st, "secrets") else ""), key="bq_project")
     bq_dataset = st.text_input("BigQuery Dataset", value=(st.secrets.get("bq_dataset", "") if hasattr(st, "secrets") else ""), key="bq_dataset")
     bq_table = st.text_input("BigQuery Table", value=(st.secrets.get("bq_table", "") if hasattr(st, "secrets") else ""), key="bq_table")
-    bq_column = st.text_input("BigQuery Column", value=(st.secrets.get("bq_column", "NAME") if hasattr(st, "secrets") else "NAME"), key="bq_column")
+    bq_column = st.text_input("BigQuery Column", value=(st.secrets.get("bq_column", "name") if hasattr(st, "secrets") else "name"), key="bq_column")
+    bq_first_col = st.text_input("BigQuery First Name Column", value=(st.secrets.get("bq_first_col", "first_name") if hasattr(st, "secrets") else "first_name"), key="bq_first_col")
+    bq_last_col = st.text_input("BigQuery Last Name Column", value=(st.secrets.get("bq_last_col", "last_name") if hasattr(st, "secrets") else "last_name"), key="bq_last_col")
+    bq_other_col = st.text_input("BigQuery Other Name Column", value=(st.secrets.get("bq_other_col", "other_name") if hasattr(st, "secrets") else "other_name"), key="bq_other_col")
     st.caption("Tip: Store bq_project/bq_dataset/bq_table/bq_column and gcp_service_account in secrets.toml for deployment.")
 
     uploaded_names = None
@@ -239,7 +242,7 @@ with st.sidebar:
 st.subheader("Athlete entry")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 with c1:
     if "known_last_names" in locals() and known_last_names:
         suggested_text_input("Last Name", key="last_name", candidates=known_last_names)
@@ -251,52 +254,108 @@ with c2:
     else:
         st.text_input("First Name", key="first_name")
 with c3:
+    st.text_input("Other Name (optional)", key="other_name")
+with c4:
     gender = st.selectbox("Gender", ["M", "F"], key="gender")
 
 last_name = st.session_state.get("last_name", "")
 first_name = st.session_state.get("first_name", "")
+other_name = st.session_state.get("other_name", "")
 
-# Combined name (First + Last) — additional field (read-only)
-combined_name = f"{(first_name or '').strip()} {(last_name or '').strip()}".strip()
+# Combined name (display)
+typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
+db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
+combined_name = db_name_override or typed_full_name
 st.text_input("Name (combined)", value=combined_name, disabled=True)
+if db_name_override:
+    if st.button("Clear DB name override"):
+        st.session_state["db_name_override__pending"] = ""
+        st.rerun()
 
 # Full-name match selector (uses CSV list or BigQuery, depending on sidebar setting)
-search_text = (combined_name or first_name or last_name or "").strip()
+search_text = (typed_full_name or first_name or last_name or "").strip()
 if len(search_text) >= 2:
-    matches = []
+    matches_rows = []
+    matches_labels = []
     if st.session_state.get("name_source") == "BigQuery":
         bq_project = (st.session_state.get("bq_project", "") or "").strip()
         bq_dataset = (st.session_state.get("bq_dataset", "") or "").strip()
         bq_table = (st.session_state.get("bq_table", "") or "").strip()
-        bq_column = (st.session_state.get("bq_column", "NAME") or "NAME").strip()
-        if bq_project and bq_dataset and bq_table and bq_column:
+        bq_name_col = (st.session_state.get("bq_column", "name") or "name").strip()
+        bq_first_col = (st.session_state.get("bq_first_col", "first_name") or "first_name").strip()
+        bq_last_col = (st.session_state.get("bq_last_col", "last_name") or "last_name").strip()
+        bq_other_col = (st.session_state.get("bq_other_col", "other_name") or "other_name").strip()
+        if bq_project and bq_dataset and bq_table and bq_name_col:
             try:
-                matches = bq_name_matches(search_text, project=bq_project, dataset=bq_dataset, table=bq_table, column=bq_column, limit=25)
+                matches_rows = bq_person_matches(
+                    search_text,
+                    project=bq_project,
+                    dataset=bq_dataset,
+                    table=bq_table,
+                    name_col=bq_name_col,
+                    first_col=bq_first_col,
+                    last_col=bq_last_col,
+                    other_col=bq_other_col,
+                    limit=25,
+                )
             except Exception as e:
                 st.warning(f"BigQuery name suggestions error: {e}")
     elif st.session_state.get("name_source") == "CSV":
         if "known_full_names" in locals() and known_full_names:
             q = search_text.casefold()
-            matches = [n for n in known_full_names if q in str(n).casefold()]
-            # de-dup while preserving order
+            tmp = [n for n in known_full_names if q in str(n).casefold()]
             seen = set()
-            matches = [m for m in matches if not (m.casefold() in seen or seen.add(m.casefold()))]
-            matches = matches[:25]
+            tmp2 = []
+            for t in tmp:
+                k = str(t).casefold()
+                if k in seen:
+                    continue
+                seen.add(k)
+                tmp2.append(str(t))
+            matches_labels = tmp2[:25]
 
-    if matches:
+    # Build labels for BigQuery rows
+    if matches_rows:
+        for r in matches_rows:
+            label = (r.get("name") or "").strip()
+            if not label:
+                label = " ".join([p for p in [r.get("first_name",""), r.get("other_name",""), r.get("last_name","")] if (p or "").strip()]).strip()
+            matches_labels.append(label)
+
+    if matches_labels:
         sel_key = "athlete_name_match"
-        options = ["(keep typed)"] + matches
-        chosen = st.selectbox("Select From List of Matches :", options=options, key=sel_key)
-        if chosen and chosen != "(keep typed)":
-            parts = [p for p in str(chosen).strip().split() if p]
-            if len(parts) >= 2:
-                st.session_state["first_name__pending"] = " ".join(parts[:-1]).strip()
-                st.session_state["last_name__pending"] = parts[-1].strip()
-                st.session_state[f"{sel_key}__pending"] = "(keep typed)"
-                st.rerun()
+        options = ["(keep typed)"] + list(range(len(matches_labels)))
+        chosen = st.selectbox(
+            "Select From List of Matches :",
+            options=options,
+            key=sel_key,
+            format_func=lambda x: "(keep typed)" if x == "(keep typed)" else matches_labels[int(x)],
+        )
+        if chosen != "(keep typed)":
+            idx = int(chosen)
+            # If we have structured BigQuery rows, prefer their fields.
+            if matches_rows and idx < len(matches_rows):
+                r = matches_rows[idx]
+                fn = (r.get("first_name") or "").strip()
+                ln = (r.get("last_name") or "").strip()
+                on = (r.get("other_name") or "").strip()
+                nm = (r.get("name") or matches_labels[idx] or "").strip()
+                if fn and ln:
+                    st.session_state["first_name__pending"] = fn
+                    st.session_state["last_name__pending"] = ln
+                    st.session_state["other_name__pending"] = on
+                    # Clear any override when we have structured first/last
+                    st.session_state["db_name_override__pending"] = ""
+                else:
+                    # Do NOT split; store name as an override for combined display.
+                    st.session_state["db_name_override__pending"] = nm
             else:
-                st.warning("Selected name does not contain at least 2 words (First + Last).")
+                # CSV mode: we only have a name string; do NOT split.
+                st.session_state["db_name_override__pending"] = matches_labels[idx]
+            st.session_state[f"{sel_key}__pending"] = "(keep typed)"
+            st.rerun()
 
+c4, c5, c6 = st.columns(3)
 c4, c5, c6 = st.columns(3)
 birth_date = c4.date_input("Birth Date", value=None, key="birth_date")
 ic_last4 = c5.text_input("IC Number (last 4)", key="ic_last4")
@@ -387,7 +446,6 @@ if st.button("Add entry", type="primary"):
     else:
         event_code = dict(event_opts).get(event_name, "")
         st.session_state.entries.append({
-            "name": combined_name,
             "last_name": (last_name or "").strip(),
             "first_name": (first_name or "").strip(),
             "gender": gender,
