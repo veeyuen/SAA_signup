@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from name_suggestions import suggested_text_input, unique_preserve
+from name_suggestions_v3 import suggested_text_input, unique_preserve
 from bigquery_names import bq_name_matches
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -156,7 +156,8 @@ def _bq_suggest_select(label: str, key: str, *, limit: int = 25, min_chars: int 
     if chosen and chosen != "(keep typed)":
         # Avoid modifying the widget key after it is instantiated.
         st.session_state[f"{key}__pending"] = chosen
-        st.session_state[sel_key] = "(keep typed)"
+        # Reset suggestion selectbox on next rerun (must be before widget instantiation).
+        st.session_state[f"{sel_key}__pending"] = "(keep typed)"
         st.rerun()
 
 # ---------------- UI ----------------

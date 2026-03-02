@@ -94,7 +94,7 @@ def suggested_text_input(
         sel_key = f"{key}__suggestion"
         options = ["(keep typed)"] + matches
         if st.session_state.get(sel_key) not in options:
-            st.session_state[sel_key] = "(keep typed)"
+            st.session_state[f"{sel_key}__pending"] = "(keep typed)"
 
         chosen = st.selectbox(
             f"Suggestions for {label}",
@@ -105,5 +105,6 @@ def suggested_text_input(
             # Avoid modifying the widget key after it is instantiated.
             # Store a pending update, applied at the top of the next rerun.
             st.session_state[f"{key}__pending"] = chosen
-            st.session_state[sel_key] = "(keep typed)"
+            # Reset the suggestion selectbox on next rerun (must be before widget instantiation).
+            st.session_state[f"{sel_key}__pending"] = "(keep typed)"
             st.rerun()
