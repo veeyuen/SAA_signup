@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from name_suggestions_v2 import suggested_text_input, unique_preserve
+from name_suggestions import suggested_text_input, unique_preserve
 from bigquery_names import bq_name_matches
 
-from reference_lists_final import (
+from reference_lists import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
