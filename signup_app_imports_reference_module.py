@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from name_suggestions import suggested_text_input, unique_preserve
-from bigquery_names import bq_name_matches, bq_person_matches
+from name_suggestions_v3 import suggested_text_input, unique_preserve
+from bigquery_names_v2 import bq_name_matches, bq_person_matches
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -265,12 +265,6 @@ other_name = st.session_state.get("other_name", "")
 # Combined name (display)
 typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
 db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
-combined_name = db_name_override or typed_full_name
-st.text_input("Name (combined)", value=combined_name, disabled=True)
-if db_name_override:
-    if st.button("Clear DB name override"):
-        st.session_state["db_name_override__pending"] = ""
-        st.rerun()
 
 # Full-name match selector (uses CSV list or BigQuery, depending on sidebar setting)
 search_text = (typed_full_name or first_name or last_name or "").strip()
@@ -355,7 +349,16 @@ if len(search_text) >= 2:
             st.session_state[f"{sel_key}__pending"] = "(keep typed)"
             st.rerun()
 
-c4, c5, c6 = st.columns(3)
+
+# Combined name (display)
+combined_name = db_name_override or typed_full_name
+st.text_input("Name (combined)", value=combined_name, disabled=True)
+if db_name_override:
+    if st.button("Clear DB name override"):
+        st.session_state["db_name_override__pending"] = ""
+        st.rerun()
+
+
 c4, c5, c6 = st.columns(3)
 birth_date = c4.date_input("Birth Date", value=None, key="birth_date")
 ic_last4 = c5.text_input("IC Number (last 4)", key="ic_last4")
@@ -423,8 +426,6 @@ waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", 
 if st.button("Add entry", type="primary"):
     missing = []
     for k, v in [
-        ("Last Name", last_name),
-        ("First Name", first_name),
         ("Birth Date", birth_date),
         ("IC last 4", ic_last4),
         ("Email", email),
@@ -437,12 +438,15 @@ if st.button("Add entry", type="primary"):
         st.error("Please tick the waiver acknowledgement.")
     elif missing:
         st.error("Missing: " + ", ".join(missing))
+    elif not (((first_name or '').strip()) and ((last_name or '').strip())) and not ((db_name_override or '').strip()):
+        st.error("Please enter First Name and Last Name, or select a name from matches.")
     elif not is_valid_email(email_norm):
         st.error("Please enter a valid email address (e.g., name@example.com).")
     elif not is_valid_ic_last4(ic_last4_norm):
         st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
     elif not event_opts or not event_names or event_name == "(no events)":
         st.error("No events available for that Gender + Division combination.")
+
     else:
         event_code = dict(event_opts).get(event_name, "")
         st.session_state.entries.append({
@@ -459,6 +463,7 @@ if st.button("Add entry", type="primary"):
             "email": email_norm,
             "team_code": team_code,
             "team_name": team_name_row,
+            "event": event_name,
             "event_code": event_code,
             "event_division": int(event_division),
             "season_best": (season_best or "").strip(),
