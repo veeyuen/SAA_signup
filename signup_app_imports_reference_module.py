@@ -15,10 +15,9 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from name_suggestions import suggested_text_input, unique_preserve
-from bigquery_names import bq_name_matches
+from name_suggestions_v2 import suggested_text_input, unique_preserve
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -118,49 +117,22 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb.save(bio)
     return bio.getvalue()
 
-
-def _bq_suggest_select(label: str, key: str, *, limit: int = 25, min_chars: int = 2):
-    """If BigQuery suggestions are enabled, show a selectbox of matches for current input."""
-    if not (st.session_state.get("name_source") == "BigQuery"):
-        return
-    bq_project = (st.session_state.get("bq_project", "") or "").strip()
-    bq_dataset = (st.session_state.get("bq_dataset", "") or "").strip()
-    bq_table = (st.session_state.get("bq_table", "") or "").strip()
-    bq_column = (st.session_state.get("bq_column", "NAME") or "NAME").strip()
-    if not (bq_project and bq_dataset and bq_table and bq_column):
-        return
-
-    text = (st.session_state.get(key, "") or "").strip()
-    if len(text) < int(min_chars):
-        return
-
-    try:
-        matches = bq_name_matches(
-            text,
-            project=bq_project,
-            dataset=bq_dataset,
-            table=bq_table,
-            column=bq_column,
-            limit=int(limit),
-        )
-    except Exception as e:
-        st.warning(f"BigQuery name suggestions error: {e}")
-        return
-
-    if not matches:
-        return
-
-    sel_key = f"{key}__bq_suggestion"
-    options = ["(keep typed)"] + matches
-    chosen = st.selectbox("Select From List of Matches :", options=options, key=sel_key)
-    if chosen and chosen != "(keep typed)":
-        st.session_state[key] = chosen
-        st.session_state[sel_key] = "(keep typed)"
-        st.rerun()
-
 # ---------------- UI ----------------
 st.set_page_config(page_title="Allcomers Meet Signup", layout="wide")
 st.title("Allcomers Meet Signup")
+
+def _apply_pending_text_updates():
+    """Apply any pending text updates BEFORE widgets are instantiated."""
+    pending = [k for k in list(st.session_state.keys()) if k.endswith("__pending")]
+    for pk in pending:
+        base = pk[:-9]  # strip '__pending'
+        st.session_state[base] = st.session_state.get(pk, "")
+        try:
+            del st.session_state[pk]
+        except Exception:
+            pass
+
+_apply_pending_text_updates()
 
 if "entries" not in st.session_state:
     st.session_state.entries = []
@@ -175,10 +147,8 @@ with st.sidebar:
     if "known_full_names" in locals() and known_full_names:
         suggested_text_input("Billing contact name", key="billing_name", candidates=known_full_names)
         billing_name = st.session_state.get("billing_name", "")
-        _bq_suggest_select("Billing contact name", "billing_name")
     else:
         billing_name = st.text_input("Billing contact name", value="", key="billing_name")
-        _bq_suggest_select("Billing contact name", "billing_name")
     billing_email = st.text_input("Billing email", value="", key="billing_email")
     charge_code = st.text_input("Charge code (optional)", value="", key="charge_code")
 
@@ -188,24 +158,13 @@ with st.sidebar:
     # Optional: load known names for suggestions
     st.divider()
     st.subheader("Name suggestions (optional)")
-    name_source = st.radio("Source: CSV or BigQuery", options=["Off", "CSV", "BigQuery"], horizontal=True, key="name_source")
-    bq_project = st.text_input("BigQuery Project (for suggestions)", value=(st.secrets.get("bq_project", "") if hasattr(st, "secrets") else ""), key="bq_project")
-    bq_dataset = st.text_input("BigQuery Dataset", value=(st.secrets.get("bq_dataset", "") if hasattr(st, "secrets") else ""), key="bq_dataset")
-    bq_table = st.text_input("BigQuery Table", value=(st.secrets.get("bq_table", "") if hasattr(st, "secrets") else ""), key="bq_table")
-    bq_column = st.text_input("BigQuery Column", value=(st.secrets.get("bq_column", "NAME") if hasattr(st, "secrets") else "NAME"), key="bq_column")
-    st.caption("Tip: Store bq_project/bq_dataset/bq_table/bq_column and gcp_service_account in secrets.toml for deployment.")
-
-    uploaded_names = None
-    if name_source == "CSV":
-        uploaded_names = st.file_uploader(
+    uploaded_names = st.file_uploader(
         "Upload name list CSV (expects a column named NAME, or uses the first column)",
         type=["csv"],
         key="uploaded_names_csv",
     )
 
-    known_full_names = []  # from CSV (if selected)
-    bq_enabled = (name_source == "BigQuery" and bq_project and bq_dataset and bq_table and bq_column)
-
+    known_full_names = []
     if uploaded_names is not None:
         try:
             df_names = pd.read_csv(uploaded_names)
@@ -213,9 +172,7 @@ with st.sidebar:
             known_full_names = unique_preserve(df_names[col].astype(str).tolist())
         except Exception:
             st.warning("Could not read CSV for name suggestions.")
-            known_full_names = []  # from CSV (if selected)
-    bq_enabled = (name_source == "BigQuery" and bq_project and bq_dataset and bq_table and bq_column)
-
+            known_full_names = []
 
     # Derive simple first/last name pools (best-effort; useful for your split fields)
     known_first_names = unique_preserve([n.split()[0] for n in known_full_names if str(n).strip()])
@@ -228,18 +185,14 @@ c1, c2, c3 = st.columns(3)
 with c1:
     if "known_last_names" in locals() and known_last_names:
         suggested_text_input("Last Name", key="last_name", candidates=known_last_names)
-        _bq_suggest_select("Last Name", "last_name")
     else:
         st.text_input("Last Name", key="last_name")
-        _bq_suggest_select("Last Name", "last_name")
 last_name = st.session_state.get("last_name", "")
 with c2:
     if "known_first_names" in locals() and known_first_names:
         suggested_text_input("First Name", key="first_name", candidates=known_first_names)
-        _bq_suggest_select("First Name", "first_name")
     else:
         st.text_input("First Name", key="first_name")
-        _bq_suggest_select("First Name", "first_name")
 first_name = st.session_state.get("first_name", "")
 gender = c3.selectbox("Gender", ["M", "F"], key="gender")
 
@@ -284,18 +237,14 @@ event_name = c12.selectbox("Event", event_names if event_names else ["(no events
 season_best = st.text_input("Season Best (optional)", key="season_best")
 if "known_full_names" in locals() and known_full_names:
     suggested_text_input("Emergency Contact Name", key="emergency_contact_name", candidates=known_full_names)
-    _bq_suggest_select("Emergency Contact Name", "emergency_contact_name")
 else:
     st.text_input("Emergency Contact Name", key="emergency_contact_name")
-    _bq_suggest_select("Emergency Contact Name", "emergency_contact_name")
 emergency_contact_name = st.session_state.get("emergency_contact_name", "")
 emergency_contact_number = st.text_input("Emergency Contact Number", key="emergency_contact_number")
 if "known_full_names" in locals() and known_full_names:
     suggested_text_input("Coach Full Name", key="coach_full_name", candidates=known_full_names)
-    _bq_suggest_select("Coach Full Name", "coach_full_name")
 else:
     st.text_input("Coach Full Name", key="coach_full_name")
-    _bq_suggest_select("Coach Full Name", "coach_full_name")
 coach_full_name = st.session_state.get("coach_full_name", "")
 parq = st.selectbox("PAR-Q completed?", ["Y", "N"], key="parq")
 
