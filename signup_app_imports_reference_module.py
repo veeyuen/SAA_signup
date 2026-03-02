@@ -239,25 +239,63 @@ with st.sidebar:
 st.subheader("Athlete entry")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
-c1, c2 = st.columns(2)
+c1, c2, c3 = st.columns(3)
 with c1:
-    # Full name (First + Last) with optional suggestions
-    if ("known_full_names" in locals() and known_full_names and st.session_state.get("name_source") == "CSV"):
-        suggested_text_input("Name (First + Last)", key="name", candidates=known_full_names)
+    if "known_last_names" in locals() and known_last_names:
+        suggested_text_input("Last Name", key="last_name", candidates=known_last_names)
     else:
-        st.text_input("Name (First + Last)", key="name")
-    _bq_suggest_select("Name", "name")
+        st.text_input("Last Name", key="last_name")
 with c2:
+    if "known_first_names" in locals() and known_first_names:
+        suggested_text_input("First Name", key="first_name", candidates=known_first_names)
+    else:
+        st.text_input("First Name", key="first_name")
+with c3:
     gender = st.selectbox("Gender", ["M", "F"], key="gender")
-full_name = (st.session_state.get("name", "") or "").strip()
-name_parts = [p for p in full_name.split() if p]
-# Split rule: last token is Last Name; everything before is First Name (can include middle names)
-derived_first_name = " ".join(name_parts[:-1]).strip() if len(name_parts) >= 2 else ""
-derived_last_name = name_parts[-1].strip() if len(name_parts) >= 2 else ""
-if full_name and len(name_parts) >= 2:
-    st.caption(f"Parsed: **First Name** = {derived_first_name} | **Last Name** = {derived_last_name}")
-elif full_name:
-    st.caption("Parsed: please enter at least 2 words (First + Last).")
+
+last_name = st.session_state.get("last_name", "")
+first_name = st.session_state.get("first_name", "")
+
+# Combined name (First + Last) — additional field (read-only)
+combined_name = f"{(first_name or '').strip()} {(last_name or '').strip()}".strip()
+st.text_input("Name (combined)", value=combined_name, disabled=True)
+
+# Full-name match selector (uses CSV list or BigQuery, depending on sidebar setting)
+search_text = (combined_name or first_name or last_name or "").strip()
+if len(search_text) >= 2:
+    matches = []
+    if st.session_state.get("name_source") == "BigQuery":
+        bq_project = (st.session_state.get("bq_project", "") or "").strip()
+        bq_dataset = (st.session_state.get("bq_dataset", "") or "").strip()
+        bq_table = (st.session_state.get("bq_table", "") or "").strip()
+        bq_column = (st.session_state.get("bq_column", "NAME") or "NAME").strip()
+        if bq_project and bq_dataset and bq_table and bq_column:
+            try:
+                matches = bq_name_matches(search_text, project=bq_project, dataset=bq_dataset, table=bq_table, column=bq_column, limit=25)
+            except Exception as e:
+                st.warning(f"BigQuery name suggestions error: {e}")
+    elif st.session_state.get("name_source") == "CSV":
+        if "known_full_names" in locals() and known_full_names:
+            q = search_text.casefold()
+            matches = [n for n in known_full_names if q in str(n).casefold()]
+            # de-dup while preserving order
+            seen = set()
+            matches = [m for m in matches if not (m.casefold() in seen or seen.add(m.casefold()))]
+            matches = matches[:25]
+
+    if matches:
+        sel_key = "athlete_name_match"
+        options = ["(keep typed)"] + matches
+        chosen = st.selectbox("Select From List of Matches :", options=options, key=sel_key)
+        if chosen and chosen != "(keep typed)":
+            parts = [p for p in str(chosen).strip().split() if p]
+            if len(parts) >= 2:
+                st.session_state["first_name__pending"] = " ".join(parts[:-1]).strip()
+                st.session_state["last_name__pending"] = parts[-1].strip()
+                st.session_state[f"{sel_key}__pending"] = "(keep typed)"
+                st.rerun()
+            else:
+                st.warning("Selected name does not contain at least 2 words (First + Last).")
 
 c4, c5, c6 = st.columns(3)
 birth_date = c4.date_input("Birth Date", value=None, key="birth_date")
@@ -317,7 +355,7 @@ parq = st.selectbox("PAR-Q completed?", ["Y", "N"], key="parq")
 
 ic_last4_norm = normalize_ic_last4(ic_last4)
 email_norm = normalize_email(email)
-unique_id = compute_unique_id(derived_first_name, ic_last4_norm, birth_date) if birth_date else ""
+unique_id = compute_unique_id(first_name, ic_last4_norm, birth_date) if birth_date else ""
 st.caption(f"Unique ID (auto): **{unique_id or '—'}**")
 
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
@@ -326,7 +364,8 @@ waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", 
 if st.button("Add entry", type="primary"):
     missing = []
     for k, v in [
-        ("Name", full_name),
+        ("Last Name", last_name),
+        ("First Name", first_name),
         ("Birth Date", birth_date),
         ("IC last 4", ic_last4),
         ("Email", email),
@@ -339,8 +378,6 @@ if st.button("Add entry", type="primary"):
         st.error("Please tick the waiver acknowledgement.")
     elif missing:
         st.error("Missing: " + ", ".join(missing))
-    elif full_name and len(name_parts) < 2:
-        st.error("Name must contain at least 2 words (First + Last).")
     elif not is_valid_email(email_norm):
         st.error("Please enter a valid email address (e.g., name@example.com).")
     elif not is_valid_ic_last4(ic_last4_norm):
@@ -350,9 +387,9 @@ if st.button("Add entry", type="primary"):
     else:
         event_code = dict(event_opts).get(event_name, "")
         st.session_state.entries.append({
-            "name": full_name,
-            "last_name": derived_last_name,
-            "first_name": derived_first_name,
+            "name": combined_name,
+            "last_name": (last_name or "").strip(),
+            "first_name": (first_name or "").strip(),
             "gender": gender,
             "birth_date": birth_date,
             "ic_last4": ic_last4_norm,
