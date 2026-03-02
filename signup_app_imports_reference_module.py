@@ -161,8 +161,8 @@ def _bq_suggest_select(label: str, key: str, *, limit: int = 25, min_chars: int 
         st.rerun()
 
 # ---------------- UI ----------------
-st.set_page_config(page_title="Athletic Meet Signup", layout="wide")
-st.title("Athletic Meet Signup")
+st.set_page_config(page_title="Athlete Signup Form", layout="wide")
+st.title("Athlete Signup Form")
 
 def _apply_pending_text_updates():
     """Apply any pending text updates BEFORE widgets are instantiated."""
@@ -239,7 +239,7 @@ with st.sidebar:
     known_first_names = unique_preserve([n.split()[0] for n in known_full_names if str(n).strip()])
     known_last_names = unique_preserve([n.split()[-1] for n in known_full_names if str(n).strip()])
 
-st.subheader("Athlete Registration Form")
+#st.subheader("Athlete Registration Form")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
 c1, c2, c3, c4 = st.columns(4)
