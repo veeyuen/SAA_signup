@@ -102,6 +102,8 @@ def suggested_text_input(
             key=sel_key,
         )
         if chosen and chosen != "(keep typed)":
-            st.session_state[key] = chosen
+            # Avoid modifying the widget key after it is instantiated.
+            # Store a pending update, applied at the top of the next rerun.
+            st.session_state[f"{key}__pending"] = chosen
             st.session_state[sel_key] = "(keep typed)"
             st.rerun()
