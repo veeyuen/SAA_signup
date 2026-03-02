@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from name_suggestions import suggested_text_input, unique_preserve
-from bigquery_names import bq_name_matches, bq_person_matches
+from name_suggestions_v3 import suggested_text_input, unique_preserve
+from bigquery_names_v2 import bq_name_matches, bq_person_matches
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -446,8 +446,10 @@ if st.button("Add entry", type="primary"):
     else:
         event_code = dict(event_opts).get(event_name, "")
         st.session_state.entries.append({
+            "name": combined_name,
             "last_name": (last_name or "").strip(),
             "first_name": (first_name or "").strip(),
+            "other_name": (other_name or "").strip(),
             "gender": gender,
             "birth_date": birth_date,
             "ic_last4": ic_last4_norm,
@@ -466,6 +468,28 @@ if st.button("Add entry", type="primary"):
             "parq": parq,
         })
         st.success("Entry added.")
+
+        # Auto-clear form fields for the next entry (use __pending to avoid Streamlit widget-state mutation errors)
+        for _k, _v in {
+            "last_name": "",
+            "first_name": "",
+            "other_name": "",
+            "birth_date": None,
+            "ic_last4": "",
+            "contact_number": "",
+            "email": "",
+            "season_best": "",
+            "emergency_contact_name": "",
+            "emergency_contact_number": "",
+            "coach_full_name": "",
+            "waiver_ok": False,
+            # Clear any database-driven combined-name override
+            "db_name_override": "",
+            # Reset match selector (if present)
+            "athlete_name_match": "(keep typed)",
+        }.items():
+            st.session_state[f"{_k}__pending"] = _v
+        st.rerun()
 
 st.subheader("Current entries")
 entries_df = pd.DataFrame(st.session_state.entries)
