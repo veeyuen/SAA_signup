@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from name_suggestions import suggested_text_input, unique_preserve
-from bigquery_names import bq_name_matches, bq_person_matches
+from name_suggestions_v3 import suggested_text_input, unique_preserve
+from bigquery_names_v2 import bq_name_matches, bq_person_matches
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -87,7 +87,10 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     ws["A4"].value = "Charge Code"
     ws["B4"].value = header_info.get("charge_code", "")
 
-    header_row = 6
+    ws["A5"].value = "P/O to be sent"
+    ws["B5"].value = header_info.get("po_to_be_sent", "")
+
+    header_row = 7
     for c, h in enumerate(ENTRY_HEADERS, start=1):
         ws.cell(header_row, c).value = h
 
@@ -196,6 +199,7 @@ with st.sidebar:
         _bq_suggest_select("Billing contact name", "billing_name")
     billing_email = st.text_input("Billing email", value="", key="billing_email")
     charge_code = st.text_input("Charge code (optional)", value="", key="charge_code")
+    po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], horizontal=True, key="po_to_be_sent")
 
     if billing_email and not is_valid_email(billing_email):
         st.warning("Billing email looks invalid. Please double-check it.")
@@ -565,6 +569,7 @@ if not entries_df.empty:
         "billing_name": billing_name,
         "billing_email": billing_email,
         "charge_code": charge_code,
+        "po_to_be_sent": po_to_be_sent,
     }
 
     xlsx_bytes = export_entries_to_excel(header_info, entries_df)
