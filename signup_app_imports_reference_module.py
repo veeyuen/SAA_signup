@@ -557,6 +557,30 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
 
 st.subheader("Current entries")
 entries_df = pd.DataFrame(st.session_state.entries)
+
+# Ensure these columns exist even for entries added before the latest schema updates
+for _col, _default in {
+    'charge_code': '',
+    'po_to_be_sent': '',
+    'event': '',
+}.items():
+    if _col not in entries_df.columns:
+        entries_df[_col] = _default
+
+# Display key columns first (others will still be available)
+preferred_cols = [
+    'team_name', 'team_code', 'charge_code', 'po_to_be_sent',
+    'name', 'first_name', 'other_name', 'last_name',
+    'gender', 'birth_date', 'ic_last4', 'unique_id',
+    'event_division', 'event', 'event_code',
+    'season_best', 'parq',
+    'contact_number', 'email',
+    'emergency_contact_name', 'emergency_contact_number',
+    'coach_full_name', 'nationality'
+]
+cols = [c for c in preferred_cols if c in entries_df.columns] + [c for c in entries_df.columns if c not in preferred_cols]
+entries_df = entries_df[cols]
+
 st.dataframe(entries_df, use_container_width=True)
 
 st.markdown('### Summary')
