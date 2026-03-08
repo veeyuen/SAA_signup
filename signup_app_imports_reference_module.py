@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from name_suggestions import suggested_text_input, unique_preserve
-from bigquery_names import bq_name_matches, bq_person_matches
+from name_suggestions_v3 import suggested_text_input, unique_preserve
+from bigquery_names_v2 import bq_name_matches, bq_person_matches
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -161,8 +161,8 @@ def _bq_suggest_select(label: str, key: str, *, limit: int = 25, min_chars: int 
         st.rerun()
 
 # ---------------- UI ----------------
-st.set_page_config(page_title="Athlete Signup Form", layout="wide")
-st.title("Athlete Signup Form")
+st.set_page_config(page_title="Allcomers Meet Signup", layout="wide")
+st.title("Allcomers Meet Signup")
 
 def _apply_pending_text_updates():
     """Apply any pending text updates BEFORE widgets are instantiated."""
@@ -239,7 +239,7 @@ with st.sidebar:
     known_first_names = unique_preserve([n.split()[0] for n in known_full_names if str(n).strip()])
     known_last_names = unique_preserve([n.split()[-1] for n in known_full_names if str(n).strip()])
 
-#st.subheader("Athlete Registration Form")
+st.subheader("Athlete entry")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
 c1, c2, c3, c4 = st.columns(4)
@@ -265,6 +265,12 @@ other_name = st.session_state.get("other_name", "")
 # Combined name (display)
 typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
 db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
+
+# Live validation: name presence (either First+Last typed, or selected via matches -> db_name_override)
+name_ok = (bool((first_name or '').strip()) and bool((last_name or '').strip())) or bool(db_name_override)
+if not name_ok:
+    st.warning("Enter First Name and Last Name, or select a match from the list.")
+
 
 # Full-name match selector (uses CSV list or BigQuery, depending on sidebar setting)
 search_text = (typed_full_name or first_name or last_name or "").strip()
@@ -361,12 +367,44 @@ if db_name_override:
 
 c4, c5, c6 = st.columns(3)
 birth_date = c4.date_input("Birth Date", value=None, key="birth_date")
+
+# Live validation: birth date
+birth_ok = birth_date is not None
+if not birth_ok:
+    st.warning("Birth Date is required.")
+
 ic_last4 = c5.text_input("IC Number (last 4)", key="ic_last4")
+
+# Live validation: IC last-4 (3 digits + 1 letter)
+ic_last4_norm = normalize_ic_last4(ic_last4)
+ic_ok = True
+if ic_last4_norm:
+    ic_ok = is_valid_ic_last4(ic_last4_norm)
+    if not ic_ok:
+        st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
+else:
+    st.caption("IC format: 3 digits + 1 letter (e.g., 123A)")
+
 nationality = c6.selectbox("Nationality", COUNTRIES, index=0 if COUNTRIES else 0, key="nationality")
 
 c7, c8 = st.columns(2)
 contact_number = c7.text_input("Contact Number", key="contact_number")
+
+# Live validation: contact number
+contact_ok = bool((contact_number or '').strip())
+if not contact_ok:
+    st.warning("Contact Number is required.")
+
 email = c8.text_input("Email", key="email")
+
+# Live validation: email
+email_norm = normalize_email(email)
+email_ok = True
+if email_norm:
+    email_ok = is_valid_email(email_norm)
+    if not email_ok:
+        st.error("Please enter a valid email address (e.g., name@example.com).")
+
 
 c9, c10 = st.columns(2)
 # Per-entry team selection; default from sidebar if present
@@ -397,6 +435,12 @@ else:
 
 event_name = c12.selectbox("Event", event_names if event_names else ["(no events)"], key="event_name")
 
+# Live validation: event selection availability
+event_ok = bool(event_opts) and event_name not in (None, '', '(no events)')
+if not event_ok:
+    st.warning("Please select an event (none available for this Gender + Division).")
+
+
 season_best = st.text_input("Season Best (optional)", key="season_best")
 if "known_full_names" in locals() and known_full_names:
     suggested_text_input("Emergency Contact Name", key="emergency_contact_name", candidates=known_full_names)
@@ -422,8 +466,12 @@ st.caption(f"Unique ID (auto): **{unique_id or '—'}**")
 
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
 
+# Gate Add entry button (live checks)
+ready_to_add = bool(waiver_ok) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(event_ok)
+
+
 # Add entry button
-if st.button("Add entry", type="primary"):
+if st.button("Add entry", type="primary", disabled=not ready_to_add):
     missing = []
     for k, v in [
         ("Birth Date", birth_date),
