@@ -366,26 +366,31 @@ if db_name_override:
 
 
 c4, c5, c6 = st.columns(3)
-birth_date = c4.date_input("Birth Date", value=None, key="birth_date")
+with c4:
+    birth_date = st.date_input("Birth Date", value=None, key="birth_date")
+    # Live validation: birth date
+    birth_ok = birth_date is not None
+    if not birth_ok:
+        st.warning("Birth Date is required.")
 
-# Live validation: birth date
-birth_ok = birth_date is not None
-if not birth_ok:
-    st.warning("Birth Date is required.")
+with c5:
+    ic_last4 = st.text_input("IC Number (last 4)", key="ic_last4")
+    # Live validation: IC last-4 (3 digits + 1 letter)
+    ic_last4_norm = normalize_ic_last4(ic_last4)
+    ic_ok = True
+    if not ic_last4_norm:
+        ic_ok = False
+        st.caption("IC format: 3 digits + 1 letter (e.g., 123A)")
+    elif len(ic_last4_norm) < 4:
+        ic_ok = False
+        st.warning("IC last 4 is incomplete (e.g., 123A).")
+    else:
+        ic_ok = is_valid_ic_last4(ic_last4_norm)
+        if not ic_ok:
+            st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
 
-ic_last4 = c5.text_input("IC Number (last 4)", key="ic_last4")
-
-# Live validation: IC last-4 (3 digits + 1 letter)
-ic_last4_norm = normalize_ic_last4(ic_last4)
-ic_ok = True
-if ic_last4_norm:
-    ic_ok = is_valid_ic_last4(ic_last4_norm)
-    if not ic_ok:
-        st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
-else:
-    st.caption("IC format: 3 digits + 1 letter (e.g., 123A)")
-
-nationality = c6.selectbox("Nationality", COUNTRIES, index=0 if COUNTRIES else 0, key="nationality")
+with c6:
+    nationality = st.selectbox("Nationality", COUNTRIES, index=0 if COUNTRIES else 0, key="nationality")
 
 c7, c8 = st.columns(2)
 contact_number = c7.text_input("Contact Number", key="contact_number")
