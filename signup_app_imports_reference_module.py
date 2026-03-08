@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from name_suggestions import suggested_text_input, unique_preserve
-from bigquery_names import bq_name_matches, bq_person_matches
+from name_suggestions_v3 import suggested_text_input, unique_preserve
+from bigquery_names_v2 import bq_name_matches, bq_person_matches
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -520,6 +520,8 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "email": email_norm,
             "team_code": team_code,
             "team_name": team_name_row,
+            "charge_code": charge_code,
+            "po_to_be_sent": po_to_be_sent,
             "event": event_name,
             "event_code": event_code,
             "event_division": int(event_division),
@@ -556,6 +558,15 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
 st.subheader("Current entries")
 entries_df = pd.DataFrame(st.session_state.entries)
 st.dataframe(entries_df, use_container_width=True)
+
+st.markdown('### Summary')
+total_entries = len(entries_df)
+st.write(f"Total entries: **{total_entries}**")
+if not entries_df.empty and 'team_name' in entries_df.columns:
+    counts = entries_df['team_name'].fillna('').replace('', '(Unknown)').value_counts().reset_index()
+    counts.columns = ['School/Club', 'Entries']
+    st.dataframe(counts, use_container_width=True)
+
 
 cA, cB, cC = st.columns([1, 1, 2])
 with cA:
