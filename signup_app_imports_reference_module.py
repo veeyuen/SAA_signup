@@ -185,6 +185,7 @@ if "entries" not in st.session_state:
 
 with st.sidebar:
     st.header("Team / Billing")
+    po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], index=0, horizontal=True, key="po_to_be_sent")
     default_team_code = st.selectbox("Default Team Code (optional)", [""] + TEAM_CODES, index=0, key="default_team_code")
     default_team_name = get_team_name(default_team_code) if default_team_code else ""
 
@@ -199,7 +200,6 @@ with st.sidebar:
         _bq_suggest_select("Billing contact name", "billing_name")
     billing_email = st.text_input("Billing email", value="", key="billing_email")
     charge_code = st.text_input("Charge code (optional)", value="", key="charge_code")
-    po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], horizontal=True, key="po_to_be_sent")
 
     if billing_email and not is_valid_email(billing_email):
         st.warning("Billing email looks invalid. Please double-check it.")
