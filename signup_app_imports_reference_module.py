@@ -15,6 +15,8 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
+from google_sheets_roster import load_roster, parse_dob, last4_from_nric
+
 
 from reference_lists import (
     ENTRY_HEADERS,
