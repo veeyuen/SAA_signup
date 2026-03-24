@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -120,48 +120,8 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     return bio.getvalue()
 
 
-def _bq_suggest_select(label: str, key: str, *, limit: int = 25, min_chars: int = 2):
-    """If BigQuery suggestions are enabled, show a selectbox of matches for current input."""
-    if not (st.session_state.get("name_source") == "BigQuery"):
-        return
-    bq_project = (st.session_state.get("bq_project", "") or "").strip()
-    bq_dataset = (st.session_state.get("bq_dataset", "") or "").strip()
-    bq_table = (st.session_state.get("bq_table", "") or "").strip()
-    bq_column = (st.session_state.get("bq_column", "NAME") or "NAME").strip()
-    if not (bq_project and bq_dataset and bq_table and bq_column):
-        return
 
-    text = (st.session_state.get(key, "") or "").strip()
-    if len(text) < int(min_chars):
-        return
-
-    try:
-        matches = bq_name_matches(
-            text,
-            project=bq_project,
-            dataset=bq_dataset,
-            table=bq_table,
-            column=bq_column,
-            limit=int(limit),
-        )
-    except Exception as e:
-        st.warning(f"BigQuery name suggestions error: {e}")
-        return
-
-    if not matches:
-        return
-
-    sel_key = f"{key}__bq_suggestion"
-    options = ["(keep typed)"] + matches
-    chosen = st.selectbox("Select From List of Matches :", options=options, key=sel_key)
-    if chosen and chosen != "(keep typed)":
-        # Avoid modifying the widget key after it is instantiated.
-        st.session_state[f"{key}__pending"] = chosen
-        # Reset suggestion selectbox on next rerun (must be before widget instantiation).
-        st.session_state[f"{sel_key}__pending"] = "(keep typed)"
-        st.rerun()
-
-# ---------------- UI ----------------
+# ---------------- UI
 st.set_page_config(page_title="Allcomers Meet Signup", layout="wide")
 st.title("Allcomers Meet Signup")
 
@@ -183,88 +143,40 @@ if "entries" not in st.session_state:
 
 with st.sidebar:
     st.header("Team / Billing")
-    # Roster name suggestions (Google Sheet)
-    st.subheader("Roster search")
-    roster_sheet_url = st.text_input("Roster Google Sheet URL", value=st.secrets.get("ROSTER_SHEET_URL", ""), key="roster_sheet_url")
-    roster_worksheet = st.text_input("Worksheet (optional)", value=st.secrets.get("ROSTER_WORKSHEET", ""), key="roster_worksheet")
-    use_roster = st.toggle("Enable roster search", value=True, key="use_roster")
-    if st.button("Refresh roster cache"):
-        load_roster.clear()
-        st.toast("Roster cache cleared.")
     po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], index=0, horizontal=True, key="po_to_be_sent")
     default_team_code = st.selectbox("Default Team Code (optional)", [""] + TEAM_CODES, index=0, key="default_team_code")
     default_team_name = get_team_name(default_team_code) if default_team_code else ""
 
     team_name_header = st.text_input("Team Name (for header)", value=default_team_name, key="team_name_header")
-    # Billing contact name (with optional suggestions)
-    if "known_full_names" in locals() and known_full_names:
-        suggested_text_input("Billing contact name", key="billing_name", candidates=known_full_names)
-        billing_name = st.session_state.get("billing_name", "")
-        _bq_suggest_select("Billing contact name", "billing_name")
-    else:
-        billing_name = st.text_input("Billing contact name", value="", key="billing_name")
-        _bq_suggest_select("Billing contact name", "billing_name")
+    billing_name = st.text_input("Billing contact name", value="", key="billing_name")
     billing_email = st.text_input("Billing email", value="", key="billing_email")
     charge_code = st.text_input("Charge code (optional)", value="", key="charge_code")
 
     if billing_email and not is_valid_email(billing_email):
         st.warning("Billing email looks invalid. Please double-check it.")
-
-    # Optional: load known names for suggestions
     st.divider()
-    st.subheader("Name suggestions (optional)")
-    name_source = st.radio("Source: CSV or BigQuery", options=["Off", "CSV", "BigQuery"], horizontal=True, key="name_source")
-    bq_project = st.text_input("BigQuery Project (for suggestions)", value=(st.secrets.get("bq_project", "") if hasattr(st, "secrets") else ""), key="bq_project")
-    bq_dataset = st.text_input("BigQuery Dataset", value=(st.secrets.get("bq_dataset", "") if hasattr(st, "secrets") else ""), key="bq_dataset")
-    bq_table = st.text_input("BigQuery Table", value=(st.secrets.get("bq_table", "") if hasattr(st, "secrets") else ""), key="bq_table")
-    bq_column = st.text_input("BigQuery Column", value=(st.secrets.get("bq_column", "name") if hasattr(st, "secrets") else "name"), key="bq_column")
-    bq_first_col = st.text_input("BigQuery First Name Column", value=(st.secrets.get("bq_first_col", "first_name") if hasattr(st, "secrets") else "first_name"), key="bq_first_col")
-    bq_last_col = st.text_input("BigQuery Last Name Column", value=(st.secrets.get("bq_last_col", "last_name") if hasattr(st, "secrets") else "last_name"), key="bq_last_col")
-    bq_other_col = st.text_input("BigQuery Other Name Column", value=(st.secrets.get("bq_other_col", "other_name") if hasattr(st, "secrets") else "other_name"), key="bq_other_col")
-    st.caption("Tip: Store bq_project/bq_dataset/bq_table/bq_column and gcp_service_account in secrets.toml for deployment.")
-
-    uploaded_names = None
-    if name_source == "CSV":
-        uploaded_names = st.file_uploader(
-        "Upload name list CSV (expects a column named NAME, or uses the first column)",
-        type=["csv"],
-        key="uploaded_names_csv",
+    st.subheader("Roster search (Google Sheet)")
+    roster_sheet_url = st.text_input(
+        "Roster Google Sheet URL",
+        value=st.secrets.get("ROSTER_SHEET_URL", "https://docs.google.com/spreadsheets/d/1PnTKatJGW3Eazy6YpDqnRHVZrVLRvK9rA_vBIVXKfUU/edit?usp=sharing"),
+        key="roster_sheet_url",
     )
-
-    known_full_names = []  # from CSV (if selected)
-    bq_enabled = (name_source == "BigQuery" and bq_project and bq_dataset and bq_table and bq_column)
-
-    if uploaded_names is not None:
-        try:
-            df_names = pd.read_csv(uploaded_names)
-            col = "NAME" if "NAME" in df_names.columns else df_names.columns[0]
-            known_full_names = unique_preserve(df_names[col].astype(str).tolist())
-        except Exception:
-            st.warning("Could not read CSV for name suggestions.")
-            known_full_names = []  # from CSV (if selected)
-    bq_enabled = (name_source == "BigQuery" and bq_project and bq_dataset and bq_table and bq_column)
-
-
-    # Derive simple first/last name pools (best-effort; useful for your split fields)
-    known_first_names = unique_preserve([n.split()[0] for n in known_full_names if str(n).strip()])
-    known_last_names = unique_preserve([n.split()[-1] for n in known_full_names if str(n).strip()])
+    roster_worksheet = st.text_input("Worksheet (optional)", value=st.secrets.get("ROSTER_WORKSHEET", ""), key="roster_worksheet")
+    use_roster = st.toggle("Enable roster search", value=True, key="use_roster")
+    if st.button("Refresh roster cache"):
+        load_roster.clear()
+        st.toast("Roster cache cleared.")
 
 st.subheader("Athlete entry")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
 c1, c2, c3, c4 = st.columns(4)
 with c1:
-    if "known_last_names" in locals() and known_last_names:
-        suggested_text_input("Last Name", key="last_name", candidates=known_last_names)
-    else:
-        st.text_input("Last Name", key="last_name")
+    last_name = st.text_input("Last Name", key="last_name")
 with c2:
-    if "known_first_names" in locals() and known_first_names:
-        suggested_text_input("First Name", key="first_name", candidates=known_first_names)
-    else:
-        st.text_input("First Name", key="first_name")
+    first_name = st.text_input("First Name", key="first_name")
 with c3:
-    st.text_input("Other Name (optional)", key="other_name")
+    other_name = st.text_input("Other Name (optional)", key="other_name")
 with c4:
     gender = st.selectbox("Gender", ["M", "F"], key="gender")
 
@@ -272,11 +184,28 @@ last_name = st.session_state.get("last_name", "")
 first_name = st.session_state.get("first_name", "")
 other_name = st.session_state.get("other_name", "")
 
-# Roster match selector (Google Sheet) — selects a roster row and auto-fills fields
+last_name = st.session_state.get("last_name", "")
+first_name = st.session_state.get("first_name", "")
+other_name = st.session_state.get("other_name", "")
+
+# Combined name (display)
+typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
+db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
+
+# Live validation: name presence (either First+Last typed, or selected via matches -> db_name_override)
+name_ok = (bool((first_name or '').strip()) and bool((last_name or '').strip())) or bool(db_name_override)
+if not name_ok:
+    st.warning("Enter First Name and Last Name, or select a match from the list.")
+
+
+# Full-name match selector (Google Sheet roster)
 search_text = (" ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()])).strip()
-if use_roster and roster_sheet_url and len(search_text) >= 2:
+if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_url") or "").strip() and len(search_text) >= 2:
     try:
-        roster_rows = load_roster(roster_sheet_url, worksheet=(roster_worksheet or None))
+        roster_rows = load_roster(
+            st.session_state.get("roster_sheet_url", ""),
+            worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
+        )
     except Exception as e:
         st.warning(f"Roster load error: {e}")
         roster_rows = []
@@ -324,9 +253,10 @@ if use_roster and roster_sheet_url and len(search_text) >= 2:
             uid = str(r.get("UNIQUE_ID", "") or "").strip()
             tcode = str(r.get("TEAM_CODE", "") or "").strip()
 
+            # Map roster OTHER_NAME -> First Name (given names)
             st.session_state["first_name__pending"] = on
             st.session_state["last_name__pending"] = ln
-            st.session_state["other_name__pending"] = ""  # avoid split/mixups
+            st.session_state["other_name__pending"] = ""
 
             st.session_state["ic_last4__pending"] = last4_from_nric(nric)
             st.session_state["birth_date__pending"] = dob
@@ -336,100 +266,6 @@ if use_roster and roster_sheet_url and len(search_text) >= 2:
                 st.session_state["team_code__pending"] = tcode
 
             st.session_state["athlete_roster_match__pending"] = "(keep typed)"
-            st.rerun()
-
-
-# Combined name (display)
-typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
-db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
-
-# Live validation: name presence (either First+Last typed, or selected via matches -> db_name_override)
-name_ok = (bool((first_name or '').strip()) and bool((last_name or '').strip())) or bool(db_name_override)
-if not name_ok:
-    st.warning("Enter First Name and Last Name, or select a match from the list.")
-
-
-# Full-name match selector (uses CSV list or BigQuery, depending on sidebar setting)
-search_text = (typed_full_name or first_name or last_name or "").strip()
-if len(search_text) >= 2:
-    matches_rows = []
-    matches_labels = []
-    if st.session_state.get("name_source") == "BigQuery":
-        bq_project = (st.session_state.get("bq_project", "") or "").strip()
-        bq_dataset = (st.session_state.get("bq_dataset", "") or "").strip()
-        bq_table = (st.session_state.get("bq_table", "") or "").strip()
-        bq_name_col = (st.session_state.get("bq_column", "name") or "name").strip()
-        bq_first_col = (st.session_state.get("bq_first_col", "first_name") or "first_name").strip()
-        bq_last_col = (st.session_state.get("bq_last_col", "last_name") or "last_name").strip()
-        bq_other_col = (st.session_state.get("bq_other_col", "other_name") or "other_name").strip()
-        if bq_project and bq_dataset and bq_table and bq_name_col:
-            try:
-                matches_rows = bq_person_matches(
-                    search_text,
-                    project=bq_project,
-                    dataset=bq_dataset,
-                    table=bq_table,
-                    name_col=bq_name_col,
-                    first_col=bq_first_col,
-                    last_col=bq_last_col,
-                    other_col=bq_other_col,
-                    limit=25,
-                )
-            except Exception as e:
-                st.warning(f"BigQuery name suggestions error: {e}")
-    elif st.session_state.get("name_source") == "CSV":
-        if "known_full_names" in locals() and known_full_names:
-            q = search_text.casefold()
-            tmp = [n for n in known_full_names if q in str(n).casefold()]
-            seen = set()
-            tmp2 = []
-            for t in tmp:
-                k = str(t).casefold()
-                if k in seen:
-                    continue
-                seen.add(k)
-                tmp2.append(str(t))
-            matches_labels = tmp2[:25]
-
-    # Build labels for BigQuery rows
-    if matches_rows:
-        for r in matches_rows:
-            label = (r.get("name") or "").strip()
-            if not label:
-                label = " ".join([p for p in [r.get("first_name",""), r.get("other_name",""), r.get("last_name","")] if (p or "").strip()]).strip()
-            matches_labels.append(label)
-
-    if matches_labels:
-        sel_key = "athlete_name_match"
-        options = ["(keep typed)"] + list(range(len(matches_labels)))
-        chosen = st.selectbox(
-            "Select From List of Matches :",
-            options=options,
-            key=sel_key,
-            format_func=lambda x: "(keep typed)" if x == "(keep typed)" else matches_labels[int(x)],
-        )
-        if chosen != "(keep typed)":
-            idx = int(chosen)
-            # If we have structured BigQuery rows, prefer their fields.
-            if matches_rows and idx < len(matches_rows):
-                r = matches_rows[idx]
-                fn = (r.get("first_name") or "").strip()
-                ln = (r.get("last_name") or "").strip()
-                on = (r.get("other_name") or "").strip()
-                nm = (r.get("name") or matches_labels[idx] or "").strip()
-                if fn and ln:
-                    st.session_state["first_name__pending"] = fn
-                    st.session_state["last_name__pending"] = ln
-                    st.session_state["other_name__pending"] = on
-                    # Clear any override when we have structured first/last
-                    st.session_state["db_name_override__pending"] = ""
-                else:
-                    # Do NOT split; store name as an override for combined display.
-                    st.session_state["db_name_override__pending"] = nm
-            else:
-                # CSV mode: we only have a name string; do NOT split.
-                st.session_state["db_name_override__pending"] = matches_labels[idx]
-            st.session_state[f"{sel_key}__pending"] = "(keep typed)"
             st.rerun()
 
 
@@ -461,7 +297,6 @@ with c5:
     elif len(ic_last4_norm) < 4:
         ic_ok = False
         st.warning("IC last 4 is incomplete (e.g., 123A).")
-    else:
         ic_ok = is_valid_ic_last4(ic_last4_norm)
         if not ic_ok:
             st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
@@ -512,7 +347,6 @@ event_names = [n for n, _ in event_opts]
 if event_names:
     if st.session_state.get("event_name") not in event_names:
         st.session_state["event_name"] = event_names[0]
-else:
     st.session_state["event_name"] = ""
 
 event_name = c12.selectbox("Event", event_names if event_names else ["(no events)"], key="event_name")
@@ -524,21 +358,9 @@ if not event_ok:
 
 
 season_best = st.text_input("Season Best (optional)", key="season_best")
-if "known_full_names" in locals() and known_full_names:
-    suggested_text_input("Emergency Contact Name", key="emergency_contact_name", candidates=known_full_names)
-    _bq_suggest_select("Emergency Contact Name", "emergency_contact_name")
-else:
-    st.text_input("Emergency Contact Name", key="emergency_contact_name")
-    _bq_suggest_select("Emergency Contact Name", "emergency_contact_name")
-emergency_contact_name = st.session_state.get("emergency_contact_name", "")
+emergency_contact_name = st.text_input("Emergency Contact Name", key="emergency_contact_name")
 emergency_contact_number = st.text_input("Emergency Contact Number", key="emergency_contact_number")
-if "known_full_names" in locals() and known_full_names:
-    suggested_text_input("Coach Full Name", key="coach_full_name", candidates=known_full_names)
-    _bq_suggest_select("Coach Full Name", "coach_full_name")
-else:
-    st.text_input("Coach Full Name", key="coach_full_name")
-    _bq_suggest_select("Coach Full Name", "coach_full_name")
-coach_full_name = st.session_state.get("coach_full_name", "")
+coach_full_name = st.text_input("Coach Full Name", key="coach_full_name")
 parq = st.selectbox("PAR-Q completed?", ["Y", "N"], key="parq")
 
 ic_last4_norm = normalize_ic_last4(ic_last4)
@@ -577,8 +399,6 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
     elif not event_opts or not event_names or event_name == "(no events)":
         st.error("No events available for that Gender + Division combination.")
-
-    else:
         event_code = dict(event_opts).get(event_name, "")
         st.session_state.entries.append({
             "name": combined_name,
