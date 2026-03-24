@@ -39,10 +39,19 @@ def extract_sheet_id(url_or_id: str) -> str:
     return s
 
 
+
+def get_service_account_email() -> str:
+    """Return the service account email from secrets (if present) for sharing the sheet."""
+    try:
+        sa = dict(st.secrets.get("gcp_service_account", {}))
+        return str(sa.get("client_email", "") or "")
+    except Exception:
+        return ""
+
 @st.cache_resource(show_spinner=False)
 def _get_gspread_client():
     if gspread is None or service_account is None:
-        raise RuntimeError("gspread/google-auth not installed. Add 'gspread' and 'google-auth' to requirements.txt")
+        raise RuntimeError("Missing dependencies: install 'gspread' and 'google-auth' (add to requirements.txt).")
 
     if not (hasattr(st, "secrets") and "gcp_service_account" in st.secrets and st.secrets["gcp_service_account"]):
         raise RuntimeError("Missing st.secrets['gcp_service_account'] for Google Sheets access.")
