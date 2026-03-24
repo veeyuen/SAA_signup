@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 
-from reference_lists_final import (
+from reference_lists import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
