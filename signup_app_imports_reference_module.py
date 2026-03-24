@@ -15,10 +15,8 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from name_suggestions import suggested_text_input, unique_preserve
-from bigquery_names import bq_name_matches, bq_person_matches
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -185,6 +183,14 @@ if "entries" not in st.session_state:
 
 with st.sidebar:
     st.header("Team / Billing")
+    # Roster name suggestions (Google Sheet)
+    st.subheader("Roster search")
+    roster_sheet_url = st.text_input("Roster Google Sheet URL", value=st.secrets.get("ROSTER_SHEET_URL", ""), key="roster_sheet_url")
+    roster_worksheet = st.text_input("Worksheet (optional)", value=st.secrets.get("ROSTER_WORKSHEET", ""), key="roster_worksheet")
+    use_roster = st.toggle("Enable roster search", value=True, key="use_roster")
+    if st.button("Refresh roster cache"):
+        load_roster.clear()
+        st.toast("Roster cache cleared.")
     po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], index=0, horizontal=True, key="po_to_be_sent")
     default_team_code = st.selectbox("Default Team Code (optional)", [""] + TEAM_CODES, index=0, key="default_team_code")
     default_team_name = get_team_name(default_team_code) if default_team_code else ""
@@ -265,6 +271,73 @@ with c4:
 last_name = st.session_state.get("last_name", "")
 first_name = st.session_state.get("first_name", "")
 other_name = st.session_state.get("other_name", "")
+
+# Roster match selector (Google Sheet) — selects a roster row and auto-fills fields
+search_text = (" ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()])).strip()
+if use_roster and roster_sheet_url and len(search_text) >= 2:
+    try:
+        roster_rows = load_roster(roster_sheet_url, worksheet=(roster_worksheet or None))
+    except Exception as e:
+        st.warning(f"Roster load error: {e}")
+        roster_rows = []
+
+    q = search_text.casefold()
+    matches = []
+    for r in roster_rows:
+        ln = str(r.get("LAST_NAME", "") or "")
+        on = str(r.get("OTHER_NAME", "") or "")
+        nm = f"{on} {ln}".strip()
+        if q in ln.casefold() or q in on.casefold() or q in nm.casefold():
+            matches.append(r)
+
+    if matches:
+        labels = []
+        for r in matches[:25]:
+            ln = str(r.get("LAST_NAME", "") or "").strip()
+            on = str(r.get("OTHER_NAME", "") or "").strip()
+            team = str(r.get("TEAM_NAME", "") or "").strip()
+            uid = str(r.get("UNIQUE_ID", "") or "").strip()
+            label = f"{on} {ln}".strip()
+            if team:
+                label += f" — {team}"
+            if uid:
+                label += f" ({uid})"
+            labels.append(label)
+
+        sel_key = "athlete_roster_match"
+        options = ["(keep typed)"] + list(range(len(labels)))
+        chosen = st.selectbox(
+            "Select From List of Matches :",
+            options=options,
+            key=sel_key,
+            format_func=lambda x: "(keep typed)" if x == "(keep typed)" else labels[int(x)],
+        )
+        if chosen != "(keep typed)":
+            idx = int(chosen)
+            r = matches[idx]
+
+            ln = str(r.get("LAST_NAME", "") or "").strip()
+            on = str(r.get("OTHER_NAME", "") or "").strip()
+            nric = str(r.get("NRIC", "") or "").strip()
+            dob = parse_dob(r.get("DOB"))
+            nat = str(r.get("NATIONALITY", "") or "").strip()
+            uid = str(r.get("UNIQUE_ID", "") or "").strip()
+            tcode = str(r.get("TEAM_CODE", "") or "").strip()
+
+            st.session_state["first_name__pending"] = on
+            st.session_state["last_name__pending"] = ln
+            st.session_state["other_name__pending"] = ""  # avoid split/mixups
+
+            st.session_state["ic_last4__pending"] = last4_from_nric(nric)
+            st.session_state["birth_date__pending"] = dob
+            st.session_state["nationality__pending"] = nat
+            st.session_state["unique_id_override__pending"] = uid
+            if tcode:
+                st.session_state["team_code__pending"] = tcode
+
+            st.session_state["athlete_roster_match__pending"] = "(keep typed)"
+            st.rerun()
+
 
 # Combined name (display)
 typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
@@ -470,7 +543,8 @@ parq = st.selectbox("PAR-Q completed?", ["Y", "N"], key="parq")
 
 ic_last4_norm = normalize_ic_last4(ic_last4)
 email_norm = normalize_email(email)
-unique_id = compute_unique_id(first_name, ic_last4_norm, birth_date) if birth_date else ""
+unique_id_override = (st.session_state.get("unique_id_override", "") or "").strip()
+unique_id = unique_id_override or (compute_unique_id(first_name, ic_last4_norm, birth_date) if birth_date else "")
 st.caption(f"Unique ID (auto): **{unique_id or '—'}**")
 
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
