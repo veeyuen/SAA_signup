@@ -15,7 +15,7 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from google_sheets_roster import load_roster, parse_dob, last4_from_nric
+from google_sheets_roster import load_roster, parse_dob, last4_from_nric, get_service_account_email
 
 
 from reference_lists import (
@@ -158,6 +158,13 @@ with st.sidebar:
         st.warning("Billing email looks invalid. Please double-check it.")
     st.divider()
     st.subheader("Roster search (Google Sheet)")
+    st.caption("Expected columns: LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE")
+    _sa_email = get_service_account_email()
+    if _sa_email:
+        st.caption(f"Service account: {_sa_email} (share the sheet with this email)")
+    else:
+        st.caption("Service account email not found in secrets (gcp_service_account.client_email).")
+    test_roster = st.button("Test roster load")
     roster_sheet_url = st.text_input(
         "Roster Google Sheet URL",
         value=st.secrets.get("ROSTER_SHEET_URL", "https://docs.google.com/spreadsheets/d/1PnTKatJGW3Eazy6YpDqnRHVZrVLRvK9rA_vBIVXKfUU/edit?usp=sharing"),
@@ -165,6 +172,17 @@ with st.sidebar:
     )
     roster_worksheet = st.text_input("Worksheet (optional)", value=st.secrets.get("ROSTER_WORKSHEET", ""), key="roster_worksheet")
     use_roster = st.toggle("Enable roster search", value=True, key="use_roster")
+    if test_roster:
+        try:
+            _rows = load_roster(roster_sheet_url, worksheet=((roster_worksheet or "").strip() or None))
+            st.success(f"Roster loaded: {len(_rows)} rows")
+            if _rows:
+                st.write("Columns found:", sorted(list(_rows[0].keys())))
+                st.write("First row preview:", _rows[0])
+        except Exception as e:
+            st.error(f"Roster test failed: {type(e).__name__}: {repr(e)}")
+            import traceback as _tb
+            st.code(_tb.format_exc())
     if st.button("Refresh roster cache"):
         load_roster.clear()
         st.toast("Roster cache cleared.")
@@ -209,7 +227,10 @@ if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_ur
             worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
         )
     except Exception as e:
-        st.warning(f"Roster load error: {e}")
+        st.error(f"Roster load error: {type(e).__name__}: {repr(e)}")
+        with st.expander("Show roster error details"):
+            import traceback as _tb
+            st.code(_tb.format_exc())
         roster_rows = []
 
     q = search_text.casefold()
