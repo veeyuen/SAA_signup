@@ -17,6 +17,7 @@ import streamlit as st
 import datetime as dt
 
 from google_sheets_roster import load_roster, parse_dob, last4_from_nric
+from google_sheets_writer import sync_entries_to_sheet
 
 
 from reference_lists import (
@@ -183,6 +184,23 @@ with st.sidebar:
         st.session_state.pop("roster_cache_rows", None)
         st.toast("Roster cache cleared.")
     st.caption("Sheet columns expected: GENDER, FIRST_NAME, LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE")
+    st.divider()
+    st.subheader("Sync Current Entries to Google Sheet")
+    output_sheet_url = st.text_input(
+        "Output Google Sheet URL",
+        value=st.secrets.get("OUTPUT_SHEET_URL", "https://docs.google.com/spreadsheets/d/11AxxxJkO5CGqCjMg6gyAwW1BlegJ0Wf6G7F60rN8X0g/edit?usp=sharing"),
+        key="output_sheet_url",
+    )
+    output_worksheet = st.text_input("Output worksheet (optional)", value=st.secrets.get("OUTPUT_WORKSHEET", ""), key="output_worksheet")
+    sync_enabled = st.toggle("Enable sync on Add entry", value=True, key="sync_enabled")
+    if st.button("Sync now") and output_sheet_url:
+        try:
+            sync_entries_to_sheet(st.session_state.get("entries", []), sheet_url_or_id=output_sheet_url, worksheet=((output_worksheet or "").strip() or None))
+            st.success("Synced current entries to output sheet.")
+        except Exception as e:
+            import traceback as _tb
+            st.error(f"Sync failed: {type(e).__name__}: {repr(e)}")
+            st.code(_tb.format_exc())
     po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], index=0, horizontal=True, key="po_to_be_sent")
     default_team_code = st.selectbox("Default Team Code (optional)", [""] + TEAM_CODES, index=0, key="default_team_code")
     default_team_name = get_team_name(default_team_code) if default_team_code else ""
@@ -550,6 +568,19 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "parq": parq,
         })
         st.success("Entry added.")
+
+        # Sync "Current entries" to output Google Sheet (optional)
+        if st.session_state.get("sync_enabled") and (st.session_state.get("output_sheet_url") or "").strip():
+            try:
+                sync_entries_to_sheet(
+                    st.session_state.entries,
+                    sheet_url_or_id=st.session_state.get("output_sheet_url", ""),
+                    worksheet=((st.session_state.get("output_worksheet") or "").strip() or None),
+                )
+                st.toast("Synced to output Google Sheet.")
+            except Exception as e:
+                st.warning(f"Output sheet sync failed: {type(e).__name__}: {repr(e)}")
+
 
         # Auto-clear form fields for the next entry (use __pending to avoid Streamlit widget-state mutation errors)
         for _k, _v in {
