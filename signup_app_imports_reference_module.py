@@ -181,7 +181,7 @@ with st.sidebar:
         load_roster.clear()
         st.session_state.pop("roster_cache_rows", None)
         st.toast("Roster cache cleared.")
-    st.caption("Sheet columns expected: LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE")
+    st.caption("Sheet columns expected: FIRST_NAME, LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE")
     po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], index=0, horizontal=True, key="po_to_be_sent")
     default_team_code = st.selectbox("Default Team Code (optional)", [""] + TEAM_CODES, index=0, key="default_team_code")
     default_team_name = get_team_name(default_team_code) if default_team_code else ""
@@ -244,6 +244,7 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
 
     q = search_text.casefold()
     for r in roster_rows:
+        fn = str(r.get("FIRST_NAME", "") or "")
         ln = str(r.get("LAST_NAME", "") or "")
         on = str(r.get("OTHER_NAME", "") or "")
         team = str(r.get("TEAM_NAME", "") or "")
@@ -252,8 +253,9 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
         # Match on name/team/uid/nric(last4) to help disambiguation
         if (
             q in ln.casefold()
+            or q in fn.casefold()
             or q in on.casefold()
-            or q in (f"{on} {ln}".strip()).casefold()
+            or q in (f"{fn} {on} {ln}".strip()).casefold()
             or q in team.casefold()
             or q in uid.casefold()
             or q in last4_from_nric(nric).casefold()
@@ -261,7 +263,7 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             matches.append(r)
 
     if roster_rows and not matches:
-        st.info(f"No roster matches for: '{search_text}'. You can refine the search (try last name, team, UID, or NRIC last-4).")
+        st.info(f"No roster matches for: '{search_text}'. You can refine the search (try first name, last name, team, UID, or NRIC last-4).")
 
     # Optional browse mode (helps confirm data is loading)
     browse_mode = st.toggle("Browse roster (show first 25)", value=False, key="browse_roster_mode")
@@ -271,6 +273,8 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
     if matches:
         labels = []
         for r in matches[:25]:
+            fn = str(r.get("FIRST_NAME", "") or "").strip()
+            fn_raw = str(r.get("FIRST_NAME", "") or "").strip()
             ln = str(r.get("LAST_NAME", "") or "").strip()
             on = str(r.get("OTHER_NAME", "") or "").strip()
             nric = str(r.get("NRIC", "") or "").strip()
@@ -281,7 +285,7 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             tcode = str(r.get("TEAM_CODE", "") or "").strip()
             team = str(r.get("TEAM_NAME", "") or "").strip()
 
-            label = f"{on} {ln}".strip()
+            label = f"{fn} {on} {ln}".strip()
             parts = []
             n4 = last4_from_nric(nric)
             if n4:
@@ -312,6 +316,8 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             idx = int(chosen)
             r = matches[idx]
 
+            fn = str(r.get("FIRST_NAME", "") or "").strip()
+            fn_raw = str(r.get("FIRST_NAME", "") or "").strip()
             ln = str(r.get("LAST_NAME", "") or "").strip()
             on = str(r.get("OTHER_NAME", "") or "").strip()
             nric = str(r.get("NRIC", "") or "").strip()
@@ -322,9 +328,9 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             tcode_raw = str(r.get("TEAM_CODE", "") or "").strip()
 
             # Populate name fields
-            st.session_state["first_name__pending"] = on
+            st.session_state["first_name__pending"] = fn_raw or on
             st.session_state["last_name__pending"] = ln
-            st.session_state["other_name__pending"] = ""  # keep empty to avoid mix-ups
+            st.session_state["other_name__pending"] = on
 
             # Populate other fields
             st.session_state["ic_last4__pending"] = last4_from_nric(nric)
