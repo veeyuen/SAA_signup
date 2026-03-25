@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from google_sheets_roster import load_roster, parse_dob, last4_from_nric
+from google_sheets_roster_v5 import load_roster, parse_dob, last4_from_nric
 
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -421,6 +421,10 @@ if email_norm:
     email_ok = is_valid_email(email_norm)
     if not email_ok:
         st.error("Please enter a valid email address (e.g., name@example.com).")
+email_present = bool(email_norm)
+if not email_present:
+    st.warning("Email is required.")
+
 
 
 c9, c10 = st.columns(2)
@@ -476,8 +480,22 @@ st.caption(f"Unique ID (auto): **{unique_id or '—'}**")
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
 
 # Gate Add entry button (live checks)
-ready_to_add = bool(waiver_ok) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(event_ok)
+ready_to_add = bool(waiver_ok) and bool(email_present) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(event_ok)
 
+
+# Why is Add entry disabled?
+if not ready_to_add:
+    with st.expander("Why can't I click Add entry?"):
+        st.write({
+            "waiver_ok": bool(waiver_ok),
+            "name_ok": bool(name_ok),
+            "birth_ok": bool(birth_ok),
+            "ic_ok": bool(ic_ok),
+            "contact_ok": bool(contact_ok),
+            "email_present": bool(email_present),
+            "email_ok": bool(email_ok),
+            "event_ok": bool(event_ok),
+        })
 
 # Add entry button
 if st.button("Add entry", type="primary", disabled=not ready_to_add):
