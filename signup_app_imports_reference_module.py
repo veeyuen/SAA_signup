@@ -632,6 +632,18 @@ entries_df = entries_df[cols]
 
 st.dataframe(entries_df, use_container_width=True)
 
+# Download colon-delimited file (:) of current entries
+if not entries_df.empty:
+    colon_text = entries_df.to_csv(index=False, sep=":", lineterminator="\n")
+    st.download_button(
+        "Download colon-delimited file",
+        data=colon_text,
+        file_name="current_entries_colon_delimited.txt",
+        mime="text/plain",
+    )
+else:
+    st.caption("Add entries to enable download.")
+
 # -------- Row edit controls --------
 st.markdown("### Edit entries")
 if entries_df.empty:
