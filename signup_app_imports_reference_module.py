@@ -15,7 +15,7 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from google_sheets_roster import load_roster, parse_dob, last4_from_nric, get_service_account_email
+from google_sheets_roster import load_roster, parse_dob, last4_from_nric
 
 
 from reference_lists import (
@@ -54,6 +54,18 @@ def is_valid_email(s: str) -> bool:
     if not s or len(s) > 254:
         return False
     return bool(EMAIL_RE.match(s))
+
+
+def _match_option_case_insensitive(value: str, options: list[str]) -> str:
+    """Return the option whose casefold matches value; else empty string."""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    vcf = v.casefold()
+    for o in options:
+        if (o or "").strip().casefold() == vcf:
+            return o
+    return ""
 
 def compute_unique_id(first_name: str, ic_last4: str, dob: date) -> str:
     if not first_name or not ic_last4 or not dob:
@@ -120,10 +132,7 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     bio = BytesIO()
     wb.save(bio)
     return bio.getvalue()
-
-
-
-# ---------------- UI
+# ---------------- UI ----------------
 st.set_page_config(page_title="Allcomers Meet Signup", layout="wide")
 st.title("Allcomers Meet Signup")
 
@@ -145,6 +154,18 @@ if "entries" not in st.session_state:
 
 with st.sidebar:
     st.header("Team / Billing")
+    st.subheader("Roster search (Google Sheet)")
+    roster_sheet_url = st.text_input(
+        "Roster Google Sheet URL",
+        value=st.secrets.get("ROSTER_SHEET_URL", "https://docs.google.com/spreadsheets/d/1PnTKatJGW3Eazy6YpDqnRHVZrVLRvK9rA_vBIVXKfUU/edit?usp=sharing"),
+        key="roster_sheet_url",
+    )
+    roster_worksheet = st.text_input("Worksheet (optional)", value=st.secrets.get("ROSTER_WORKSHEET", ""), key="roster_worksheet")
+    use_roster = st.toggle("Enable roster search", value=True, key="use_roster")
+    if st.button("Refresh roster cache"):
+        load_roster.clear()
+        st.toast("Roster cache cleared.")
+    st.caption("Sheet columns expected: LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE")
     po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], index=0, horizontal=True, key="po_to_be_sent")
     default_team_code = st.selectbox("Default Team Code (optional)", [""] + TEAM_CODES, index=0, key="default_team_code")
     default_team_name = get_team_name(default_team_code) if default_team_code else ""
@@ -156,47 +177,19 @@ with st.sidebar:
 
     if billing_email and not is_valid_email(billing_email):
         st.warning("Billing email looks invalid. Please double-check it.")
-    st.divider()
-    st.subheader("Roster search (Google Sheet)")
-    st.caption("Expected columns: LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE")
-    _sa_email = get_service_account_email()
-    if _sa_email:
-        st.caption(f"Service account: {_sa_email} (share the sheet with this email)")
-    else:
-        st.caption("Service account email not found in secrets (gcp_service_account.client_email).")
-    test_roster = st.button("Test roster load")
-    roster_sheet_url = st.text_input(
-        "Roster Google Sheet URL",
-        value=st.secrets.get("ROSTER_SHEET_URL", "https://docs.google.com/spreadsheets/d/1PnTKatJGW3Eazy6YpDqnRHVZrVLRvK9rA_vBIVXKfUU/edit?usp=sharing"),
-        key="roster_sheet_url",
-    )
-    roster_worksheet = st.text_input("Worksheet (optional)", value=st.secrets.get("ROSTER_WORKSHEET", ""), key="roster_worksheet")
-    use_roster = st.toggle("Enable roster search", value=True, key="use_roster")
-    if test_roster:
-        try:
-            _rows = load_roster(roster_sheet_url, worksheet=((roster_worksheet or "").strip() or None))
-            st.success(f"Roster loaded: {len(_rows)} rows")
-            if _rows:
-                st.write("Columns found:", sorted(list(_rows[0].keys())))
-                st.write("First row preview:", _rows[0])
-        except Exception as e:
-            st.error(f"Roster test failed: {type(e).__name__}: {repr(e)}")
-            import traceback as _tb
-            st.code(_tb.format_exc())
-    if st.button("Refresh roster cache"):
-        load_roster.clear()
-        st.toast("Roster cache cleared.")
+
+
 
 st.subheader("Athlete entry")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
 c1, c2, c3, c4 = st.columns(4)
 with c1:
-    last_name = st.text_input("Last Name", key="last_name")
+    st.text_input("Last Name", key="last_name")
 with c2:
-    first_name = st.text_input("First Name", key="first_name")
+    st.text_input("First Name", key="first_name")
 with c3:
-    other_name = st.text_input("Other Name (optional)", key="other_name")
+    st.text_input("Other Name (optional)", key="other_name")
 with c4:
     gender = st.selectbox("Gender", ["M", "F"], key="gender")
 
@@ -204,22 +197,9 @@ last_name = st.session_state.get("last_name", "")
 first_name = st.session_state.get("first_name", "")
 other_name = st.session_state.get("other_name", "")
 
-last_name = st.session_state.get("last_name", "")
-first_name = st.session_state.get("first_name", "")
-other_name = st.session_state.get("other_name", "")
-
-# Combined name (display)
-typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
-db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
-
-# Live validation: name presence (either First+Last typed, or selected via matches -> db_name_override)
-name_ok = (bool((first_name or '').strip()) and bool((last_name or '').strip())) or bool(db_name_override)
-if not name_ok:
-    st.warning("Enter First Name and Last Name, or select a match from the list.")
-
-
-# Full-name match selector (Google Sheet roster)
+# Roster match selector (Google Sheet) — selecting a row fills fields (no splitting)
 search_text = (" ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()])).strip()
+
 if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_url") or "").strip() and len(search_text) >= 2:
     try:
         roster_rows = load_roster(
@@ -228,9 +208,6 @@ if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_ur
         )
     except Exception as e:
         st.error(f"Roster load error: {type(e).__name__}: {repr(e)}")
-        with st.expander("Show roster error details"):
-            import traceback as _tb
-            st.code(_tb.format_exc())
         roster_rows = []
 
     q = search_text.casefold()
@@ -238,8 +215,8 @@ if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_ur
     for r in roster_rows:
         ln = str(r.get("LAST_NAME", "") or "")
         on = str(r.get("OTHER_NAME", "") or "")
-        nm = f"{on} {ln}".strip()
-        if q in ln.casefold() or q in on.casefold() or q in nm.casefold():
+        team = str(r.get("TEAM_NAME", "") or "")
+        if q in ln.casefold() or q in on.casefold() or q in (f"{on} {ln}".strip()).casefold() or q in team.casefold():
             matches.append(r)
 
     if matches:
@@ -264,6 +241,7 @@ if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_ur
             key=sel_key,
             format_func=lambda x: "(keep typed)" if x == "(keep typed)" else labels[int(x)],
         )
+
         if chosen != "(keep typed)":
             idx = int(chosen)
             r = matches[idx]
@@ -272,33 +250,45 @@ if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_ur
             on = str(r.get("OTHER_NAME", "") or "").strip()
             nric = str(r.get("NRIC", "") or "").strip()
             dob = parse_dob(r.get("DOB"))
-            nat = str(r.get("NATIONALITY", "") or "").strip()
+            nat_raw = str(r.get("NATIONALITY", "") or "").strip()
             uid = str(r.get("UNIQUE_ID", "") or "").strip()
-            tcode = str(r.get("TEAM_CODE", "") or "").strip()
+            tname = str(r.get("TEAM_NAME", "") or "").strip()
+            tcode_raw = str(r.get("TEAM_CODE", "") or "").strip()
 
-            # Map roster OTHER_NAME -> First Name (given names)
+            nat_val = _match_option_case_insensitive(nat_raw, ([''] + (COUNTRIES or [])))
+            tcode_val = _match_option_case_insensitive(tcode_raw, TEAM_CODES)
+
             st.session_state["first_name__pending"] = on
             st.session_state["last_name__pending"] = ln
             st.session_state["other_name__pending"] = ""
 
             st.session_state["ic_last4__pending"] = last4_from_nric(nric)
             st.session_state["birth_date__pending"] = dob
-            st.session_state["nationality__pending"] = nat
+            # Nationality: if not in list, store as override so it still appears in the dropdown
+            nat_pick = _match_option_case_insensitive(nat_raw, (COUNTRIES or []))
+            if nat_pick:
+                st.session_state["nationality__pending"] = nat_pick
+                st.session_state["nationality_override__pending"] = ""
+            else:
+                st.session_state["nationality__pending"] = nat_raw
+                st.session_state["nationality_override__pending"] = nat_raw
+
             st.session_state["unique_id_override__pending"] = uid
-            if tcode:
-                st.session_state["team_code__pending"] = tcode
+            if tname:
+                st.session_state["team_name_override__pending"] = tname
 
             st.session_state["athlete_roster_match__pending"] = "(keep typed)"
             st.rerun()
 
 
 # Combined name (display)
-combined_name = db_name_override or typed_full_name
-st.text_input("Name (combined)", value=combined_name, disabled=True)
-if db_name_override:
-    if st.button("Clear DB name override"):
-        st.session_state["db_name_override__pending"] = ""
-        st.rerun()
+typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
+db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
+
+# Live validation: name presence (either First+Last typed, or selected via matches -> db_name_override)
+name_ok = (bool((first_name or '').strip()) and bool((last_name or '').strip())) or bool(db_name_override)
+if not name_ok:
+    st.warning("Enter First Name and Last Name, or select a match from the list.")
 
 
 c4, c5, c6 = st.columns(3)
@@ -325,7 +315,11 @@ with c5:
             st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
 
 with c6:
-    nationality = st.selectbox("Nationality", COUNTRIES, index=0 if COUNTRIES else 0, key="nationality")
+    nationality_options = [""] + (COUNTRIES or [])
+    _nat_extra = (st.session_state.get("nationality_override", "") or "").strip()
+    if _nat_extra and _nat_extra not in nationality_options:
+        nationality_options = ["", _nat_extra] + [x for x in nationality_options if x != ""]
+    nationality = st.selectbox("Nationality", nationality_options, index=0, key="nationality")
 
 c7, c8 = st.columns(2)
 contact_number = c7.text_input("Contact Number", key="contact_number")
@@ -351,7 +345,11 @@ c9, c10 = st.columns(2)
 if default_team_code and default_team_code in TEAM_CODES:
     if st.session_state.get("team_code") not in TEAM_CODES:
         st.session_state["team_code"] = default_team_code
-team_code = c9.selectbox("Team Code", TEAM_CODES, key="team_code")
+team_code_options = list(TEAM_CODES)
+_tc_extra = (st.session_state.get("team_code_override", "") or "").strip()
+if _tc_extra and _tc_extra not in team_code_options:
+    team_code_options = [_tc_extra] + team_code_options
+team_code = c9.selectbox("Team Code", team_code_options, key="team_code")
 team_name_row = get_team_name(team_code)
 c10.text_input("Team Name (auto)", team_name_row, disabled=True)
 
