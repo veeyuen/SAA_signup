@@ -581,6 +581,185 @@ entries_df = entries_df[cols]
 
 st.dataframe(entries_df, use_container_width=True)
 
+# -------- Row edit controls --------
+st.markdown("### Edit entries")
+if entries_df.empty:
+    st.caption("No entries to edit yet.")
+else:
+    if "edit_idx" not in st.session_state:
+        st.session_state.edit_idx = None
+
+    # Compact list with per-row Edit buttons
+    header_cols = st.columns([1, 3, 2, 2, 1])
+    header_cols[0].markdown("**#**")
+    header_cols[1].markdown("**Athlete**")
+    header_cols[2].markdown("**School/Club**")
+    header_cols[3].markdown("**Event**")
+    header_cols[4].markdown("")
+
+    for _i in range(len(st.session_state.entries)):
+        _row = st.session_state.entries[_i] or {}
+        _ath = (_row.get("name") or " ".join([_row.get("first_name",""), _row.get("other_name",""), _row.get("last_name","")]).strip())
+        _team = _row.get("team_name","")
+        _event = _row.get("event","")
+        cols_btn = st.columns([1, 3, 2, 2, 1])
+        cols_btn[0].write(_i + 1)
+        cols_btn[1].write(_ath)
+        cols_btn[2].write(_team)
+        cols_btn[3].write(_event)
+        if cols_btn[4].button("Edit", key=f"edit_btn_{_i}"):
+            st.session_state.edit_idx = _i
+            st.rerun()
+
+    # Edit panel
+    if st.session_state.edit_idx is not None and 0 <= int(st.session_state.edit_idx) < len(st.session_state.entries):
+        idx = int(st.session_state.edit_idx)
+        original = dict(st.session_state.entries[idx] or {})
+        st.markdown(f"#### Editing entry #{idx + 1}")
+
+        # Coerce date if stored as string
+        _bd = original.get("birth_date", None)
+        if isinstance(_bd, str) and _bd.strip():
+            try:
+                _bd = pd.to_datetime(_bd, errors="coerce").date()
+            except Exception:
+                _bd = None
+
+        # Ensure dropdown options include current values (even if not in reference lists)
+        _nat_cur = (original.get("nationality", "") or "").strip()
+        nat_opts = [""] + (COUNTRIES or [])
+        if _nat_cur and _nat_cur not in nat_opts:
+            nat_opts = ["", _nat_cur] + [x for x in nat_opts if x not in ("", _nat_cur)]
+
+        _tc_cur = (original.get("team_code", "") or "").strip()
+        tc_opts = list(TEAM_CODES)
+        if _tc_cur and _tc_cur not in tc_opts:
+            tc_opts = [_tc_cur] + tc_opts
+
+        with st.form(key=f"edit_form_{idx}"):
+            cA, cB, cC = st.columns(3)
+            last_name_e = cA.text_input("Last Name", value=original.get("last_name", ""), key=f"e_last_{idx}")
+            first_name_e = cB.text_input("First Name", value=original.get("first_name", ""), key=f"e_first_{idx}")
+            other_name_e = cC.text_input("Other Name (optional)", value=original.get("other_name", ""), key=f"e_other_{idx}")
+
+            cD, cE, cF = st.columns(3)
+            gender_e = cD.selectbox("Gender", ["M", "F"], index=0 if (original.get("gender","M")=="M") else 1, key=f"e_gender_{idx}")
+            birth_date_e = cE.date_input("Birth Date", value=_bd, key=f"e_birth_{idx}")
+            ic_last4_e = cF.text_input("IC Number (last 4)", value=original.get("ic_last4",""), key=f"e_ic_{idx}")
+
+            cG, cH, cI = st.columns(3)
+            nationality_e = cG.selectbox("Nationality", nat_opts, index=nat_opts.index(_nat_cur) if _nat_cur in nat_opts else 0, key=f"e_nat_{idx}")
+            contact_number_e = cH.text_input("Contact Number", value=original.get("contact_number",""), key=f"e_contact_{idx}")
+            email_e = cI.text_input("Email", value=original.get("email",""), key=f"e_email_{idx}")
+
+            cJ, cK = st.columns(2)
+            team_code_e = cJ.selectbox("Team Code", tc_opts, index=tc_opts.index(_tc_cur) if _tc_cur in tc_opts else 0, key=f"e_team_code_{idx}")
+            team_name_override_e = cK.text_input("Team Name override (optional)", value=original.get("team_name_override",""), key=f"e_team_name_override_{idx}")
+
+            cL, cM = st.columns(2)
+            # Event division & event
+            div_cur = int(original.get("event_division", 1) or 1)
+            event_div_e = cL.selectbox(
+                "Event Division (1–8)",
+                options=list(DIVISIONS.keys()),
+                index=list(DIVISIONS.keys()).index(div_cur) if div_cur in DIVISIONS else 0,
+                format_func=lambda k: f"{k} - {DIVISIONS[k]}",
+                key=f"e_event_div_{idx}",
+            )
+            event_opts_e = allowed_events(gender_e, int(event_div_e))
+            event_names_e = [n for n, _ in event_opts_e]
+            event_cur = (original.get("event","") or "").strip()
+            if event_cur and event_cur not in event_names_e:
+                event_names_e = [event_cur] + event_names_e
+            event_name_e = cM.selectbox("Event", event_names_e if event_names_e else ["(no events)"], index=0, key=f"e_event_{idx}")
+
+            cN, cO, cP = st.columns(3)
+            season_best_e = cN.text_input("Season Best (optional)", value=original.get("season_best",""), key=f"e_sb_{idx}")
+            parq_e = cO.selectbox("PAR-Q completed?", ["Y","N"], index=0 if (original.get("parq","Y")=="Y") else 1, key=f"e_parq_{idx}")
+            unique_id_e = cP.text_input("Unique ID", value=original.get("unique_id",""), key=f"e_uid_{idx}")
+
+            cQ, cR = st.columns(2)
+            charge_code_e = cQ.text_input("Charge code", value=original.get("charge_code",""), key=f"e_charge_{idx}")
+            po_e = cR.radio("P/O to be sent", options=["No","Yes"], index=0 if (original.get("po_to_be_sent","No")!="Yes") else 1, horizontal=True, key=f"e_po_{idx}")
+
+            cS, cT = st.columns(2)
+            emergency_name_e = cS.text_input("Emergency Contact Name", value=original.get("emergency_contact_name",""), key=f"e_em_name_{idx}")
+            emergency_no_e = cT.text_input("Emergency Contact Number", value=original.get("emergency_contact_number",""), key=f"e_em_no_{idx}")
+
+            coach_e = st.text_input("Coach Full Name", value=original.get("coach_full_name",""), key=f"e_coach_{idx}")
+
+            save_btn = st.form_submit_button("Save changes")
+            cancel_btn = st.form_submit_button("Cancel")
+
+        if cancel_btn:
+            st.session_state.edit_idx = None
+            st.rerun()
+
+        if save_btn:
+            # Basic validations (same as add entry)
+            email_norm_e = normalize_email(email_e)
+            ic_norm_e = normalize_ic_last4(ic_last4_e)
+
+            errors = []
+            if not birth_date_e:
+                errors.append("Birth Date is required.")
+            if not (contact_number_e or "").strip():
+                errors.append("Contact Number is required.")
+            if not is_valid_email(email_norm_e):
+                errors.append("Email is invalid.")
+            if not is_valid_ic_last4(ic_norm_e):
+                errors.append("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
+            if event_name_e == "(no events)":
+                errors.append("Event must be selected.")
+
+            if errors:
+                st.error(" / ".join(errors))
+            else:
+                # Resolve team name
+                team_name_e = get_team_name(team_code_e)
+                if not team_name_e:
+                    team_name_e = (team_name_override_e or "").strip() or original.get("team_name","")
+
+                # Resolve event code
+                event_code_e = dict(event_opts_e).get(event_name_e, original.get("event_code",""))
+
+                # Compute combined name
+                name_e = " ".join([p for p in [first_name_e, other_name_e, last_name_e] if (p or "").strip()]).strip()
+
+                updated = dict(original)
+                updated.update({
+                    "first_name": (first_name_e or "").strip(),
+                    "other_name": (other_name_e or "").strip(),
+                    "last_name": (last_name_e or "").strip(),
+                    "name": name_e,
+                    "gender": gender_e,
+                    "birth_date": birth_date_e,
+                    "ic_last4": ic_norm_e,
+                    "nationality": (nationality_e or "").strip(),
+                    "contact_number": (contact_number_e or "").strip(),
+                    "email": email_norm_e,
+                    "team_code": (team_code_e or "").strip(),
+                    "team_name": (team_name_e or "").strip(),
+                    "team_name_override": (team_name_override_e or "").strip(),
+                    "event_division": int(event_div_e),
+                    "event": event_name_e,
+                    "event_code": event_code_e,
+                    "season_best": (season_best_e or "").strip(),
+                    "parq": parq_e,
+                    "unique_id": (unique_id_e or "").strip() or compute_unique_id((first_name_e or "").strip(), ic_norm_e, birth_date_e),
+                    "charge_code": (charge_code_e or "").strip(),
+                    "po_to_be_sent": po_e,
+                    "emergency_contact_name": (emergency_name_e or "").strip(),
+                    "emergency_contact_number": (emergency_no_e or "").strip(),
+                    "coach_full_name": (coach_e or "").strip(),
+                })
+
+                st.session_state.entries[idx] = updated
+                st.success("Entry updated.")
+                st.session_state.edit_idx = None
+                st.rerun()
+# -------- End row edit controls --------
+
 st.markdown('### Summary')
 total_entries = len(entries_df)
 st.write(f"Total entries: **{total_entries}**")
