@@ -525,7 +525,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
     else:
         event_code = dict(event_opts).get(event_name, "")
         st.session_state.entries.append({
-            "name": combined_name,
+            "name": (db_name_override or typed_full_name),
             "last_name": (last_name or "").strip(),
             "first_name": (first_name or "").strip(),
             "other_name": (other_name or "").strip(),
