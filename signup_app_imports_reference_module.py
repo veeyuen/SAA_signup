@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from google_sheets_roster import load_roster, parse_dob, last4_from_nric
+from google_sheets_roster_v4 import load_roster, parse_dob, last4_from_nric
 
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -216,7 +216,20 @@ other_name = st.session_state.get("other_name", "")
 # Roster match selector (Google Sheet) — selecting a row fills fields (no splitting)
 search_text = (" ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()])).strip()
 
-if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_url") or "").strip() and len(search_text) >= 2:
+_roster_enabled = bool(st.session_state.get("use_roster"))
+_roster_url = (st.session_state.get("roster_sheet_url") or "").strip()
+
+# Small inline hints so you can see why the dropdown may not appear
+if not _roster_enabled:
+    st.caption("Roster search is OFF (enable it in the left sidebar).")
+elif not _roster_url:
+    st.caption("Roster sheet URL is empty (set it in the left sidebar).")
+elif len(search_text) < 2:
+    st.caption("Type at least 2 characters in First/Other/Last name to search the roster.")
+
+matches = []
+roster_rows = []
+if _roster_enabled and _roster_url and len(search_text) >= 2:
     try:
         roster_rows = st.session_state.get("roster_cache_rows")
         if not isinstance(roster_rows, list):
@@ -230,16 +243,30 @@ if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_ur
         roster_rows = []
 
     q = search_text.casefold()
-    matches = []
     for r in roster_rows:
         ln = str(r.get("LAST_NAME", "") or "")
         on = str(r.get("OTHER_NAME", "") or "")
         team = str(r.get("TEAM_NAME", "") or "")
-        if q in ln.casefold() or q in on.casefold() or q in (f"{on} {ln}".strip()).casefold() or q in team.casefold():
+        uid = str(r.get("UNIQUE_ID", "") or "")
+        nric = str(r.get("NRIC", "") or "")
+        # Match on name/team/uid/nric(last4) to help disambiguation
+        if (
+            q in ln.casefold()
+            or q in on.casefold()
+            or q in (f"{on} {ln}".strip()).casefold()
+            or q in team.casefold()
+            or q in uid.casefold()
+            or q in last4_from_nric(nric).casefold()
+        ):
             matches.append(r)
 
-    if not roster_rows:
-        st.warning("Roster loaded 0 rows. Check the worksheet/tab and header row.")
+    if roster_rows and not matches:
+        st.info(f"No roster matches for: '{search_text}'. You can refine the search (try last name, team, UID, or NRIC last-4).")
+
+    # Optional browse mode (helps confirm data is loading)
+    browse_mode = st.toggle("Browse roster (show first 25)", value=False, key="browse_roster_mode")
+    if browse_mode and roster_rows:
+        matches = roster_rows[:25]
 
     if matches:
         labels = []
@@ -294,15 +321,15 @@ if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_ur
             tname = str(r.get("TEAM_NAME", "") or "").strip()
             tcode_raw = str(r.get("TEAM_CODE", "") or "").strip()
 
-            nat_val = _match_option_case_insensitive(nat_raw, ([''] + (COUNTRIES or [])))
-            tcode_val = _match_option_case_insensitive(tcode_raw, TEAM_CODES)
-
+            # Populate name fields
             st.session_state["first_name__pending"] = on
             st.session_state["last_name__pending"] = ln
-            st.session_state["other_name__pending"] = ""
+            st.session_state["other_name__pending"] = ""  # keep empty to avoid mix-ups
 
+            # Populate other fields
             st.session_state["ic_last4__pending"] = last4_from_nric(nric)
             st.session_state["birth_date__pending"] = dob
+
             # Nationality: if not in list, store as override so it still appears in the dropdown
             nat_pick = _match_option_case_insensitive(nat_raw, (COUNTRIES or []))
             if nat_pick:
@@ -312,6 +339,7 @@ if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_ur
                 st.session_state["nationality__pending"] = nat_raw
                 st.session_state["nationality_override__pending"] = nat_raw
 
+            # Unique ID override from roster
             st.session_state["unique_id_override__pending"] = uid
 
             # Team code: if not in list, store as override so it still appears in the dropdown
