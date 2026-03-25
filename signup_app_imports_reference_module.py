@@ -246,13 +246,30 @@ if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_ur
         for r in matches[:25]:
             ln = str(r.get("LAST_NAME", "") or "").strip()
             on = str(r.get("OTHER_NAME", "") or "").strip()
-            team = str(r.get("TEAM_NAME", "") or "").strip()
+            nric = str(r.get("NRIC", "") or "").strip()
+            dob_val = parse_dob(r.get("DOB"))
+            dob_str = dob_val.strftime("%Y-%m-%d") if hasattr(dob_val, "strftime") and dob_val else str(r.get("DOB", "") or "").strip()
+            nat = str(r.get("NATIONALITY", "") or "").strip()
             uid = str(r.get("UNIQUE_ID", "") or "").strip()
+            tcode = str(r.get("TEAM_CODE", "") or "").strip()
+            team = str(r.get("TEAM_NAME", "") or "").strip()
+
             label = f"{on} {ln}".strip()
-            if team:
-                label += f" — {team}"
+            parts = []
+            n4 = last4_from_nric(nric)
+            if n4:
+                parts.append(f"NRIC(last4): {n4}")
+            if dob_str:
+                parts.append(f"DOB: {dob_str}")
+            if nat:
+                parts.append(f"Nat: {nat}")
             if uid:
-                label += f" ({uid})"
+                parts.append(f"UID: {uid}")
+            team_piece = " ".join([p for p in [tcode, team] if p]).strip()
+            if team_piece:
+                parts.append(f"Team: {team_piece}")
+            if parts:
+                label = label + " | " + " | ".join(parts)
             labels.append(label)
 
         sel_key = "athlete_roster_match"
@@ -296,6 +313,16 @@ if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_ur
                 st.session_state["nationality_override__pending"] = nat_raw
 
             st.session_state["unique_id_override__pending"] = uid
+
+            # Team code: if not in list, store as override so it still appears in the dropdown
+            tcode_pick = _match_option_case_insensitive(tcode_raw, TEAM_CODES)
+            if tcode_pick:
+                st.session_state["team_code__pending"] = tcode_pick
+                st.session_state["team_code_override__pending"] = ""
+            else:
+                st.session_state["team_code__pending"] = tcode_raw
+                st.session_state["team_code_override__pending"] = tcode_raw
+
             if tname:
                 st.session_state["team_name_override__pending"] = tname
 
