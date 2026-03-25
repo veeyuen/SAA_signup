@@ -119,15 +119,51 @@ def load_roster(sheet_url_or_id: str, worksheet: str | None = None) -> List[Dict
     return _records_from_values(values)
 
 def parse_dob(value) -> Any:
+    """Parse DOB into a Python date if possible.
+
+    Handles:
+    - datetime/date objects
+    - strings in common formats (YYYY-MM-DD, DD/MM/YYYY, etc.)
+    - numeric Excel/Sheets serial dates (days since 1899-12-30)
+    """
     if value is None or value == "":
         return None
+
+    # Already a date/datetime
+    try:
+        import datetime as _dt
+        if isinstance(value, _dt.datetime):
+            return value.date()
+        if isinstance(value, _dt.date):
+            return value
+    except Exception:
+        pass
+
+    # Numeric serial date (Sheets/Excel)
+    try:
+        if isinstance(value, (int, float)) and value > 0:
+            import datetime as _dt
+            origin = _dt.date(1899, 12, 30)
+            if value < 60000:  # guard (~2064)
+                return origin + _dt.timedelta(days=int(value))
+    except Exception:
+        pass
+
+    # Try pandas parsing (dayfirst True then False)
     try:
         dt = pd.to_datetime(value, errors="coerce", dayfirst=True)
-        if pd.isna(dt):
-            return None
-        return dt.date()
+        if not pd.isna(dt):
+            return dt.date()
     except Exception:
-        return None
+        pass
+    try:
+        dt = pd.to_datetime(value, errors="coerce", dayfirst=False)
+        if not pd.isna(dt):
+            return dt.date()
+    except Exception:
+        pass
+
+    return None
 
 def last4_from_nric(nric: str) -> str:
     s = (nric or "").strip().upper()
