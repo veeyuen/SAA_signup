@@ -162,8 +162,24 @@ with st.sidebar:
     )
     roster_worksheet = st.text_input("Worksheet (optional)", value=st.secrets.get("ROSTER_WORKSHEET", ""), key="roster_worksheet")
     use_roster = st.toggle("Enable roster search", value=True, key="use_roster")
+    test_roster = st.button("Test roster load")
+    roster_cache_rows = st.session_state.get("roster_cache_rows", None)
+    if test_roster:
+        try:
+            _rows = load_roster(roster_sheet_url, worksheet=((roster_worksheet or "").strip() or None))
+            st.session_state["roster_cache_rows"] = _rows
+            st.success(f"Roster loaded: {len(_rows)} rows")
+            if _rows:
+                st.write("Columns found:", sorted(list(_rows[0].keys())))
+        except Exception as e:
+            import traceback as _tb
+            st.error(f"Roster test failed: {type(e).__name__}: {repr(e)}")
+            st.code(_tb.format_exc())
+    if isinstance(roster_cache_rows, list):
+        st.caption(f"Cached roster rows: {len(roster_cache_rows)}")
     if st.button("Refresh roster cache"):
         load_roster.clear()
+        st.session_state.pop("roster_cache_rows", None)
         st.toast("Roster cache cleared.")
     st.caption("Sheet columns expected: LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE")
     po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], index=0, horizontal=True, key="po_to_be_sent")
@@ -202,10 +218,13 @@ search_text = (" ".join([p for p in [first_name, other_name, last_name] if (p or
 
 if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_url") or "").strip() and len(search_text) >= 2:
     try:
-        roster_rows = load_roster(
-            st.session_state.get("roster_sheet_url", ""),
-            worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
-        )
+        roster_rows = st.session_state.get("roster_cache_rows")
+        if not isinstance(roster_rows, list):
+            roster_rows = load_roster(
+                st.session_state.get("roster_sheet_url", ""),
+                worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
+            )
+            st.session_state["roster_cache_rows"] = roster_rows
     except Exception as e:
         st.error(f"Roster load error: {type(e).__name__}: {repr(e)}")
         roster_rows = []
@@ -218,6 +237,9 @@ if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_ur
         team = str(r.get("TEAM_NAME", "") or "")
         if q in ln.casefold() or q in on.casefold() or q in (f"{on} {ln}".strip()).casefold() or q in team.casefold():
             matches.append(r)
+
+    if not roster_rows:
+        st.warning("Roster loaded 0 rows. Check the worksheet/tab and header row.")
 
     if matches:
         labels = []
