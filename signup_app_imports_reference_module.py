@@ -378,7 +378,7 @@ c4, c5, c6 = st.columns(3)
 with c4:
     birth_date = st.date_input("Birth Date", value=None, key="birth_date")
     # Live validation: birth date
-    birth_ok = birth_date is not None
+    birth_ok = st.session_state.get('birth_date') is not None
     if not birth_ok:
         st.warning("Birth Date is required.")
 
@@ -393,6 +393,7 @@ with c5:
     elif len(ic_last4_norm) < 4:
         ic_ok = False
         st.warning("IC last 4 is incomplete (e.g., 123A).")
+    else:
         ic_ok = is_valid_ic_last4(ic_last4_norm)
         if not ic_ok:
             st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
@@ -421,10 +422,6 @@ if email_norm:
     email_ok = is_valid_email(email_norm)
     if not email_ok:
         st.error("Please enter a valid email address (e.g., name@example.com).")
-email_present = bool(email_norm)
-if not email_present:
-    st.warning("Email is required.")
-
 
 
 c9, c10 = st.columns(2)
@@ -480,22 +477,8 @@ st.caption(f"Unique ID (auto): **{unique_id or '—'}**")
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
 
 # Gate Add entry button (live checks)
-ready_to_add = bool(waiver_ok) and bool(email_present) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(event_ok)
+ready_to_add = bool(waiver_ok) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(event_ok)
 
-
-# Why is Add entry disabled?
-if not ready_to_add:
-    with st.expander("Why can't I click Add entry?"):
-        st.write({
-            "waiver_ok": bool(waiver_ok),
-            "name_ok": bool(name_ok),
-            "birth_ok": bool(birth_ok),
-            "ic_ok": bool(ic_ok),
-            "contact_ok": bool(contact_ok),
-            "email_present": bool(email_present),
-            "email_ok": bool(email_ok),
-            "event_ok": bool(event_ok),
-        })
 
 # Add entry button
 if st.button("Add entry", type="primary", disabled=not ready_to_add):
