@@ -2,7 +2,7 @@
 Google Sheets roster loader for name suggestions / auto-fill.
 
 Expected columns (case-insensitive; spaces treated like underscores):
-LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE
+FIRST_NAME, LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE
 
 Auth:
 - Uses Streamlit secrets with a Google service account dict under st.secrets["gcp_service_account"].
@@ -30,6 +30,7 @@ except Exception:  # pragma: no cover
 _SHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
 
 EXPECTED_KEYS = {
+    "FIRST_NAME",
     "LAST_NAME",
     "OTHER_NAME",
     "NRIC",
