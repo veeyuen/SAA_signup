@@ -812,6 +812,18 @@ else:
 
                 st.session_state.entries[idx] = updated
                 st.success("Entry updated.")
+
+                # Sync updated entries to output Google Sheet (optional)
+                if st.session_state.get("sync_enabled") and (st.session_state.get("output_sheet_url") or "").strip():
+                    try:
+                        sync_entries_to_sheet(
+                            st.session_state.entries,
+                            sheet_url_or_id=st.session_state.get("output_sheet_url", ""),
+                            worksheet=((st.session_state.get("output_worksheet") or "").strip() or None),
+                        )
+                        st.toast("Synced edited entry to output Google Sheet.")
+                    except Exception as e:
+                        st.warning(f"Output sheet sync failed: {type(e).__name__}: {repr(e)}")
                 st.session_state.edit_idx = None
                 st.rerun()
 # -------- End row edit controls --------
