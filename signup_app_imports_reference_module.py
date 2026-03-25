@@ -14,6 +14,7 @@ from io import BytesIO
 import openpyxl
 import pandas as pd
 import streamlit as st
+import datetime as dt
 
 from google_sheets_roster import load_roster, parse_dob, last4_from_nric
 
@@ -181,7 +182,7 @@ with st.sidebar:
         load_roster.clear()
         st.session_state.pop("roster_cache_rows", None)
         st.toast("Roster cache cleared.")
-    st.caption("Sheet columns expected: FIRST_NAME, LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE")
+    st.caption("Sheet columns expected: GENDER, FIRST_NAME, LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE")
     po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], index=0, horizontal=True, key="po_to_be_sent")
     default_team_code = st.selectbox("Default Team Code (optional)", [""] + TEAM_CODES, index=0, key="default_team_code")
     default_team_name = get_team_name(default_team_code) if default_team_code else ""
@@ -207,7 +208,13 @@ with c2:
 with c3:
     st.text_input("Other Name (optional)", key="other_name")
 with c4:
-    gender = st.selectbox("Gender", ["M", "F"], key="gender")
+    gender = st.selectbox("Gender", ["", "M", "F"], index=0, key="gender")
+
+# Live validation: gender (mandatory)
+gender_ok = gender in ('M','F')
+if not gender_ok:
+    st.warning("Gender is required (select M or F).")
+
 
 last_name = st.session_state.get("last_name", "")
 first_name = st.session_state.get("first_name", "")
@@ -280,6 +287,7 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             nric = str(r.get("NRIC", "") or "").strip()
             dob_val = parse_dob(r.get("DOB"))
             dob_str = dob_val.strftime("%Y-%m-%d") if hasattr(dob_val, "strftime") and dob_val else str(r.get("DOB", "") or "").strip()
+            gen = str(r.get("GENDER", "") or "").strip()
             nat = str(r.get("NATIONALITY", "") or "").strip()
             uid = str(r.get("UNIQUE_ID", "") or "").strip()
             tcode = str(r.get("TEAM_CODE", "") or "").strip()
@@ -292,6 +300,8 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
                 parts.append(f"NRIC(last4): {n4}")
             if dob_str:
                 parts.append(f"DOB: {dob_str}")
+            if gen:
+                parts.append(f"Gender: {gen}")
             if nat:
                 parts.append(f"Nat: {nat}")
             if uid:
@@ -322,6 +332,7 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             on = str(r.get("OTHER_NAME", "") or "").strip()
             nric = str(r.get("NRIC", "") or "").strip()
             dob = parse_dob(r.get("DOB"))
+            gender_raw = str(r.get("GENDER", "") or "").strip().upper()
             nat_raw = str(r.get("NATIONALITY", "") or "").strip()
             uid = str(r.get("UNIQUE_ID", "") or "").strip()
             tname = str(r.get("TEAM_NAME", "") or "").strip()
@@ -335,6 +346,11 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             # Populate other fields
             st.session_state["ic_last4__pending"] = last4_from_nric(nric)
             st.session_state["birth_date__pending"] = dob
+            # Gender from roster (may be blank; still mandatory to submit)
+            if gender_raw in ("M","F"):
+                st.session_state["gender__pending"] = gender_raw
+            else:
+                st.session_state["gender__pending"] = ""
 
             # Nationality: if not in list, store as override so it still appears in the dropdown
             nat_pick = _match_option_case_insensitive(nat_raw, (COUNTRIES or []))
@@ -376,7 +392,7 @@ if not name_ok:
 
 c4, c5, c6 = st.columns(3)
 with c4:
-    birth_date = st.date_input("Birth Date", value=None, key="birth_date")
+    birth_date = st.date_input("Birth Date", value=None, min_value=dt.date(1900, 1, 1), max_value=dt.date.today(), key="birth_date")
     # Live validation: birth date
     birth_ok = st.session_state.get('birth_date') is not None
     if not birth_ok:
@@ -477,7 +493,7 @@ st.caption(f"Unique ID (auto): **{unique_id or '—'}**")
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
 
 # Gate Add entry button (live checks)
-ready_to_add = bool(waiver_ok) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(event_ok)
+ready_to_add = bool(waiver_ok) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(gender_ok) and bool(event_ok)
 
 
 # Add entry button
@@ -496,6 +512,8 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         st.error("Please tick the waiver acknowledgement.")
     elif missing:
         st.error("Missing: " + ", ".join(missing))
+    elif not gender_ok:
+        st.error("Please select Gender (M or F).")
     elif not (((first_name or '').strip()) and ((last_name or '').strip())) and not ((db_name_override or '').strip()):
         st.error("Please enter First Name and Last Name, or select a name from matches.")
     elif not is_valid_email(email_norm):
@@ -504,6 +522,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
     elif not event_opts or not event_names or event_name == "(no events)":
         st.error("No events available for that Gender + Division combination.")
+    else:
         event_code = dict(event_opts).get(event_name, "")
         st.session_state.entries.append({
             "name": combined_name,
@@ -537,6 +556,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "last_name": "",
             "first_name": "",
             "other_name": "",
+            "gender": "",
             "birth_date": None,
             "ic_last4": "",
             "contact_number": "",
@@ -546,13 +566,12 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "emergency_contact_number": "",
             "coach_full_name": "",
             "waiver_ok": False,
-            # Clear any database-driven combined-name override
             "db_name_override": "",
-            # Reset match selector (if present)
-            "athlete_name_match": "(keep typed)",
+            "athlete_roster_match": "(keep typed)",
         }.items():
             st.session_state[f"{_k}__pending"] = _v
         st.rerun()
+
 
 st.subheader("Current entries")
 entries_df = pd.DataFrame(st.session_state.entries)
@@ -644,8 +663,11 @@ else:
             other_name_e = cC.text_input("Other Name (optional)", value=original.get("other_name", ""), key=f"e_other_{idx}")
 
             cD, cE, cF = st.columns(3)
-            gender_e = cD.selectbox("Gender", ["M", "F"], index=0 if (original.get("gender","M")=="M") else 1, key=f"e_gender_{idx}")
-            birth_date_e = cE.date_input("Birth Date", value=_bd, key=f"e_birth_{idx}")
+            gender_opts_e = ["", "M", "F"]
+            _gcur = (original.get("gender","") or "").strip()
+            _gidx = gender_opts_e.index(_gcur) if _gcur in gender_opts_e else 0
+            gender_e = cD.selectbox("Gender", gender_opts_e, index=_gidx, key=f"e_gender_{idx}")
+            birth_date_e = cE.date_input("Birth Date", value=_bd, min_value=dt.date(1900, 1, 1), max_value=dt.date.today(), key=f"e_birth_{idx}")
             ic_last4_e = cF.text_input("IC Number (last 4)", value=original.get("ic_last4",""), key=f"e_ic_{idx}")
 
             cG, cH, cI = st.columns(3)
@@ -702,6 +724,8 @@ else:
             ic_norm_e = normalize_ic_last4(ic_last4_e)
 
             errors = []
+            if gender_e not in ("M","F"):
+                errors.append("Gender must be selected (M or F).")
             if not birth_date_e:
                 errors.append("Birth Date is required.")
             if not (contact_number_e or "").strip():
