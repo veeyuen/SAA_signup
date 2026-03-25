@@ -15,10 +15,10 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-from google_sheets_roster_v5 import load_roster, parse_dob, last4_from_nric
+from google_sheets_roster import load_roster, parse_dob, last4_from_nric
 
 
-from reference_lists_final import (
+from reference_lists import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
