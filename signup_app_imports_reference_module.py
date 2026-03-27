@@ -16,12 +16,12 @@ import pandas as pd
 import streamlit as st
 import datetime as dt
 
-from google_sheets_roster import load_roster, parse_dob, last4_from_nric
+from google_sheets_roster_v7 import load_roster, parse_dob, last4_from_nric
 from google_sheets_writer import sync_entries_to_sheet
 from google_sheets_reader import read_sheet_as_df
 
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -191,6 +191,93 @@ if st.session_state.get("roster_cache_error"):
 # ---------------------------------------------------------------------------
 
 
+def _normalize_header(h: str) -> str:
+    h = (h or "").strip().casefold()
+    h = re.sub(r"[^a-z0-9]+", "_", h).strip("_")
+    return h
+
+def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
+    if df is None or df.empty:
+        return []
+    col_map = {_normalize_header(c): c for c in df.columns}
+
+    def get(row, key, default=""):
+        c = col_map.get(key)
+        return row.get(c, default) if c else default
+
+    entries = []
+    for _, row in df.iterrows():
+        first_name = str(get(row, "first_name", "") or get(row, "firstname", "") or get(row, "first", "")).strip()
+        other_name = str(get(row, "other_name", "") or get(row, "othername", "")).strip()
+        last_name = str(get(row, "last_name", "") or get(row, "lastname", "") or get(row, "last", "")).strip()
+        gender = str(get(row, "gender", "")).strip().upper()
+
+        dob_raw = get(row, "birth_date", "") or get(row, "dob", "") or get(row, "date_of_birth", "")
+        try:
+            birth_date = parse_dob(dob_raw)
+        except Exception:
+            birth_date = None
+
+        nric_raw = str(get(row, "nric", "") or "").strip()
+        ic_last4 = str(get(row, "ic_last4", "") or "").strip()
+        if not ic_last4 and nric_raw:
+            ic_last4 = last4_from_nric(nric_raw)
+        ic_last4 = normalize_ic_last4(ic_last4)
+
+        nationality = str(get(row, "nationality", "")).strip()
+        unique_id = str(get(row, "unique_id", "")).strip()
+        team_name = str(get(row, "team_name", "")).strip()
+        team_code = str(get(row, "team_code", "")).strip()
+        event = str(get(row, "event", "")).strip()
+        event_code = str(get(row, "event_code", "")).strip()
+        charge_code = str(get(row, "charge_code", "")).strip()
+        po_to_be_sent = str(get(row, "po_to_be_sent", "")).strip()
+        email = normalize_email(str(get(row, "email", "")).strip())
+        contact_number = str(get(row, "contact_number", "") or get(row, "contact", "")).strip()
+
+        name = " ".join([p for p in [first_name, other_name, last_name] if p]).strip()
+
+        if not any([name, unique_id, team_code, team_name, email, contact_number, ic_last4]):
+            continue
+
+        entries.append({
+            "name": name,
+            "first_name": first_name,
+            "other_name": other_name,
+            "last_name": last_name,
+            "gender": gender if gender in ("M","F") else "",
+            "birth_date": birth_date,
+            "ic_last4": ic_last4,
+            "nationality": nationality,
+            "unique_id": unique_id,
+            "team_name": team_name,
+            "team_code": team_code,
+            "event": event,
+            "event_code": event_code,
+            "charge_code": charge_code,
+            "po_to_be_sent": po_to_be_sent if po_to_be_sent in ("Yes","No") else "",
+            "email": email,
+            "contact_number": contact_number,
+        })
+    return entries
+
+# Preload existing entries from OUTPUT Google Sheet on app start (only if empty)
+st.session_state.setdefault("entries", [])
+if not st.session_state.entries:
+    _preload_url = (st.session_state.get("output_sheet_url") or "").strip()
+    _preload_ws = (st.session_state.get("output_worksheet") or "").strip() or None
+    if _preload_url:
+        try:
+            _df_pre = read_sheet_as_df(_preload_url, worksheet=_preload_ws)
+            st.session_state.entries = _sheet_df_to_entries(_df_pre)
+        except Exception as e:
+            st.session_state["preload_error"] = f"{type(e).__name__}: {repr(e)}"
+
+if st.session_state.get("preload_error"):
+    st.warning(f"Could not preload existing entries from output sheet. ({st.session_state['preload_error']})")
+
+
+
 if "entries" not in st.session_state:
     st.session_state.entries = []
 
@@ -198,17 +285,12 @@ with st.sidebar:
     st.header("Team / Billing")
     default_team_code = st.selectbox("Default Team Code (optional)", [""] + TEAM_CODES, index=0, key="default_team_code")
     default_team_name = get_team_name(default_team_code) if default_team_code else ""
-
     team_name_header = st.text_input("Team Name (for header)", value=default_team_name, key="team_name_header")
     billing_name = st.text_input("Billing contact name", value="", key="billing_name")
     billing_email = st.text_input("Billing email", value="", key="billing_email")
     charge_code = st.text_input("Charge code (optional)", value="", key="charge_code")
-
     if billing_email and not is_valid_email(billing_email):
         st.warning("Billing email looks invalid. Please double-check it.")
-
-
-
 st.subheader("Athlete entry")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
