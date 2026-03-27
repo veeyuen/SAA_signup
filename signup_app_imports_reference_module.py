@@ -152,57 +152,50 @@ def _apply_pending_text_updates():
 
 _apply_pending_text_updates()
 
+
+# ---------------- Hidden configuration (no sidebar controls) ----------------
+ROSTER_SHEET_URL = st.secrets.get(
+    "ROSTER_SHEET_URL",
+    "https://docs.google.com/spreadsheets/d/1PnTKatJGW3Eazy6YpDqnRHVZrVLRvK9rA_vBIVXKfUU/edit?usp=sharing",
+)
+ROSTER_WORKSHEET = st.secrets.get("ROSTER_WORKSHEET", "")
+
+OUTPUT_SHEET_URL = st.secrets.get(
+    "OUTPUT_SHEET_URL",
+    "https://docs.google.com/spreadsheets/d/11AxxxJkO5CGqCjMg6gyAwW1BlegJ0Wf6G7F60rN8X0g/edit?usp=sharing",
+)
+OUTPUT_WORKSHEET = st.secrets.get("OUTPUT_WORKSHEET", "")
+
+st.session_state.setdefault("roster_sheet_url", ROSTER_SHEET_URL)
+st.session_state.setdefault("roster_worksheet", ROSTER_WORKSHEET)
+st.session_state["use_roster"] = True
+
+st.session_state.setdefault("output_sheet_url", OUTPUT_SHEET_URL)
+st.session_state.setdefault("output_worksheet", OUTPUT_WORKSHEET)
+st.session_state["sync_enabled"] = True
+
+# Preload roster once per session
+if st.session_state.get("use_roster") and (st.session_state.get("roster_sheet_url") or "").strip():
+    if "roster_cache_rows" not in st.session_state:
+        try:
+            st.session_state["roster_cache_rows"] = load_roster(
+                st.session_state.get("roster_sheet_url", ""),
+                worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
+            )
+        except Exception as e:
+            st.session_state["roster_cache_rows"] = []
+            st.session_state["roster_cache_error"] = f"{type(e).__name__}: {repr(e)}"
+
+if st.session_state.get("roster_cache_error"):
+    st.warning(f"Roster could not be loaded. Name matching may be unavailable. ({st.session_state['roster_cache_error']})")
+# ---------------------------------------------------------------------------
+
+
 if "entries" not in st.session_state:
     st.session_state.entries = []
 
 with st.sidebar:
     st.header("Team / Billing")
-    st.subheader("Roster search (Google Sheet)")
-    roster_sheet_url = st.text_input(
-        "Roster Google Sheet URL",
-        value=st.secrets.get("ROSTER_SHEET_URL", "https://docs.google.com/spreadsheets/d/1PnTKatJGW3Eazy6YpDqnRHVZrVLRvK9rA_vBIVXKfUU/edit?usp=sharing"),
-        key="roster_sheet_url",
-    )
-    roster_worksheet = st.text_input("Worksheet (optional)", value=st.secrets.get("ROSTER_WORKSHEET", ""), key="roster_worksheet")
-    use_roster = st.toggle("Enable roster search", value=True, key="use_roster")
-    test_roster = st.button("Test roster load")
-    roster_cache_rows = st.session_state.get("roster_cache_rows", None)
-    if test_roster:
-        try:
-            _rows = load_roster(roster_sheet_url, worksheet=((roster_worksheet or "").strip() or None))
-            st.session_state["roster_cache_rows"] = _rows
-            st.success(f"Roster loaded: {len(_rows)} rows")
-            if _rows:
-                st.write("Columns found:", sorted(list(_rows[0].keys())))
-        except Exception as e:
-            import traceback as _tb
-            st.error(f"Roster test failed: {type(e).__name__}: {repr(e)}")
-            st.code(_tb.format_exc())
-    if isinstance(roster_cache_rows, list):
-        st.caption(f"Cached roster rows: {len(roster_cache_rows)}")
-    if st.button("Refresh roster cache"):
-        load_roster.clear()
-        st.session_state.pop("roster_cache_rows", None)
-        st.toast("Roster cache cleared.")
-    st.caption("Sheet columns expected: GENDER, FIRST_NAME, LAST_NAME, OTHER_NAME, NRIC, DOB, NATIONALITY, UNIQUE_ID, TEAM_NAME, TEAM_CODE")
-    st.divider()
-    st.subheader("Sync Current Entries to Google Sheet")
-    output_sheet_url = st.text_input(
-        "Output Google Sheet URL",
-        value=st.secrets.get("OUTPUT_SHEET_URL", "https://docs.google.com/spreadsheets/d/11AxxxJkO5CGqCjMg6gyAwW1BlegJ0Wf6G7F60rN8X0g/edit?usp=sharing"),
-        key="output_sheet_url",
-    )
-    output_worksheet = st.text_input("Output worksheet (optional)", value=st.secrets.get("OUTPUT_WORKSHEET", ""), key="output_worksheet")
-    sync_enabled = st.toggle("Enable sync on Add entry", value=True, key="sync_enabled")
-    if st.button("Sync now") and output_sheet_url:
-        try:
-            sync_entries_to_sheet(st.session_state.get("entries", []), sheet_url_or_id=output_sheet_url, worksheet=((output_worksheet or "").strip() or None))
-            st.success("Synced current entries to output sheet.")
-        except Exception as e:
-            import traceback as _tb
-            st.error(f"Sync failed: {type(e).__name__}: {repr(e)}")
-            st.code(_tb.format_exc())
-    po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], index=0, horizontal=True, key="po_to_be_sent")
     default_team_code = st.selectbox("Default Team Code (optional)", [""] + TEAM_CODES, index=0, key="default_team_code")
     default_team_name = get_team_name(default_team_code) if default_team_code else ""
 
