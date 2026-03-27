@@ -289,6 +289,7 @@ with st.sidebar:
     billing_name = st.text_input("Billing contact name", value="", key="billing_name")
     billing_email = st.text_input("Billing email", value="", key="billing_email")
     charge_code = st.text_input("Charge code (optional)", value="", key="charge_code")
+    po_to_be_sent = st.radio("P/O to be sent", options=["No", "Yes"], index=0, horizontal=True, key="po_to_be_sent")
     if billing_email and not is_valid_email(billing_email):
         st.warning("Billing email looks invalid. Please double-check it.")
 st.subheader("Athlete entry")
