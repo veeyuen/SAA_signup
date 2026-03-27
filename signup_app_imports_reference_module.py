@@ -777,6 +777,17 @@ else:
         c_del1, c_del2 = st.columns(2)
         if c_del1.button("Confirm delete", key=f"confirm_del_{didx}"):
             st.session_state.entries.pop(didx)
+            # Sync updated entries to output Google Sheet (optional)
+            if st.session_state.get("sync_enabled") and (st.session_state.get("output_sheet_url") or "").strip():
+                try:
+                    sync_entries_to_sheet(
+                        st.session_state.entries,
+                        sheet_url_or_id=st.session_state.get("output_sheet_url", ""),
+                        worksheet=((st.session_state.get("output_worksheet") or "").strip() or None),
+                    )
+                    st.toast("Synced deletion to output Google Sheet.")
+                except Exception as e:
+                    st.warning(f"Output sheet sync failed: {type(e).__name__}: {repr(e)}")
             st.session_state.delete_idx = None
             st.session_state.edit_idx = None
             st.success("Entry deleted.")
