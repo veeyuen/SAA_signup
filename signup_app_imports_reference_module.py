@@ -196,6 +196,65 @@ def _normalize_header(h: str) -> str:
     h = re.sub(r"[^a-z0-9]+", "_", h).strip("_")
     return h
 
+
+def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame) -> str:
+    """Build required semicolon-delimited export rows (no header) from the OUTPUT sheet.
+
+    Row layout:
+    I; last_name; first_name; ; gender; dob; team_code; team_name; ; ; ; ; ; ; ; ; nationality; ; ; ; ; unique_id; ; ; ;
+    """
+    if sheet_df is None or sheet_df.empty:
+        return ""
+
+    col_map = {_normalize_header(c): c for c in sheet_df.columns}
+
+    def get(row, key, default=""):
+        c = col_map.get(key)
+        return row.get(c, default) if c else default
+
+    def fmt_date(v):
+        if v is None:
+            return ""
+        try:
+            d = parse_dob(v)
+            return d.isoformat() if d else ""
+        except Exception:
+            return str(v).strip()
+
+    lines = []
+    for _, row in sheet_df.iterrows():
+        last_name = str(get(row, "last_name", "")).strip()
+        first_name = str(get(row, "first_name", "")).strip()
+        gender = str(get(row, "gender", "")).strip().upper()
+        dob = fmt_date(get(row, "dob", "") or get(row, "birth_date", "") or get(row, "date_of_birth", ""))
+        team_code = str(get(row, "team_code", "")).strip()
+        team_name = str(get(row, "team_name", "")).strip()
+        nationality = str(get(row, "nationality", "")).strip()
+        unique_id = str(get(row, "unique_id", "")).strip()
+
+        fields = [
+            "I",
+            last_name,
+            first_name,
+            "",
+            gender,
+            dob,
+            team_code,
+            team_name,
+            "", "", "", "", "", "", "", "",
+            nationality,
+            "", "", "", "",
+            unique_id,
+            "", "", "",
+        ]
+
+        if not any([last_name, first_name, gender, dob, team_code, team_name, nationality, unique_id]):
+            continue
+
+        lines.append("; ".join(fields))
+
+    return "\n".join(lines) + ("\n" if lines else "")
+
 def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
     if df is None or df.empty:
         return []
@@ -713,23 +772,31 @@ entries_df = entries_df[cols]
 
 st.dataframe(entries_df, use_container_width=True)
 
-# Download semicolon-delimited file (:) of current entries
-if not entries_df.empty:
-    _output_url = (st.session_state.get("output_sheet_url") or "").strip()
-    _output_ws = (st.session_state.get("output_worksheet") or "").strip() or None
-    sheet_df = read_sheet_as_df(_output_url, worksheet=_output_ws) if _output_url else pd.DataFrame()
-    colon_text = sheet_df.to_csv(index=False, sep=";", lineterminator="\n") if not sheet_df.empty else ""
-    if colon_text:
+
+# Download semicolon-delimited file (;) with required fixed format (from OUTPUT sheet)
+_output_url = (st.session_state.get("output_sheet_url") or "").strip()
+_output_ws = (st.session_state.get("output_worksheet") or "").strip() or None
+
+if _output_url:
+    try:
+        sheet_df = read_sheet_as_df(_output_url, worksheet=_output_ws)
+    except Exception as e:
+        sheet_df = pd.DataFrame()
+        st.warning(f"Could not read output Google Sheet for download: {type(e).__name__}: {repr(e)}")
+
+    if not sheet_df.empty:
+        semicolon_text = build_semicolon_export_from_output_sheet(sheet_df)
         st.download_button(
             "Download semicolon-delimited file",
-            data=colon_text,
-        file_name="current_entries_semicolon_delimited.txt",
+            data=semicolon_text,
+            file_name="current_entries_semicolon_delimited.txt",
             mime="text/plain",
         )
     else:
         st.caption("Output sheet is empty — add entries first to enable download.")
 else:
     st.caption("Output sheet URL is not configured; download is unavailable.")
+
 
 # -------- Row edit controls --------
 st.markdown("### Edit entries")
