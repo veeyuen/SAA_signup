@@ -738,6 +738,8 @@ if entries_df.empty:
 else:
     if "edit_idx" not in st.session_state:
         st.session_state.edit_idx = None
+    if "delete_idx" not in st.session_state:
+        st.session_state.delete_idx = None
 
     # Compact list with per-row Edit buttons
     header_cols = st.columns([1, 3, 2, 2, 1])
@@ -752,16 +754,38 @@ else:
         _ath = (_row.get("name") or " ".join([_row.get("first_name",""), _row.get("other_name",""), _row.get("last_name","")]).strip())
         _team = _row.get("team_name","")
         _event = _row.get("event","")
-        cols_btn = st.columns([1, 3, 2, 2, 1])
+        cols_btn = st.columns([1, 3, 2, 2, 2])
         cols_btn[0].write(_i + 1)
         cols_btn[1].write(_ath)
         cols_btn[2].write(_team)
         cols_btn[3].write(_event)
-        if cols_btn[4].button("Edit", key=f"edit_btn_{_i}"):
+        b1, b2 = cols_btn[4].columns(2)
+        if b1.button("Edit", key=f"edit_btn_{_i}"):
             st.session_state.edit_idx = _i
             st.rerun()
+        if b2.button("Delete", key=f"del_btn_{_i}"):
+            st.session_state.delete_idx = _i
+            st.rerun()
 
-    # Edit panel
+
+    # Delete confirmation panel
+    if st.session_state.delete_idx is not None and 0 <= int(st.session_state.delete_idx) < len(st.session_state.entries):
+        didx = int(st.session_state.delete_idx)
+        drow = st.session_state.entries[didx] or {}
+        dname = drow.get("name") or " ".join([drow.get("first_name",""), drow.get("other_name",""), drow.get("last_name","")]).strip()
+        st.markdown(f"#### Confirm delete entry #{didx + 1}: {dname}")
+        c_del1, c_del2 = st.columns(2)
+        if c_del1.button("Confirm delete", key=f"confirm_del_{didx}"):
+            st.session_state.entries.pop(didx)
+            st.session_state.delete_idx = None
+            st.session_state.edit_idx = None
+            st.success("Entry deleted.")
+            st.rerun()
+        if c_del2.button("Cancel delete", key=f"cancel_del_{didx}"):
+            st.session_state.delete_idx = None
+            st.rerun()
+
+# Edit panel
     if st.session_state.edit_idx is not None and 0 <= int(st.session_state.edit_idx) < len(st.session_state.entries):
         idx = int(st.session_state.edit_idx)
         original = dict(st.session_state.entries[idx] or {})
@@ -926,45 +950,3 @@ else:
                 st.session_state.edit_idx = None
                 st.rerun()
 # -------- End row edit controls --------
-
-st.markdown('### Summary')
-total_entries = len(entries_df)
-st.write(f"Total entries: **{total_entries}**")
-if not entries_df.empty and 'team_name' in entries_df.columns:
-    counts = entries_df['team_name'].fillna('').replace('', '(Unknown)').value_counts().reset_index()
-    counts.columns = ['School/Club', 'Entries']
-    st.dataframe(counts, use_container_width=True)
-
-
-cA, cB, cC = st.columns([1, 1, 2])
-with cA:
-    if st.button("Clear all entries"):
-        st.session_state.entries = []
-        st.rerun()
-
-if not entries_df.empty:
-    header_info = {
-        "team_name": team_name_header,
-        "billing_name": billing_name,
-        "billing_email": billing_email,
-        "charge_code": charge_code,
-        "po_to_be_sent": po_to_be_sent,
-    }
-
-    xlsx_bytes = export_entries_to_excel(header_info, entries_df)
-    csv_bytes = entries_df.to_csv(index=False).encode("utf-8")
-
-    with cB:
-        st.download_button(
-            "Download Excel",
-            data=xlsx_bytes,
-            file_name="Allcomers_Meet_Entries.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    with cC:
-        st.download_button(
-            "Download CSV",
-            data=csv_bytes,
-            file_name="Allcomers_Meet_Entries.csv",
-            mime="text/csv",
-        )
