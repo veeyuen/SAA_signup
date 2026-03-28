@@ -407,9 +407,9 @@ _roster_url = (st.session_state.get("roster_sheet_url") or "").strip()
 
 # Small inline hints so you can see why the dropdown may not appear
 if not _roster_enabled:
-    st.caption("Roster search is OFF (enable it in the left sidebar).")
+    st.caption("Roster search is OFF (check configuration).")
 elif not _roster_url:
-    st.caption("Roster sheet URL is empty (set it in the left sidebar).")
+    st.caption("Roster sheet URL is empty (set ROSTER_SHEET_URL in secrets).")
 elif len(search_text) < 2:
     st.caption("Type at least 2 characters in First/Other/Last name to search the roster.")
 
@@ -418,6 +418,14 @@ roster_rows = []
 if _roster_enabled and _roster_url and len(search_text) >= 2:
     try:
         roster_rows = st.session_state.get("roster_cache_rows")
+        # If cache exists but is empty, try one reload per session (handles first-run load glitches)
+        if isinstance(roster_rows, list) and (len(roster_rows) == 0) and (not st.session_state.get("roster_cache_reloaded_once")):
+            st.session_state["roster_cache_reloaded_once"] = True
+            roster_rows = load_roster(
+                st.session_state.get("roster_sheet_url", ""),
+                worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
+            )
+            st.session_state["roster_cache_rows"] = roster_rows
         if not isinstance(roster_rows, list):
             roster_rows = load_roster(
                 st.session_state.get("roster_sheet_url", ""),
@@ -428,6 +436,7 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
         st.error(f"Roster load error: {type(e).__name__}: {repr(e)}")
         roster_rows = []
 
+    st.caption(f"Roster loaded: {len(roster_rows)} rows")
     q = search_text.casefold()
     for r in roster_rows:
         full_name = str(r.get("FULL_NAME", "") or "")
@@ -455,6 +464,12 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
 
     if matches:
         matches = [r for _, r in sorted(matches, key=lambda x: x[0], reverse=True)]
+    st.caption(f"Matches found: {len(matches)}")
+    with st.expander("Show first 5 roster names (debug)"):
+        preview = []
+        for _r in (roster_rows or [])[:5]:
+            preview.append(str(_r.get("FULL_NAME", "") or _r.get("LAST_NAME", "") or ""))
+        st.write(preview)
 
     if roster_rows and not matches:
         st.info(f"No roster matches for: '{search_text}'. You can refine the search (try first name, last name, team, UID, or NRIC last-4).")
