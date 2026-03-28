@@ -34,6 +34,7 @@ EXPECTED_KEYS = {
     "FIRST_NAME",
     "LAST_NAME",
     "OTHER_NAME",
+    "FULL_NAME",
     "NRIC",
     "DOB",
     "NATIONALITY",
@@ -113,11 +114,29 @@ def load_roster(sheet_url_or_id: str, worksheet: str | None = None) -> List[Dict
         for r in records:
             nr = {normalize_key(str(k)): v for k, v in (r or {}).items()}
             out.append(nr)
+        # Compute FULL_NAME if missing
+        for r in out:
+            if not str(r.get("FULL_NAME", "") or "").strip():
+                fn = str(r.get("FIRST_NAME", "") or "").strip()
+                on = str(r.get("OTHER_NAME", "") or "").strip()
+                ln = str(r.get("LAST_NAME", "") or "").strip()
+                full = " ".join([p for p in [fn, on, ln] if p]).strip()
+                if full:
+                    r["FULL_NAME"] = full
         return out
 
     # Fallback: raw values with header detection
     values = ws.get_all_values()
-    return _records_from_values(values)
+    out2 = _records_from_values(values)
+    for r in out2:
+        if not str(r.get("FULL_NAME", "") or "").strip():
+            fn = str(r.get("FIRST_NAME", "") or "").strip()
+            on = str(r.get("OTHER_NAME", "") or "").strip()
+            ln = str(r.get("LAST_NAME", "") or "").strip()
+            full = " ".join([p for p in [fn, on, ln] if p]).strip()
+            if full:
+                r["FULL_NAME"] = full
+    return out2
 
 def parse_dob(value) -> Any:
     """Parse DOB into a Python date if possible.
