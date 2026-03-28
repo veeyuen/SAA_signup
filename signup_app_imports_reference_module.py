@@ -719,14 +719,15 @@ ready_to_add = bool(waiver_ok) and bool(email_ok) and bool(ic_ok) and bool(birth
 if st.button("Add entry", type="primary", disabled=not ready_to_add):
     missing = []
     _uid_present = bool((unique_id or "").strip())
-    for k, v in [
+    missing_checks = [
         ("Birth Date", birth_date),
-        ("IC last 4", ic_last4) if not _uid_present else None,
         ("Email", email),
         ("Contact Number", contact_number),
-    ]:
-        if not k:
-            continue
+    ]
+    if not _uid_present:
+        missing_checks.insert(1, ("IC last 4", ic_last4))
+    for k, v in missing_checks:
+
         if not v:
             missing.append(k)
 
