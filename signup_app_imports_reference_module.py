@@ -595,10 +595,11 @@ db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
 full_name_display = (st.session_state.get("full_name", "") or "").strip() or typed_full_name
 st.text_input("Full Name (auto)", value=full_name_display, disabled=True)
 
-# Live validation: name presence (either First+Last typed, or selected via matches -> db_name_override)
-name_ok = (bool((first_name or '').strip()) and bool((last_name or '').strip())) or bool(db_name_override)
+# Live validation: name presence
+full_name_loaded = bool((st.session_state.get("full_name", "") or "").strip())
+name_ok = full_name_loaded or ((bool((first_name or '').strip()) and bool((last_name or '').strip()))) or bool(db_name_override)
 if not name_ok:
-    st.warning("Enter First Name and Last Name, or select a match from the list.")
+    st.warning("Enter First Name and Last Name, or select a match from the list (Full Name).")
 
 
 c4, c5, c6 = st.columns(3)
@@ -618,7 +619,8 @@ with c5:
     ic_ok = True
     if not ic_last4_norm:
         ic_ok = True if unique_id_present_for_ic else False
-        st.caption("IC format: 3 digits + 1 letter (e.g., 123A)")
+        if not unique_id_present_for_ic:
+            st.caption("IC format: 3 digits + 1 letter (e.g., 123A) — required if UNIQUE_ID is available.")
     elif len(ic_last4_norm) < 4:
         ic_ok = False
         st.warning("IC last 4 is incomplete (e.g., 123A).")
@@ -733,9 +735,9 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
     elif missing:
         st.error("Missing: " + ", ".join(missing))
     elif not gender_ok:
-        st.error("Please select Gender (M or F).")
-    elif not (((first_name or '').strip()) and ((last_name or '').strip())) and not ((db_name_override or '').strip()):
-        st.error("Please enter First Name and Last Name, or select a name from matches.")
+        st.error("Please select Gender (Male or Female).")
+    elif (not full_name_loaded) and (not (((first_name or '').strip()) and ((last_name or '').strip()))) and (not ((db_name_override or '').strip())):
+        st.error("Please enter First Name and Last Name, or select a match from the list (Full Name).")
     elif not is_valid_email(email_norm):
         st.error("Please enter a valid email address (e.g., name@example.com).")
     elif (not _uid_present) and (not is_valid_ic_last4(ic_last4_norm)):
