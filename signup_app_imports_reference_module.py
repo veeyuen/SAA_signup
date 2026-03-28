@@ -451,7 +451,8 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             tcode = str(r.get("TEAM_CODE", "") or "").strip()
             team = str(r.get("TEAM_NAME", "") or "").strip()
 
-            label = f"{fn} {on} {ln}".strip()
+            full_name = str(r.get("FULL_NAME", "") or "").strip()
+            label = full_name if full_name else f"{fn} {on} {ln}".strip()
             parts = []
             n4 = last4_from_nric(nric)
             if n4:
@@ -560,9 +561,11 @@ with c5:
     ic_last4 = st.text_input("IC Number (last 4)", key="ic_last4")
     # Live validation: IC last-4 (3 digits + 1 letter)
     ic_last4_norm = normalize_ic_last4(ic_last4)
+    # IC last-4 is required only when UNIQUE_ID is not available
+    unique_id_present_for_ic = bool((st.session_state.get("unique_id_override", "") or "").strip() or (st.session_state.get("unique_id", "") or "").strip())
     ic_ok = True
     if not ic_last4_norm:
-        ic_ok = False
+        ic_ok = True if unique_id_present_for_ic else False
         st.caption("IC format: 3 digits + 1 letter (e.g., 123A)")
     elif len(ic_last4_norm) < 4:
         ic_ok = False
@@ -657,12 +660,15 @@ ready_to_add = bool(waiver_ok) and bool(email_ok) and bool(ic_ok) and bool(birth
 # Add entry button
 if st.button("Add entry", type="primary", disabled=not ready_to_add):
     missing = []
+    _uid_present = bool((unique_id or "").strip())
     for k, v in [
         ("Birth Date", birth_date),
-        ("IC last 4", ic_last4),
+        ("IC last 4", ic_last4) if not _uid_present else None,
         ("Email", email),
         ("Contact Number", contact_number),
     ]:
+        if not k:
+            continue
         if not v:
             missing.append(k)
 
@@ -676,7 +682,9 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         st.error("Please enter First Name and Last Name, or select a name from matches.")
     elif not is_valid_email(email_norm):
         st.error("Please enter a valid email address (e.g., name@example.com).")
-    elif not is_valid_ic_last4(ic_last4_norm):
+    elif (not _uid_present) and (not is_valid_ic_last4(ic_last4_norm)):
+        st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
+    elif _uid_present and ic_last4_norm and (not is_valid_ic_last4(ic_last4_norm)):
         st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
     elif not event_opts or not event_names or event_name == "(no events)":
         st.error("No events available for that Gender + Division combination.")
