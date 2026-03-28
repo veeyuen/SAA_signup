@@ -16,12 +16,12 @@ import pandas as pd
 import streamlit as st
 import datetime as dt
 
-from google_sheets_roster_v8 import load_roster, parse_dob, last4_from_nric
+from google_sheets_roster import load_roster, parse_dob, last4_from_nric
 from google_sheets_writer import sync_entries_to_sheet
 from google_sheets_reader import read_sheet_as_df
 
 
-from reference_lists_final import (
+from reference_lists import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
