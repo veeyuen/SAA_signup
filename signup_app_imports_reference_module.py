@@ -382,7 +382,7 @@ with st.sidebar:
 # Defensive: ensure billing fields are bound even if sidebar UI is modified
 po_to_be_sent = st.session_state.get("po_to_be_sent", "No")
 charge_code = st.session_state.get("charge_code", "")
-st.subheader("Athlete entry")
+st.subheader("Athlete Entry Form")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
 c1, c2, c3, c4 = st.columns(4)
@@ -845,7 +845,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         st.rerun()
 
 
-st.subheader("Current entries")
+st.subheader("Current Entries")
 entries_df = pd.DataFrame(st.session_state.entries)
 
 # Ensure these columns exist even for entries added before the latest schema updates
@@ -900,7 +900,7 @@ else:
 
 
 # -------- Row edit controls --------
-st.markdown("### Edit entries")
+st.markdown("### Edit Entries")
 if entries_df.empty:
     st.caption("No entries to edit yet.")
 else:
