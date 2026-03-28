@@ -661,6 +661,15 @@ with c6:
         nationality_options = ["", _nat_extra] + [x for x in nationality_options if x != ""]
     nationality = st.selectbox("Nationality", nationality_options, index=0, key="nationality")
 
+
+# Unique ID (display) — placed under Birth Date / IC row
+uid_from_roster = unique_id_override
+if uid_from_roster:
+    st.text_input("Unique ID (from roster)", value=uid_from_roster, disabled=True)
+else:
+    st.text_input("Unique ID (auto)", value=(unique_id or ""), disabled=True)
+
+
 c7, c8 = st.columns(2)
 contact_number = c7.text_input("Contact Number", key="contact_number")
 
@@ -730,13 +739,6 @@ parq = st.selectbox("PAR-Q completed?", ["Y", "N"], key="parq")
 
 ic_last4_norm = normalize_ic_last4(ic_last4)
 email_norm = normalize_email(email)
-unique_id_override = (st.session_state.get("unique_id_override", "") or "").strip()
-unique_id = unique_id_override or (compute_unique_id(first_name, ic_last4_norm, birth_date) if birth_date else "")
-uid_from_roster = (st.session_state.get("unique_id_override", "") or "").strip()
-if uid_from_roster:
-    st.text_input("Unique ID (from roster)", value=uid_from_roster, disabled=True)
-else:
-    st.text_input("Unique ID (auto)", value=(unique_id or ""), disabled=True)
 
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
 
