@@ -315,8 +315,7 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
         email = normalize_email(str(get(row, "email", "")).strip())
         contact_number = str(get(row, "contact_number", "") or get(row, "contact", "")).strip()
 
-        full_name_sheet = str(get(row, "full_name",
-        "full_name_signature", "") or get(row, "full", "") or "").strip()
+        full_name_sheet = str(get(row, "full_name", "") or get(row, "full", "") or "").strip()
         name = " ".join([p for p in [first_name, other_name, last_name] if p]).strip()
         if full_name_sheet:
             name = name or full_name_sheet
