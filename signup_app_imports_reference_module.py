@@ -315,7 +315,8 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
         email = normalize_email(str(get(row, "email", "")).strip())
         contact_number = str(get(row, "contact_number", "") or get(row, "contact", "")).strip()
 
-        full_name_sheet = str(get(row, "full_name", "") or get(row, "full", "") or "").strip()
+        full_name_sheet = str(get(row, "full_name",
+        "full_name_signature", "") or get(row, "full", "") or "").strip()
         name = " ".join([p for p in [first_name, other_name, last_name] if p]).strip()
         if full_name_sheet:
             name = name or full_name_sheet
@@ -404,6 +405,22 @@ if not gender_ok:
 last_name = st.session_state.get("last_name", "")
 first_name = st.session_state.get("first_name", "")
 other_name = st.session_state.get("other_name", "")
+
+# If user edits any name fields after selecting from roster, clear roster-derived FULL_NAME and UNIQUE_ID
+current_name_sig = "|".join([
+    (st.session_state.get("first_name", "") or "").strip(),
+    (st.session_state.get("other_name", "") or "").strip(),
+    (st.session_state.get("last_name", "") or "").strip(),
+])
+prev_sig = (st.session_state.get("full_name_signature", "") or "").strip()
+if prev_sig and current_name_sig != prev_sig:
+    # User typed a new name; clear roster-derived fields so they don't persist
+    st.session_state["full_name__pending"] = ""
+    st.session_state["unique_id_override__pending"] = ""
+    st.session_state["db_name_override__pending"] = ""
+    st.session_state["full_name_signature__pending"] = ""
+    st.rerun()
+
 
 # Roster match selector (Google Sheet) — selecting a row fills fields (no splitting)
 search_text = (" ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()])).strip()
@@ -554,6 +571,11 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             st.session_state["last_name__pending"] = ln
             st.session_state["other_name__pending"] = on
             st.session_state["full_name__pending"] = full_name_sel
+            st.session_state["full_name_signature__pending"] = "|".join([
+                (st.session_state.get("first_name__pending", "") or "").strip(),
+                (st.session_state.get("other_name__pending", "") or "").strip(),
+                (st.session_state.get("last_name__pending", "") or "").strip(),
+            ])
 
             # Populate other fields
             st.session_state["ic_last4__pending"] = last4_from_nric(nric)
