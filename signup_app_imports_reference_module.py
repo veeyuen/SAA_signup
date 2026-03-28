@@ -16,12 +16,12 @@ import pandas as pd
 import streamlit as st
 import datetime as dt
 
-from google_sheets_roster import load_roster, parse_dob, last4_from_nric
+from google_sheets_roster_v8 import load_roster, parse_dob, last4_from_nric
 from google_sheets_writer import sync_entries_to_sheet
 from google_sheets_reader import read_sheet_as_df
 
 
-from reference_lists import (
+from reference_lists_final import (
     ENTRY_HEADERS,
     TEAM_CODES,
     get_team_name,
@@ -701,7 +701,11 @@ ic_last4_norm = normalize_ic_last4(ic_last4)
 email_norm = normalize_email(email)
 unique_id_override = (st.session_state.get("unique_id_override", "") or "").strip()
 unique_id = unique_id_override or (compute_unique_id(first_name, ic_last4_norm, birth_date) if birth_date else "")
-st.text_input("Unique ID", value=(unique_id or ""), disabled=True)
+uid_from_roster = (st.session_state.get("unique_id_override", "") or "").strip()
+if uid_from_roster:
+    st.text_input("Unique ID (from roster)", value=uid_from_roster, disabled=True)
+else:
+    st.text_input("Unique ID (auto)", value=(unique_id or ""), disabled=True)
 
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
 
@@ -969,7 +973,9 @@ else:
 
             cJ, cK = st.columns(2)
             team_code_e = cJ.selectbox("Team Code", tc_opts, index=tc_opts.index(_tc_cur) if _tc_cur in tc_opts else 0, key=f"e_team_code_{idx}")
-            team_name_override_e = cK.text_input("Team Name override (optional)", value=original.get("team_name_override",""), key=f"e_team_name_override_{idx}")
+            team_name_override_e = cK.text_input("Team Name override (optional)", value=original.get("team_name_override",
+        "unique_id_override",
+        "full_name",""), key=f"e_team_name_override_{idx}")
 
             cL, cM = st.columns(2)
             # Event division & event
