@@ -663,6 +663,8 @@ with c6:
 
 
 # Unique ID (display) — placed under Birth Date / IC row
+unique_id_override = (st.session_state.get("unique_id_override", "") or "").strip()
+unique_id = unique_id_override or (compute_unique_id(first_name, ic_last4_norm, birth_date) if birth_date else "")
 uid_from_roster = unique_id_override
 if uid_from_roster:
     st.text_input("Unique ID (from roster)", value=uid_from_roster, disabled=True)
