@@ -343,6 +343,8 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
 
 # Preload existing entries from OUTPUT Google Sheet on app start (only if empty)
 st.session_state.setdefault("entries", [])
+st.session_state.setdefault("full_name", "")
+
 if not st.session_state.entries:
     _preload_url = (st.session_state.get("output_sheet_url") or "").strip()
     _preload_ws = (st.session_state.get("output_worksheet") or "").strip() or None
@@ -465,11 +467,6 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
     if matches:
         matches = [r for _, r in sorted(matches, key=lambda x: x[0], reverse=True)]
     st.caption(f"Matches found: {len(matches)}")
-    with st.expander("Show first 5 roster names (debug)"):
-        preview = []
-        for _r in (roster_rows or [])[:5]:
-            preview.append(str(_r.get("FULL_NAME", "") or _r.get("LAST_NAME", "") or ""))
-        st.write(preview)
 
     if roster_rows and not matches:
         st.info(f"No roster matches for: '{search_text}'. You can refine the search (try first name, last name, team, UID, or NRIC last-4).")
@@ -529,6 +526,13 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             idx = int(chosen)
             r = matches[idx]
 
+            full_name_sel = str(r.get("FULL_NAME", "") or "").strip()
+            if not full_name_sel:
+                fn_tmp = str(r.get("FIRST_NAME", "") or "").strip()
+                on_tmp = str(r.get("OTHER_NAME", "") or "").strip()
+                ln_tmp = str(r.get("LAST_NAME", "") or "").strip()
+                full_name_sel = " ".join([p for p in [fn_tmp, on_tmp, ln_tmp] if p]).strip()
+
             fn = str(r.get("FIRST_NAME", "") or "").strip()
             fn_raw = str(r.get("FIRST_NAME", "") or "").strip()
             ln = str(r.get("LAST_NAME", "") or "").strip()
@@ -545,6 +549,7 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             st.session_state["first_name__pending"] = fn_raw or on
             st.session_state["last_name__pending"] = ln
             st.session_state["other_name__pending"] = on
+            st.session_state["full_name__pending"] = full_name_sel
 
             # Populate other fields
             st.session_state["ic_last4__pending"] = last4_from_nric(nric)
@@ -586,6 +591,9 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
 # Combined name (display)
 typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
 db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
+
+full_name_display = (st.session_state.get("full_name", "") or "").strip() or typed_full_name
+st.text_input("Full Name (auto)", value=full_name_display, disabled=True)
 
 # Live validation: name presence (either First+Last typed, or selected via matches -> db_name_override)
 name_ok = (bool((first_name or '').strip()) and bool((last_name or '').strip())) or bool(db_name_override)
@@ -693,7 +701,7 @@ ic_last4_norm = normalize_ic_last4(ic_last4)
 email_norm = normalize_email(email)
 unique_id_override = (st.session_state.get("unique_id_override", "") or "").strip()
 unique_id = unique_id_override or (compute_unique_id(first_name, ic_last4_norm, birth_date) if birth_date else "")
-st.caption(f"Unique ID (auto): **{unique_id or '—'}**")
+st.text_input("Unique ID", value=(unique_id or ""), disabled=True)
 
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
 
