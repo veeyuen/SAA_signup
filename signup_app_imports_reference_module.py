@@ -197,6 +197,23 @@ def _normalize_header(h: str) -> str:
     return h
 
 
+def gender_to_code(g: str) -> str:
+    g = (g or "").strip().casefold()
+    if g in ("m", "male"):
+        return "M"
+    if g in ("f", "female"):
+        return "F"
+    return ""
+
+def code_to_gender_display(code: str) -> str:
+    c = (code or "").strip().upper()
+    if c == "M":
+        return "Male"
+    if c == "F":
+        return "Female"
+    return ""
+
+
 def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame) -> str:
     """Build required semicolon-delimited export rows (no header) from the OUTPUT sheet.
 
@@ -225,7 +242,9 @@ def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame) -> str:
     for _, row in sheet_df.iterrows():
         last_name = str(get(row, "last_name", "")).strip()
         first_name = str(get(row, "first_name", "")).strip()
-        gender = str(get(row, "gender", "")).strip().upper()
+        gender_raw = str(get(row, "gender", "")).strip()
+        gcode = gender_to_code(gender_raw)
+        gender = code_to_gender_display(gcode) or gender_raw
         dob = fmt_date(get(row, "dob", "") or get(row, "birth_date", "") or get(row, "date_of_birth", ""))
         team_code = str(get(row, "team_code", "")).strip()
         team_name = str(get(row, "team_name", "")).strip()
@@ -269,7 +288,9 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
         first_name = str(get(row, "first_name", "") or get(row, "firstname", "") or get(row, "first", "")).strip()
         other_name = str(get(row, "other_name", "") or get(row, "othername", "")).strip()
         last_name = str(get(row, "last_name", "") or get(row, "lastname", "") or get(row, "last", "")).strip()
-        gender = str(get(row, "gender", "")).strip().upper()
+        gender_raw = str(get(row, "gender", "")).strip()
+        gcode = gender_to_code(gender_raw)
+        gender = code_to_gender_display(gcode) or gender_raw
 
         dob_raw = get(row, "birth_date", "") or get(row, "dob", "") or get(row, "date_of_birth", "")
         try:
@@ -366,12 +387,12 @@ with c2:
 with c3:
     st.text_input("Other Name (optional)", key="other_name")
 with c4:
-    gender = st.selectbox("Gender", ["", "M", "F"], index=0, key="gender")
+    gender = st.selectbox("Gender", ["", "Male", "Female"], index=0, key="gender")
 
 # Live validation: gender (mandatory)
-gender_ok = gender in ('M','F')
+gender_ok = gender in ('Male','Female')
 if not gender_ok:
-    st.warning("Gender is required (select M or F).")
+    st.warning("Gender is required (select Male or Female).")
 
 
 last_name = st.session_state.get("last_name", "")
@@ -409,22 +430,21 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
 
     q = search_text.casefold()
     for r in roster_rows:
+        full_name = str(r.get("FULL_NAME", "") or "")
         fn = str(r.get("FIRST_NAME", "") or "")
         ln = str(r.get("LAST_NAME", "") or "")
         on = str(r.get("OTHER_NAME", "") or "")
         team = str(r.get("TEAM_NAME", "") or "")
         uid = str(r.get("UNIQUE_ID", "") or "")
         nric = str(r.get("NRIC", "") or "")
-        # Match on name/team/uid/nric(last4) to help disambiguation
-        if (
-            q in ln.casefold()
-            or q in fn.casefold()
-            or q in on.casefold()
-            or q in (f"{fn} {on} {ln}".strip()).casefold()
-            or q in team.casefold()
-            or q in uid.casefold()
-            or q in last4_from_nric(nric).casefold()
-        ):
+        # Match on tokens across ALL name fields (FIRST/LAST/OTHER/FULL), plus team/uid/nric(last4)
+        full_name = str(r.get("FULL_NAME", "") or "")
+        name_hay = " ".join([full_name, fn, on, ln]).casefold()
+        tokens = [t.casefold() for t in search_text.split() if t.strip()]
+        name_match = all(t in name_hay for t in tokens) if tokens else False
+        extra_hay = " ".join([team, uid, last4_from_nric(nric)]).casefold()
+        extra_match = q in extra_hay if q else False
+        if name_match or extra_match:
             matches.append(r)
 
     if roster_rows and not matches:
@@ -506,8 +526,8 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             st.session_state["ic_last4__pending"] = last4_from_nric(nric)
             st.session_state["birth_date__pending"] = dob
             # Gender from roster (may be blank; still mandatory to submit)
-            if gender_raw in ("M","F"):
-                st.session_state["gender__pending"] = gender_raw
+            if gender_raw in ("M","F","MALE","FEMALE"):
+                st.session_state["gender__pending"] = ("Male" if gender_raw.startswith("M") else "Female")
             else:
                 st.session_state["gender__pending"] = ""
 
@@ -622,7 +642,7 @@ event_division = c11.selectbox(
     key="event_division",
 )
 
-event_opts = allowed_events(gender, int(event_division))
+event_opts = allowed_events(gender_to_code(gender), int(event_division))
 event_names = [n for n, _ in event_opts]
 
 # Keep event selection consistent when options change
@@ -903,7 +923,7 @@ else:
             other_name_e = cC.text_input("Other Name (optional)", value=original.get("other_name", ""), key=f"e_other_{idx}")
 
             cD, cE, cF = st.columns(3)
-            gender_opts_e = ["", "M", "F"]
+            gender_opts_e = ["", "Male", "Female"]
             _gcur = (original.get("gender","") or "").strip()
             _gidx = gender_opts_e.index(_gcur) if _gcur in gender_opts_e else 0
             gender_e = cD.selectbox("Gender", gender_opts_e, index=_gidx, key=f"e_gender_{idx}")
@@ -929,7 +949,7 @@ else:
                 format_func=lambda k: f"{k} - {DIVISIONS[k]}",
                 key=f"e_event_div_{idx}",
             )
-            event_opts_e = allowed_events(gender_e, int(event_div_e))
+            event_opts_e = allowed_events(gender_to_code(gender_e), int(event_div_e))
             event_names_e = [n for n, _ in event_opts_e]
             event_cur = (original.get("event","") or "").strip()
             if event_cur and event_cur not in event_names_e:
@@ -965,7 +985,7 @@ else:
 
             errors = []
             if gender_e not in ("M","F"):
-                errors.append("Gender must be selected (M or F).")
+                errors.append("Gender must be selected (Male or Female).")
             if not birth_date_e:
                 errors.append("Birth Date is required.")
             if not (contact_number_e or "").strip():
