@@ -441,11 +441,20 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
         full_name = str(r.get("FULL_NAME", "") or "")
         name_hay = " ".join([full_name, fn, on, ln]).casefold()
         tokens = [t.casefold() for t in search_text.split() if t.strip()]
-        name_match = all(t in name_hay for t in tokens) if tokens else False
         extra_hay = " ".join([team, uid, last4_from_nric(nric)]).casefold()
-        extra_match = q in extra_hay if q else False
-        if name_match or extra_match:
-            matches.append(r)
+        # Scored OR-matching: show suggestions even if only part of the name is typed
+        score = 0
+        if tokens:
+            score += sum(1 for t in tokens if t in name_hay)
+        if q and q in name_hay:
+            score += 2  # boost full-query name hits
+        if q and q in extra_hay:
+            score += 1
+        if score > 0:
+            matches.append((score, r))
+
+    if matches:
+        matches = [r for _, r in sorted(matches, key=lambda x: x[0], reverse=True)]
 
     if roster_rows and not matches:
         st.info(f"No roster matches for: '{search_text}'. You can refine the search (try first name, last name, team, UID, or NRIC last-4).")
