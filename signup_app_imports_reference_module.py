@@ -315,13 +315,17 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
         email = normalize_email(str(get(row, "email", "")).strip())
         contact_number = str(get(row, "contact_number", "") or get(row, "contact", "")).strip()
 
+        full_name_sheet = str(get(row, "full_name", "") or get(row, "full", "") or "").strip()
         name = " ".join([p for p in [first_name, other_name, last_name] if p]).strip()
+        if full_name_sheet:
+            name = name or full_name_sheet
 
         if not any([name, unique_id, team_code, team_name, email, contact_number, ic_last4]):
             continue
 
         entries.append({
             "name": name,
+            "full_name": (full_name_sheet or name),
             "first_name": first_name,
             "other_name": other_name,
             "last_name": last_name,
@@ -651,6 +655,10 @@ email_norm = normalize_email(email)
 email_ok = True
 if email_norm:
     email_ok = is_valid_email(email_norm)
+
+email_present = bool(email_norm)
+if not email_present:
+    st.warning("Email is required.")
     if not email_ok:
         st.error("Please enter a valid email address (e.g., name@example.com).")
 
@@ -712,7 +720,7 @@ else:
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
 
 # Gate Add entry button (live checks)
-ready_to_add = bool(waiver_ok) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(gender_ok) and bool(event_ok)
+ready_to_add = bool(waiver_ok) and bool(email_present) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(gender_ok) and bool(event_ok)
 
 
 # Add entry button
@@ -751,6 +759,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         event_code = dict(event_opts).get(event_name, "")
         st.session_state.entries.append({
             "name": (db_name_override or typed_full_name),
+            "full_name": (st.session_state.get("full_name", "") or db_name_override or typed_full_name),
             "last_name": (last_name or "").strip(),
             "first_name": (first_name or "").strip(),
             "other_name": (other_name or "").strip(),
@@ -1058,6 +1067,7 @@ else:
                     "other_name": (other_name_e or "").strip(),
                     "last_name": (last_name_e or "").strip(),
                     "name": name_e,
+                    "full_name": name_e,
                     "gender": gender_e,
                     "birth_date": birth_date_e,
                     "ic_last4": ic_norm_e,
