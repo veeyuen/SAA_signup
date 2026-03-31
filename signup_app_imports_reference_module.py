@@ -849,11 +849,11 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "emergency_contact_number": (emergency_contact_number or "").strip(),
             "coach_full_name": (coach_full_name or "").strip(),
             "parq": parq,
-                "event": _ev,
-                "event_code": _code,
+            "event": _ev,
+            "event_code": _code,
             })
             added_events.append(_ev)
-        st.success("Entry added.")
+        st.success(f"Added {len(added_events)} entry(ies).")
         # Send confirmation email (SMTP) — do not block saving if email fails
         try:
             if email_norm and is_valid_email(email_norm):
