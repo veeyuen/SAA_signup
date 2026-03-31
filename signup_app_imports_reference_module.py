@@ -753,18 +753,25 @@ event_division = c11.selectbox(
 event_opts = allowed_events(gender_to_code(gender), int(event_division))
 event_names = [n for n, _ in event_opts]
 
-# Keep event selection consistent when options change
-if event_names:
-    if st.session_state.get("event_name") not in event_names:
-        st.session_state["event_name"] = event_names[0]
-    st.session_state["event_name"] = ""
+# Keep event selection consistent when options change (multi-select)
+prev_selected = st.session_state.get("events_selected", [])
+if not isinstance(prev_selected, list):
+    prev_selected = []
+prev_selected_valid = [e for e in prev_selected if e in event_names]
+if prev_selected_valid != prev_selected:
+    st.session_state["events_selected"] = prev_selected_valid
 
-event_name = c12.selectbox("Event", event_names if event_names else ["(no events)"], key="event_name")
+selected_events = c12.multiselect(
+    "Select event(s)",
+    options=event_names,
+    default=prev_selected_valid,
+    key="events_selected",
+)
 
-# Live validation: event selection availability
-event_ok = bool(event_opts) and event_name not in (None, '', '(no events)')
+# Live validation: must have at least one event selected
+event_ok = bool(event_opts) and len(selected_events) > 0
 if not event_ok:
-    st.warning("Please select an event (none available for this Gender + Division).")
+    st.warning("Please select at least one event (none available for this Gender + Division).")
 
 
 season_best = st.text_input("Season Best (optional)", key="season_best")
@@ -812,11 +819,14 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
     elif _uid_present and ic_last4_norm and (not is_valid_ic_last4(ic_last4_norm)):
         st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
-    elif not event_opts or not event_names or event_name == "(no events)":
-        st.error("No events available for that Gender + Division combination.")
+    elif not event_opts or not event_names or not selected_events:
+        st.error("Please select at least one event for that Gender + Division combination.")
     else:
-        event_code = dict(event_opts).get(event_name, "")
-        st.session_state.entries.append({
+        # Add one row per selected event
+        added_events = []
+        for _ev in selected_events:
+            _code = dict(event_opts).get(_ev, "")
+            st.session_state.entries.append({
             "name": (db_name_override or typed_full_name),
             "full_name": (st.session_state.get("full_name", "") or db_name_override or typed_full_name),
             "last_name": (last_name or "").strip(),
@@ -833,15 +843,16 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "team_name": team_name_row,
             "charge_code": charge_code,
             "po_to_be_sent": po_to_be_sent,
-            "event": event_name,
-            "event_code": event_code,
             "event_division": int(event_division),
             "season_best": (season_best or "").strip(),
             "emergency_contact_name": (emergency_contact_name or "").strip(),
             "emergency_contact_number": (emergency_contact_number or "").strip(),
             "coach_full_name": (coach_full_name or "").strip(),
             "parq": parq,
-        })
+                "event": _ev,
+                "event_code": _code,
+            })
+            added_events.append(_ev)
         st.success("Entry added.")
         # Send confirmation email (SMTP) — do not block saving if email fails
         try:
@@ -853,7 +864,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
                     "Hi,\n\n"
                     "Your entry has been received.\n\n"
                     f"Full Name: {_full}\n"
-                    f"Event: {event_name}\n"
+                    f"Events: {", ".join(added_events)}\n"
                     f"Team: {team_name_row}\n"
                     f"Unique ID: {_uid_disp}\n\n"
                     "Thank you.\n"
@@ -894,6 +905,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "waiver_ok": False,
             "db_name_override": "",
             "athlete_roster_match": "(keep typed)",
+            "events_selected": [],
         }.items():
             st.session_state[f"{_k}__pending"] = _v
         st.rerun()
