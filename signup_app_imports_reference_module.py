@@ -14,6 +14,8 @@ from io import BytesIO
 import openpyxl
 import pandas as pd
 import streamlit as st
+import traceback as tb
+
 import smtplib
 from email.message import EmailMessage
 
@@ -789,6 +791,43 @@ waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", 
 ready_to_add = bool(waiver_ok) and bool(email_present) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(gender_ok) and bool(event_ok)
 
 
+
+# Email debug (SMTP)
+with st.expander("Email debug"):
+    _smtp_host = (st.secrets.get("SMTP_HOST", "") or "").strip()
+    _smtp_user = (st.secrets.get("SMTP_USER", "") or "").strip()
+    _smtp_pass = (st.secrets.get("SMTP_PASS", "") or "").strip()
+    _smtp_from = (st.secrets.get("SMTP_FROM", "") or "").strip()
+    _smtp_port = st.secrets.get("SMTP_PORT", 587)
+
+    st.write({
+        "SMTP_HOST_set": bool(_smtp_host),
+        "SMTP_PORT": _smtp_port,
+        "SMTP_USER_set": bool(_smtp_user),
+        "SMTP_PASS_set": bool(_smtp_pass),
+        "SMTP_FROM_set": bool(_smtp_from),
+    })
+
+    last = st.session_state.get("email_last_attempt", {})
+    if last:
+        st.markdown("**Last email attempt**")
+        st.json(last)
+    else:
+        st.caption("No email attempt recorded yet in this session.")
+
+    # Optional: quick test using the current Email field
+    if st.button("Send test email to current Email field"):
+        try:
+            _to = normalize_email(st.session_state.get("email", ""))
+            if not _to or not is_valid_email(_to):
+                st.error("Current Email field is empty or invalid.")
+            else:
+                send_confirmation_email_smtp(_to, "Test email (SAA signup)", "This is a test email from the SAA signup app.")
+                st.success("Test email sent (no exception raised).")
+        except Exception as e:
+            st.error(f"Test email failed: {type(e).__name__}: {repr(e)}")
+            st.code(tb.format_exc())
+
 # Add entry button
 if st.button("Add entry", type="primary", disabled=not ready_to_add):
     missing = []
@@ -869,10 +908,28 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
                     f"Unique ID: {_uid_disp}\n\n"
                     "Thank you.\n"
                 )
+                st.session_state["email_last_attempt"] = {
+                    "ts": datetime.datetime.utcnow().isoformat() + "Z",
+                    "to": email_norm,
+                    "subject": _subj,
+                    "events": list(added_events) if isinstance(added_events, list) else str(added_events),
+                    "status": "attempting",
+                }
                 send_confirmation_email_smtp(email_norm, _subj, _body)
+                st.session_state["email_last_attempt"]["status"] = "sent"
                 st.toast("Confirmation email sent.")
         except Exception as e:
+            st.session_state["email_last_attempt"] = {
+                "ts": datetime.datetime.utcnow().isoformat() + "Z",
+                "to": email_norm,
+                "status": "failed",
+                "error_type": type(e).__name__,
+                "error": repr(e),
+                "traceback": tb.format_exc(),
+            }
             st.warning(f"Entry added, but email failed: {type(e).__name__}: {repr(e)}")
+            with st.expander("Email error traceback"):
+                st.code(st.session_state["email_last_attempt"]["traceback"])
 
 
         # Sync "Current entries" to output Google Sheet (optional)
