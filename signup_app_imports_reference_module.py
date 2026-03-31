@@ -864,7 +864,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
                     "Hi,\n\n"
                     "Your entry has been received.\n\n"
                     f"Full Name: {_full}\n"
-                    f"Events: {", ".join(added_events)}\n"
+                    f"Events: {', '.join(added_events)}\n"
                     f"Team: {team_name_row}\n"
                     f"Unique ID: {_uid_disp}\n\n"
                     "Thank you.\n"
