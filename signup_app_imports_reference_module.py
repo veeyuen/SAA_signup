@@ -14,6 +14,9 @@ from io import BytesIO
 import openpyxl
 import pandas as pd
 import streamlit as st
+import smtplib
+from email.message import EmailMessage
+
 import datetime as dt
 
 from google_sheets_roster import load_roster, parse_dob, last4_from_nric
@@ -214,6 +217,37 @@ def code_to_gender_display(code: str) -> str:
     return ""
 
 
+def send_confirmation_email_smtp(to_email: str, subject: str, body: str) -> None:
+    """Send a confirmation email via SMTP using Streamlit secrets.
+
+    Required secrets:
+      SMTP_HOST, SMTP_PORT (optional, default 587), SMTP_USER, SMTP_PASS
+    Optional secrets:
+      SMTP_FROM (display name + email) e.g. "SAA Entries <your@email>"
+    """
+    host = (st.secrets.get("SMTP_HOST", "") or "").strip()
+    user = (st.secrets.get("SMTP_USER", "") or "").strip()
+    password = (st.secrets.get("SMTP_PASS", "") or "").strip()
+    sender = (st.secrets.get("SMTP_FROM", "") or user).strip()
+    port = int(st.secrets.get("SMTP_PORT", 587) or 587)
+
+    if not host or not user or not password:
+        raise RuntimeError("SMTP secrets are missing (SMTP_HOST/SMTP_USER/SMTP_PASS).")
+
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    with smtplib.SMTP(host, port, timeout=20) as smtp:
+        smtp.ehlo()
+        smtp.starttls()
+        smtp.ehlo()
+        smtp.login(user, password)
+        smtp.send_message(msg)
+
+
 def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame) -> str:
     """Build required semicolon-delimited export rows (no header) from the OUTPUT sheet.
 
@@ -382,7 +416,7 @@ with st.sidebar:
 # Defensive: ensure billing fields are bound even if sidebar UI is modified
 po_to_be_sent = st.session_state.get("po_to_be_sent", "No")
 charge_code = st.session_state.get("charge_code", "")
-st.subheader("Athlete Entry Form")
+st.subheader("Athlete entry")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
 c1, c2, c3, c4 = st.columns(4)
@@ -809,6 +843,26 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "parq": parq,
         })
         st.success("Entry added.")
+        # Send confirmation email (SMTP) — do not block saving if email fails
+        try:
+            if email_norm and is_valid_email(email_norm):
+                _subj = "Entry confirmation"
+                _full = (st.session_state.get("full_name", "") or "").strip() or (db_name_override or typed_full_name)
+                _uid_disp = (st.session_state.get("unique_id_override", "") or "").strip() or unique_id
+                _body = (
+                    "Hi,\n\n"
+                    "Your entry has been received.\n\n"
+                    f"Full Name: {_full}\n"
+                    f"Event: {event_name}\n"
+                    f"Team: {team_name_row}\n"
+                    f"Unique ID: {_uid_disp}\n\n"
+                    "Thank you.\n"
+                )
+                send_confirmation_email_smtp(email_norm, _subj, _body)
+                st.toast("Confirmation email sent.")
+        except Exception as e:
+            st.warning(f"Entry added, but email failed: {type(e).__name__}: {repr(e)}")
+
 
         # Sync "Current entries" to output Google Sheet (optional)
         if st.session_state.get("sync_enabled") and (st.session_state.get("output_sheet_url") or "").strip():
@@ -845,7 +899,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         st.rerun()
 
 
-st.subheader("Current Entries")
+st.subheader("Current entries")
 entries_df = pd.DataFrame(st.session_state.entries)
 
 # Ensure these columns exist even for entries added before the latest schema updates
@@ -900,7 +954,7 @@ else:
 
 
 # -------- Row edit controls --------
-st.markdown("### Edit Entries")
+st.markdown("### Edit entries")
 if entries_df.empty:
     st.caption("No entries to edit yet.")
 else:
