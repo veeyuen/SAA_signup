@@ -15,7 +15,6 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 import traceback as tb
-import datetime
 
 import smtplib
 from email.message import EmailMessage
@@ -142,8 +141,8 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb.save(bio)
     return bio.getvalue()
 # ---------------- UI ----------------
-st.set_page_config(page_title="Allcomers 4 Meet Signup", layout="wide")
-st.title("Allcomers 4 Meet Signup")
+st.set_page_config(page_title="Allcomers Meet 4 Signup", layout="wide")
+st.title("Allcomers Meet 4 Signup")
 
 def _apply_pending_text_updates():
     """Apply any pending text updates BEFORE widgets are instantiated."""
@@ -792,42 +791,6 @@ waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", 
 ready_to_add = bool(waiver_ok) and bool(email_present) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(gender_ok) and bool(event_ok)
 
 
-
-# Email debug (SMTP)
-with st.expander("Email debug"):
-    _smtp_host = (st.secrets.get("SMTP_HOST", "") or "").strip()
-    _smtp_user = (st.secrets.get("SMTP_USER", "") or "").strip()
-    _smtp_pass = (st.secrets.get("SMTP_PASS", "") or "").strip()
-    _smtp_from = (st.secrets.get("SMTP_FROM", "") or "").strip()
-    _smtp_port = st.secrets.get("SMTP_PORT", 587)
-
-    st.write({
-        "SMTP_HOST_set": bool(_smtp_host),
-        "SMTP_PORT": _smtp_port,
-        "SMTP_USER_set": bool(_smtp_user),
-        "SMTP_PASS_set": bool(_smtp_pass),
-        "SMTP_FROM_set": bool(_smtp_from),
-    })
-
-    last = st.session_state.get("email_last_attempt", {})
-    if last:
-        st.markdown("**Last email attempt**")
-        st.json(last)
-    else:
-        st.caption("No email attempt recorded yet in this session.")
-
-    # Optional: quick test using the current Email field
-    if st.button("Send test email to current Email field"):
-        try:
-            _to = normalize_email(st.session_state.get("email", ""))
-            if not _to or not is_valid_email(_to):
-                st.error("Current Email field is empty or invalid.")
-            else:
-                send_confirmation_email_smtp(_to, "Test email (SAA signup)", "This is a test email from the SAA signup app.")
-                st.success("Test email sent (no exception raised).")
-        except Exception as e:
-            st.error(f"Test email failed: {type(e).__name__}: {repr(e)}")
-            st.code(tb.format_exc())
 
 # Add entry button
 if st.button("Add entry", type="primary", disabled=not ready_to_add):
