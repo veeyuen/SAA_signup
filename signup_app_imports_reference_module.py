@@ -419,7 +419,7 @@ with st.sidebar:
 # Defensive: ensure billing fields are bound even if sidebar UI is modified
 po_to_be_sent = st.session_state.get("po_to_be_sent", "No")
 charge_code = st.session_state.get("charge_code", "")
-st.subheader("Athlete entry")
+st.subheader("Athlete Entry Form")
 
 # Athlete fields (no form, so dependent dropdowns update immediately)
 c1, c2, c3, c4 = st.columns(4)
