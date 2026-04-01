@@ -218,6 +218,16 @@ def code_to_gender_display(code: str) -> str:
         return "Female"
     return ""
 
+def safe_date_max(v):
+    """Return a max_value for st.date_input that is always >= v (prevents StreamlitAPIException)."""
+    mx = dt.date.today()
+    try:
+        if isinstance(v, dt.date) and v > mx:
+            return v
+    except Exception:
+        pass
+    return mx
+
 
 def send_confirmation_email_smtp(to_email: str, subject: str, body: str) -> None:
     """Send a confirmation email via SMTP using Streamlit secrets.
@@ -365,7 +375,7 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
             "first_name": first_name,
             "other_name": other_name,
             "last_name": last_name,
-            "gender": gender if gender in ("M","F") else "",
+            "gender": gender if gender in ("Male","Female","M","F") else "",
             "birth_date": birth_date,
             "ic_last4": ic_last4,
             "nationality": nationality,
@@ -887,7 +897,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
                     "SAA\n"
                 )
                 st.session_state["email_last_attempt"] = {
-                    "ts": datetime.datetime.utcnow().isoformat() + "Z",
+                    "ts": dt.datetime.utcnow().isoformat() + "Z",
                     "to": email_norm,
                     "subject": _subj,
                     "events": list(added_events) if isinstance(added_events, list) else str(added_events),
@@ -898,7 +908,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
                 st.toast("Confirmation email sent.")
         except Exception as e:
             st.session_state["email_last_attempt"] = {
-                "ts": datetime.datetime.utcnow().isoformat() + "Z",
+                "ts": dt.datetime.utcnow().isoformat() + "Z",
                 "to": email_norm,
                 "status": "failed",
                 "error_type": type(e).__name__,
@@ -972,7 +982,7 @@ preferred_cols = [
 cols = [c for c in preferred_cols if c in entries_df.columns] + [c for c in entries_df.columns if c not in preferred_cols]
 entries_df = entries_df[cols]
 
-st.dataframe(entries_df, use_container_width=True)
+st.dataframe(entries_df, width='stretch')
 
 
 # Download semicolon-delimited file (;) with required fixed format (from OUTPUT sheet)
@@ -1101,14 +1111,11 @@ else:
             _gcur = (original.get("gender","") or "").strip()
             _gidx = gender_opts_e.index(_gcur) if _gcur in gender_opts_e else 0
             gender_e = cD.selectbox("Gender", gender_opts_e, index=_gidx, key=f"e_gender_{idx}")
-            _bd_max = dt.date.today()
-            if isinstance(_bd, dt.date) and _bd > _bd_max:
-                _bd_max = _bd
             birth_date_e = cE.date_input(
                 "Birth Date",
                 value=_bd,
                 min_value=dt.date(1900, 1, 1),
-                max_value=_bd_max,
+                max_value=safe_date_max(_bd),
                 key=f"e_birth_{idx}",
             )
             ic_last4_e = cF.text_input("IC Number (last 4)", value=original.get("ic_last4",""), key=f"e_ic_{idx}")
@@ -1120,9 +1127,7 @@ else:
 
             cJ, cK = st.columns(2)
             team_code_e = cJ.selectbox("Team Code", tc_opts, index=tc_opts.index(_tc_cur) if _tc_cur in tc_opts else 0, key=f"e_team_code_{idx}")
-            team_name_override_e = cK.text_input("Team Name override (optional)", value=original.get("team_name_override",
-        "unique_id_override",
-        "full_name",""), key=f"e_team_name_override_{idx}")
+            team_name_override_e = cK.text_input("Team Name override (optional)", value=original.get("team_name_override",""), key=f"e_team_name_override_{idx}")
 
             cL, cM = st.columns(2)
             # Event division & event
@@ -1169,7 +1174,7 @@ else:
             ic_norm_e = normalize_ic_last4(ic_last4_e)
 
             errors = []
-            if gender_e not in ("M","F"):
+            if gender_e not in ("Male","Female"):
                 errors.append("Gender must be selected (Male or Female).")
             if not birth_date_e:
                 errors.append("Birth Date is required.")
