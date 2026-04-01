@@ -864,13 +864,14 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
                 _full = (st.session_state.get("full_name", "") or "").strip() or (db_name_override or typed_full_name)
                 _uid_disp = (st.session_state.get("unique_id_override", "") or "").strip() or unique_id
                 _body = (
-                    "Hi,\n\n"
-                    "Your entry has been received.\n\n"
+                    "Dear Registrant,\n\n"
+                    "Your entry has been received and successfully registered.\n\n"
                     f"Full Name: {_full}\n"
                     f"Events: {', '.join(added_events)}\n"
                     f"Team: {team_name_row}\n"
                     f"Unique ID: {_uid_disp}\n\n"
-                    "Thank you.\n"
+                    "Thank you,\n\n"
+                    "Singapore Athletics Association\n"
                 )
                 st.session_state["email_last_attempt"] = {
                     "ts": datetime.datetime.utcnow().isoformat() + "Z",
