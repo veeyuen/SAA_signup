@@ -15,7 +15,6 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 import traceback as tb
-import datetime
 
 import smtplib
 from email.message import EmailMessage
@@ -142,8 +141,8 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb.save(bio)
     return bio.getvalue()
 # ---------------- UI ----------------
-st.set_page_config(page_title="Allcomers Meet 4 Signup", layout="wide")
-st.title("Allcomers Meet 4 Signup")
+st.set_page_config(page_title="Allcomers 4 Meet Signup", layout="wide")
+st.title("Allcomers 4 Meet Signup")
 
 def _apply_pending_text_updates():
     """Apply any pending text updates BEFORE widgets are instantiated."""
@@ -666,10 +665,23 @@ if not name_ok:
 
 c4, c5, c6 = st.columns(3)
 with c4:
-    birth_date = st.date_input("Birth Date", value=None, min_value=dt.date(1900, 1, 1), max_value=dt.date.today(), key="birth_date")
+    # Birth Date input (allow rendering even if a preloaded value is later than today)
+    _birth_cur = st.session_state.get("birth_date")
+    _birth_max = dt.date.today()
+    if isinstance(_birth_cur, dt.date) and _birth_cur > _birth_max:
+        _birth_max = _birth_cur
+    birth_date = st.date_input(
+        "Birth Date",
+        value=_birth_cur if isinstance(_birth_cur, dt.date) else None,
+        min_value=dt.date(1900, 1, 1),
+        max_value=_birth_max,
+        key="birth_date",
+    )
     # Live validation: birth date
-    birth_ok = st.session_state.get('birth_date') is not None
-    if not birth_ok:
+    birth_ok = (st.session_state.get("birth_date") is not None) and (st.session_state.get("birth_date") <= dt.date.today())
+    if st.session_state.get("birth_date") and st.session_state.get("birth_date") > dt.date.today():
+        st.warning("Birth Date cannot be in the future.")
+    elif not birth_ok:
         st.warning("Birth Date is required.")
 
 with c5:
@@ -865,14 +877,14 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
                 _full = (st.session_state.get("full_name", "") or "").strip() or (db_name_override or typed_full_name)
                 _uid_disp = (st.session_state.get("unique_id_override", "") or "").strip() or unique_id
                 _body = (
-                    "Dear Registrant,\n\n"
-                    "Your entry has been received and successfully registered.\n\n"
+                    "Dear Participant,\n\n"
+                    "Your entry has been successfully received.\n\n"
                     f"Full Name: {_full}\n"
-                    f"Events: {', '.join(added_events)}\n"
+                    f"Event(s): {', '.join(added_events)}\n"
                     f"Team: {team_name_row}\n"
                     f"Unique ID: {_uid_disp}\n\n"
-                    "Thank you,\n\n"
-                    "Singapore Athletics Association\n"
+                    "Thank you.\n\n"
+                    "SAA\n"
                 )
                 st.session_state["email_last_attempt"] = {
                     "ts": datetime.datetime.utcnow().isoformat() + "Z",
@@ -1089,7 +1101,16 @@ else:
             _gcur = (original.get("gender","") or "").strip()
             _gidx = gender_opts_e.index(_gcur) if _gcur in gender_opts_e else 0
             gender_e = cD.selectbox("Gender", gender_opts_e, index=_gidx, key=f"e_gender_{idx}")
-            birth_date_e = cE.date_input("Birth Date", value=_bd, min_value=dt.date(1900, 1, 1), max_value=dt.date.today(), key=f"e_birth_{idx}")
+            _bd_max = dt.date.today()
+            if isinstance(_bd, dt.date) and _bd > _bd_max:
+                _bd_max = _bd
+            birth_date_e = cE.date_input(
+                "Birth Date",
+                value=_bd,
+                min_value=dt.date(1900, 1, 1),
+                max_value=_bd_max,
+                key=f"e_birth_{idx}",
+            )
             ic_last4_e = cF.text_input("IC Number (last 4)", value=original.get("ic_last4",""), key=f"e_ic_{idx}")
 
             cG, cH, cI = st.columns(3)
@@ -1152,6 +1173,8 @@ else:
                 errors.append("Gender must be selected (Male or Female).")
             if not birth_date_e:
                 errors.append("Birth Date is required.")
+            elif birth_date_e > dt.date.today():
+                errors.append("Birth Date cannot be in the future.")
             if not (contact_number_e or "").strip():
                 errors.append("Contact Number is required.")
             if not is_valid_email(email_norm_e):
