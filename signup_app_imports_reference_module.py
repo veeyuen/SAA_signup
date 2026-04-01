@@ -142,8 +142,8 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb.save(bio)
     return bio.getvalue()
 # ---------------- UI ----------------
-st.set_page_config(page_title="Allcomers Meet Signup", layout="wide")
-st.title("Allcomers Meet Signup")
+st.set_page_config(page_title="Allcomers 4 Meet Signup", layout="wide")
+st.title("Allcomers 4 Meet Signup")
 
 def _apply_pending_text_updates():
     """Apply any pending text updates BEFORE widgets are instantiated."""
