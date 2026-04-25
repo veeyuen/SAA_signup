@@ -228,10 +228,6 @@ def safe_date_max(v):
         pass
     return mx
 
-def is_singapore_nationality(nat: str) -> bool:
-    s = (nat or "").strip().casefold()
-    return s in ("singapore", "sg", "sgp")
-
 
 def send_confirmation_email_smtp(to_email: str, subject: str, body: str) -> None:
     """Send a confirmation email via SMTP using Streamlit secrets.
@@ -698,33 +694,13 @@ with c4:
     elif not birth_ok:
         st.warning("Birth Date is required.")
 
-with c5:
+with c6:
     nationality_options = [""] + (COUNTRIES or [])
     _nat_extra = (st.session_state.get("nationality_override", "") or "").strip()
     if _nat_extra and _nat_extra not in nationality_options:
         nationality_options = ["", _nat_extra] + [x for x in nationality_options if x != ""]
     nationality = st.selectbox("Nationality", nationality_options, index=0, key="nationality")
-with c6:
-    ic_last4 = st.text_input("IC Number (last 4)", key="ic_last4")
-    # Live validation: IC last-4 (3 digits + 1 letter)
-    ic_last4_norm = normalize_ic_last4(ic_last4)
-
-    # IC last-4 is mandatory only for Singapore athletes, and only when UNIQUE_ID is not available
-    unique_id_present_for_ic = bool((st.session_state.get("unique_id_override", "") or "").strip() or (st.session_state.get("unique_id", "") or "").strip())
-    ic_required = is_singapore_nationality(nationality) and (not unique_id_present_for_ic)
-
-    if not ic_last4_norm:
-        ic_ok = not ic_required
-        if ic_required:
-            st.warning("IC Number (last 4) is required for Singapore athletes when UNIQUE_ID is not available.")
-            st.caption("IC format: 3 digits + 1 letter (e.g., 123A).")
-    elif len(ic_last4_norm) < 4:
-        ic_ok = False
-        st.warning("IC last 4 is incomplete (e.g., 123A).")
-    else:
-        ic_ok = is_valid_ic_last4(ic_last4_norm)
-        if not ic_ok:
-            st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
+    is_singapore = (str(nationality or '').strip().upper() in ('SGP','SIN','SG','SINGAPORE'))
 
 
 
@@ -737,6 +713,27 @@ if uid_from_roster:
 else:
     st.text_input("Unique ID (auto)", value=(unique_id or ""), disabled=True)
 
+
+with c5:
+    ic_last4 = st.text_input("IC Number (last 4)", key="ic_last4")
+    # Live validation: IC last-4 (3 digits + 1 letter)
+    ic_last4_norm = normalize_ic_last4(ic_last4)
+    # IC last-4 is required only for Singapore athletes (SGP) AND when UNIQUE_ID is not available
+    unique_id_present_for_ic = bool((st.session_state.get("unique_id_override", "") or "").strip() or (st.session_state.get("unique_id", "") or "").strip())
+    ic_required = bool(is_singapore) and (not unique_id_present_for_ic)
+    ic_ok = True
+    if ic_required and not ic_last4_norm:
+        ic_ok = False
+        st.caption("IC format: 3 digits + 1 letter (e.g., 123A) — required for Singapore athletes unless UNIQUE_ID is available.")
+    elif (not ic_required) and (not ic_last4_norm):
+        ic_ok = True
+    elif len(ic_last4_norm) < 4:
+        ic_ok = False
+        st.warning("IC last 4 is incomplete (e.g., 123A).")
+    else:
+        ic_ok = is_valid_ic_last4(ic_last4_norm)
+        if not ic_ok:
+            st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
 
 c7, c8 = st.columns(2)
 contact_number = c7.text_input("Contact Number", key="contact_number")
@@ -831,7 +828,8 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         ("Email", email),
         ("Contact Number", contact_number),
     ]
-    if is_singapore_nationality(nationality) and (not _uid_present):
+    _is_sgp = (str(nationality or "").strip().upper() in ("SGP","SIN","SG","SINGAPORE"))
+    if _is_sgp and (not _uid_present):
         missing_checks.insert(1, ("IC last 4", ic_last4))
     for k, v in missing_checks:
 
@@ -848,7 +846,9 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         st.error("Please enter First Name and Last Name, or select a match from the list (Full Name).")
     elif not is_valid_email(email_norm):
         st.error("Please enter a valid email address (e.g., name@example.com).")
-    elif ic_last4_norm and (not is_valid_ic_last4(ic_last4_norm)):
+    elif (str(nationality or '').strip().upper() in ('SGP','SIN','SG','SINGAPORE')) and (not _uid_present) and (not is_valid_ic_last4(ic_last4_norm)):
+        st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
+    elif _uid_present and ic_last4_norm and (not is_valid_ic_last4(ic_last4_norm)):
         st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
     elif not event_opts or not event_names or not selected_events:
         st.error("Please select at least one event for that Gender + Division combination.")
@@ -1189,10 +1189,7 @@ else:
                 errors.append("Contact Number is required.")
             if not is_valid_email(email_norm_e):
                 errors.append("Email is invalid.")
-            ic_required_e = is_singapore_nationality(nationality_e) and (not (unique_id_e or "").strip())
-            if ic_required_e and not ic_norm_e:
-                errors.append("IC last 4 is required for Singapore athletes when Unique ID is not available.")
-            elif ic_norm_e and (not is_valid_ic_last4(ic_norm_e)):
+            if not is_valid_ic_last4(ic_norm_e):
                 errors.append("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
             if event_name_e == "(no events)":
                 errors.append("Event must be selected.")
