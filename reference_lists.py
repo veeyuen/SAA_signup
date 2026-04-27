@@ -1057,6 +1057,7 @@ TEAM_CODE_TO_NAME = {'AAC': 'ActiveSG Academies & Club',
 
 # Nationality / country dropdown
 COUNTRIES = ['Singapore',
+ 'Singapore PR',
  'Brunei',
  'Cambodia',
  'Malaysia',
