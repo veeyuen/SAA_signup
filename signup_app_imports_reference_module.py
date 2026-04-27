@@ -1147,6 +1147,7 @@ else:
                 key=f"e_birth_{idx}",
             )
             ic_last4_e = cF.text_input("IC Number (last 4)", value=original.get("ic_last4",""), key=f"e_ic_{idx}")
+            ic_last4_norm_e = normalize_ic_last4(ic_last4_e)
 
             cG, cH, cI = st.columns(3)
             nationality_e = cG.selectbox("Nationality", nat_opts, index=nat_opts.index(_nat_cur) if _nat_cur in nat_opts else 0, key=f"e_nat_{idx}")
