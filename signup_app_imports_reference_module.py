@@ -372,6 +372,7 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
         entries.append({
             "name": name,
             "full_name": (full_name_sheet or name),
+            "name_passport": str(get(row, "name_passport", "") or get(row, "name_as_per_nric_passport", "") or "").strip() or (full_name_sheet or name),
             "first_name": first_name,
             "other_name": other_name,
             "last_name": last_name,
@@ -394,6 +395,7 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
 # Preload existing entries from OUTPUT Google Sheet on app start (only if empty)
 st.session_state.setdefault("entries", [])
 st.session_state.setdefault("full_name", "")
+st.session_state.setdefault("name_passport", "")
 
 if not st.session_state.entries:
     _preload_url = (st.session_state.get("output_sheet_url") or "").strip()
@@ -461,6 +463,7 @@ prev_sig = (st.session_state.get("full_name_signature", "") or "").strip()
 if prev_sig and current_name_sig != prev_sig:
     # User typed a new name; clear roster-derived fields so they don't persist
     st.session_state["full_name__pending"] = ""
+    st.session_state["name_passport__pending"] = ""
     st.session_state["unique_id_override__pending"] = ""
     st.session_state["db_name_override__pending"] = ""
     st.session_state["full_name_signature__pending"] = ""
@@ -616,6 +619,7 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             st.session_state["last_name__pending"] = ln
             st.session_state["other_name__pending"] = on
             st.session_state["full_name__pending"] = full_name_sel
+            st.session_state["name_passport__pending"] = full_name_sel
             st.session_state["full_name_signature__pending"] = "|".join([
                 (st.session_state.get("first_name__pending", "") or "").strip(),
                 (st.session_state.get("other_name__pending", "") or "").strip(),
@@ -663,14 +667,29 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
 typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
 db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
 
-full_name_display = (st.session_state.get("full_name", "") or "").strip() or typed_full_name
-st.text_input("Full Name (auto)", value=full_name_display, disabled=True)
+# Full Name (auto) — editable
+full_name_display = (st.session_state.get("full_name", "") or "").strip()
+if (not full_name_display) and typed_full_name:
+    # Pre-fill from typed First/Other/Last (user can edit)
+    st.session_state["full_name"] = typed_full_name
+    full_name_display = typed_full_name
+st.text_input("Full Name (auto)", key="full_name")
 
+# Name as per NRIC/Passport (mandatory) — additional field
+passport_name = (st.session_state.get("name_passport", "") or "").strip()
+if (not passport_name) and (st.session_state.get("full_name", "") or "").strip():
+    # Pre-fill once from Full Name (auto) for convenience
+    st.session_state["name_passport"] = (st.session_state.get("full_name", "") or "").strip()
+passport_name = st.text_input("Name as per NRIC/Passport", key="name_passport")
 # Live validation: name presence
-full_name_loaded = bool((st.session_state.get("full_name", "") or "").strip())
-name_ok = full_name_loaded or ((bool((first_name or '').strip()) and bool((last_name or '').strip()))) or bool(db_name_override)
-if not name_ok:
-    st.warning("Enter First Name and Last Name, or select a match from the list (Full Name).")
+passport_ok = bool((st.session_state.get("name_passport", "") or "").strip())
+selected_from_roster = bool((st.session_state.get("unique_id_override", "") or "").strip() or (db_name_override or "").strip())
+first_last_ok = selected_from_roster or (bool((first_name or "").strip()) and bool((last_name or "").strip()))
+name_ok = passport_ok and first_last_ok
+if not passport_ok:
+    st.warning("Name as per NRIC/Passport is required.")
+elif not first_last_ok:
+    st.warning("First Name and Last Name are required unless you selected the athlete from the roster.")
 
 
 c4, c5, c6 = st.columns(3)
@@ -824,6 +843,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
     missing = []
     _uid_present = bool((unique_id or "").strip())
     missing_checks = [
+        ("Name as per NRIC/Passport", (st.session_state.get("name_passport","") or "").strip()),
         ("Birth Date", birth_date),
         ("Email", email),
         ("Contact Number", contact_number),
@@ -842,8 +862,10 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         st.error("Missing: " + ", ".join(missing))
     elif not gender_ok:
         st.error("Please select Gender (Male or Female).")
-    elif (not full_name_loaded) and (not (((first_name or '').strip()) and ((last_name or '').strip()))) and (not ((db_name_override or '').strip())):
-        st.error("Please enter First Name and Last Name, or select a match from the list (Full Name).")
+    elif not ((st.session_state.get("name_passport","") or "").strip()):
+        st.error("Name as per NRIC/Passport is required.")
+    elif (not ((st.session_state.get("unique_id_override","") or "").strip() or (db_name_override or "").strip())) and (not (((first_name or "").strip()) and ((last_name or "").strip()))):
+        st.error("First Name and Last Name are required unless you selected the athlete from the roster.")
     elif not is_valid_email(email_norm):
         st.error("Please enter a valid email address (e.g., name@example.com).")
     elif (str(nationality or '').strip().upper() in ('SGP','SIN','SG','SINGAPORE')) and (not _uid_present) and (not is_valid_ic_last4(ic_last4_norm)):
@@ -860,6 +882,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             st.session_state.entries.append({
             "name": (db_name_override or typed_full_name),
             "full_name": (st.session_state.get("full_name", "") or db_name_override or typed_full_name),
+            "name_passport": (st.session_state.get("name_passport", "") or "").strip(),
             "last_name": (last_name or "").strip(),
             "first_name": (first_name or "").strip(),
             "other_name": (other_name or "").strip(),
@@ -1181,6 +1204,8 @@ else:
             errors = []
             if gender_e not in ("Male","Female"):
                 errors.append("Gender must be selected (Male or Female).")
+            if not (name_passport_e or "").strip():
+                errors.append("Name as per NRIC/Passport is required.")
             if not birth_date_e:
                 errors.append("Birth Date is required.")
             elif birth_date_e > dt.date.today():
@@ -1206,7 +1231,8 @@ else:
                 event_code_e = dict(event_opts_e).get(event_name_e, original.get("event_code",""))
 
                 # Compute combined name
-                name_e = " ".join([p for p in [first_name_e, other_name_e, last_name_e] if (p or "").strip()]).strip()
+                name_e_calc = " ".join([p for p in [first_name_e, other_name_e, last_name_e] if (p or "").strip()]).strip()
+                name_e = (full_name_e or name_e_calc).strip()
 
                 updated = dict(original)
                 updated.update({
@@ -1214,7 +1240,8 @@ else:
                     "other_name": (other_name_e or "").strip(),
                     "last_name": (last_name_e or "").strip(),
                     "name": name_e,
-                    "full_name": name_e,
+                    "full_name": (full_name_e or name_e),
+                    "name_passport": (name_passport_e or "").strip(),
                     "gender": gender_e,
                     "birth_date": birth_date_e,
                     "ic_last4": ic_norm_e,
