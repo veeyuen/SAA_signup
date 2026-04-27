@@ -803,7 +803,14 @@ event_division = c11.selectbox(
     key="event_division",
 )
 
-event_opts = allowed_events(gender_to_code(gender), int(event_division))
+event_opts_raw = allowed_events(gender_to_code(gender), int(event_division))
+# De-duplicate event names (some divisions have duplicates)
+event_opts = []
+_seen_event_names = set()
+for _n, _c in (event_opts_raw or []):
+    if _n not in _seen_event_names:
+        event_opts.append((_n, _c))
+        _seen_event_names.add(_n)
 event_names = [n for n, _ in event_opts]
 
 # Keep event selection consistent when options change (multi-select)
@@ -1184,7 +1191,14 @@ else:
                 format_func=lambda k: f"{k} - {DIVISIONS[k]}",
                 key=f"e_event_div_{idx}",
             )
-            event_opts_e = allowed_events(gender_to_code(gender_e), int(event_div_e))
+            event_opts_e_raw = allowed_events(gender_to_code(gender_e), int(event_div_e))
+            # De-duplicate event names
+            event_opts_e = []
+            _seen_event_names_e = set()
+            for _n, _c in (event_opts_e_raw or []):
+                if _n not in _seen_event_names_e:
+                    event_opts_e.append((_n, _c))
+                    _seen_event_names_e.add(_n)
             event_names_e = [n for n, _ in event_opts_e]
             event_cur = (original.get("event","") or "").strip()
             if event_cur and event_cur not in event_names_e:
