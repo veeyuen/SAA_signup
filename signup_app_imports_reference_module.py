@@ -280,7 +280,7 @@ def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame, record_type
             return ""
         try:
             d = parse_dob(v)
-            return d.isoformat() if d else ""
+            return d.strftime("%d/%m/%Y") if d else ""
         except Exception:
             return str(v).strip()
 
