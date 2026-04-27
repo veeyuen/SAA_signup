@@ -260,11 +260,11 @@ def send_confirmation_email_smtp(to_email: str, subject: str, body: str) -> None
         smtp.send_message(msg)
 
 
-def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame) -> str:
+def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame, record_type: str = "I") -> str:
     """Build required semicolon-delimited export rows (no header) from the OUTPUT sheet.
 
     Row layout:
-    I; last_name; first_name; ; gender; dob; team_code; team_name; ; ; ; ; ; ; ; ; nationality; ; ; ; ; unique_id; ; ; ;
+    <I or E>; last_name; first_name; ; gender; dob; team_code; team_name; ; ; ; ; ; ; ; ; nationality; ; ; ; ; unique_id; ; ; ;
     """
     if sheet_df is None or sheet_df.empty:
         return ""
@@ -297,8 +297,11 @@ def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame) -> str:
         nationality = str(get(row, "nationality", "")).strip()
         unique_id = str(get(row, "unique_id", "")).strip()
 
+        rt = (record_type or "I").strip().upper()[:1] or "I"
+        if rt not in ("I", "E"):
+            rt = "I"
         fields = [
-            "I",
+            rt,
             last_name,
             first_name,
             "",
@@ -1012,7 +1015,10 @@ preferred_cols = [
 cols = [c for c in preferred_cols if c in entries_df.columns] + [c for c in entries_df.columns if c not in preferred_cols]
 entries_df = entries_df[cols]
 
-st.dataframe(entries_df, width='stretch')
+display_df = entries_df.copy()
+if 'birth_date' in display_df.columns:
+    display_df['birth_date'] = pd.to_datetime(display_df['birth_date'], errors='coerce').dt.strftime('%d/%m/%Y')
+st.dataframe(display_df, width='stretch')
 
 
 # Download semicolon-delimited file (;) with required fixed format (from OUTPUT sheet)
@@ -1027,11 +1033,19 @@ if _output_url:
         st.warning(f"Could not read output Google Sheet for download: {type(e).__name__}: {repr(e)}")
 
     if not sheet_df.empty:
-        semicolon_text = build_semicolon_export_from_output_sheet(sheet_df)
-        st.download_button(
-            "Download semicolon-delimited file",
-            data=semicolon_text,
-            file_name="current_entries_semicolon_delimited.txt",
+        semicolon_text_I = build_semicolon_export_from_output_sheet(sheet_df, record_type="I")
+        semicolon_text_E = build_semicolon_export_from_output_sheet(sheet_df, record_type="E")
+        cDL1, cDL2 = st.columns(2)
+        cDL1.download_button(
+            "Download semicolon-delimited I file",
+            data=semicolon_text_I,
+            file_name="current_entries_I_semicolon_delimited.txt",
+            mime="text/plain",
+        )
+        cDL2.download_button(
+            "Download semicolon-delimited E file",
+            data=semicolon_text_E,
+            file_name="current_entries_E_semicolon_delimited.txt",
             mime="text/plain",
         )
     else:
