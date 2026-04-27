@@ -736,7 +736,7 @@ else:
 with c5:
     ic_last4 = st.text_input("IC Number (last 4)", key="ic_last4")
     # Live validation: IC last-4 (3 digits + 1 letter)
-    ic_last4_norm = normalize_ic_last4(ic_last4)
+    ic_last4_norm = normalize_ic_last4(ic_last4)  # ALWAYS define
     # IC last-4 is required only for Singapore athletes (SGP) AND when UNIQUE_ID is not available
     unique_id_present_for_ic = bool((st.session_state.get("unique_id_override", "") or "").strip() or (st.session_state.get("unique_id", "") or "").strip())
     ic_required = bool(is_singapore) and (not unique_id_present_for_ic)
@@ -744,7 +744,8 @@ with c5:
     if ic_required and not ic_last4_norm:
         ic_ok = False
         st.caption("IC format: 3 digits + 1 letter (e.g., 123A) — required for Singapore athletes unless UNIQUE_ID is available.")
-    elif (not ic_required) and (not ic_last4_norm):
+    elif (not ic_last4_norm):
+        # Not required and not provided
         ic_ok = True
     elif len(ic_last4_norm) < 4:
         ic_ok = False
