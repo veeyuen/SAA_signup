@@ -765,13 +765,13 @@ with c5:
     ic_last4 = st.text_input("IC Number (last 4)", key="ic_last4")
     # Live validation: IC last-4 (3 digits + 1 letter)
     ic_last4_norm = normalize_ic_last4(ic_last4)  # ALWAYS define
-    # IC last-4 is required only for Singapore athletes (SGP) AND when UNIQUE_ID is not available
+    # IC last-4 is required if Singapore PR is ticked, or if Singapore athlete has no UNIQUE_ID
     unique_id_present_for_ic = bool((st.session_state.get("unique_id_override", "") or "").strip() or (st.session_state.get("unique_id", "") or "").strip())
-    ic_required = bool(is_singapore) and (bool(singapore_pr) or (not unique_id_present_for_ic))
+    ic_required = bool(singapore_pr) or (bool(is_singapore) and (not unique_id_present_for_ic))
     ic_ok = True
     if ic_required and not ic_last4_norm:
         ic_ok = False
-        st.warning("IC format: 3 digits + 1 letter (e.g., 123A) — required for Singapore PRs or Singapore athletes without UNIQUE_ID.")
+        st.warning("IC format: 3 digits + 1 letter (e.g., 123A) — required when Singapore PR is ticked, or when a Singapore athlete has no UNIQUE_ID.")
     elif (not ic_last4_norm):
         # Not required and not provided
         ic_ok = True
@@ -880,14 +880,14 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
     _uid_present = bool((unique_id or "").strip())
     _is_sgp_local = (str(nationality or "").strip().upper() in ("SGP","SIN","SG","SINGAPORE"))
     _pr_local = bool(st.session_state.get("singapore_pr", False))
-    ic_required = bool(_is_sgp_local) and (_pr_local or (not _uid_present))
+    ic_required = bool(_pr_local) or (bool(_is_sgp_local) and (not _uid_present))
     missing_checks = [
         ("Name as per NRIC/Passport", (st.session_state.get("name_passport","") or "").strip()),
         ("Birth Date", birth_date),
         ("Email", email),
         ("Contact Number", contact_number),
     ]
-        # IC required only if ic_required (Singapore + PR OR Singapore + no UNIQUE_ID)
+        # IC required only if Singapore PR is ticked OR Singapore athlete has no UNIQUE_ID
     if ic_required:
         missing_checks.insert(1, ("IC last 4", ic_last4))
     for k, v in missing_checks:
