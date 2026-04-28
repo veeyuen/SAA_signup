@@ -295,6 +295,13 @@ def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame, record_type
         team_code = str(get(row, "team_code", "")).strip()
         team_name = str(get(row, "team_name", "")).strip()
         nationality = str(get(row, "nationality", "")).strip()
+        singapore_pr = str(get(row, "singapore_pr", "") or get(row, "sg_pr", "") or get(row, "singapore_pr_status", "") or "").strip()
+        if singapore_pr.strip().lower() in ("true", "1", "y", "yes"):
+            singapore_pr = "Yes"
+        elif singapore_pr.strip().lower() in ("false", "0", "n", "no"):
+            singapore_pr = "No"
+        else:
+            singapore_pr = singapore_pr or "No"
         singapore_pr = str(get(row, "singapore_pr", "") or get(row, "SINGAPORE_PR", "") or "").strip()
         unique_id = str(get(row, "unique_id", "")).strip()
 
@@ -385,7 +392,6 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
             "ic_last4": ic_last4,
             "nationality": nationality,
             "singapore_pr": singapore_pr,
-            "singapore_pr": ("Yes" if bool(st.session_state.get("singapore_pr", False)) else "No"),
             "unique_id": unique_id,
             "team_name": team_name,
             "team_code": team_code,
@@ -912,7 +918,6 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "unique_id": unique_id,
             "nationality": nationality,
             "singapore_pr": singapore_pr,
-            "singapore_pr": ("Yes" if bool(st.session_state.get("singapore_pr", False)) else "No"),
             "contact_number": (contact_number or "").strip(),
             "email": email_norm,
             "team_code": team_code,
@@ -1028,7 +1033,7 @@ preferred_cols = [
     'season_best', 'parq',
     'contact_number', 'email',
     'emergency_contact_name', 'emergency_contact_number',
-    'coach_full_name', 'nationality'
+    'coach_full_name', 'nationality', 'singapore_pr'
 ]
 cols = [c for c in preferred_cols if c in entries_df.columns] + [c for c in entries_df.columns if c not in preferred_cols]
 entries_df = entries_df[cols]
