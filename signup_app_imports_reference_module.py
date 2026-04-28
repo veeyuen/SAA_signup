@@ -362,6 +362,19 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
         ic_last4 = normalize_ic_last4(ic_last4)
 
         nationality = str(get(row, "nationality", "")).strip()
+        singapore_pr = str(
+            get(row, "singapore_pr", "")
+            or get(row, "sg_pr", "")
+            or get(row, "singapore_pr_status", "")
+            or get(row, "singapore_pr?", "")
+            or ""
+        ).strip()
+        if singapore_pr.casefold() in ("true", "1", "y", "yes"):
+            singapore_pr = "Yes"
+        elif singapore_pr.casefold() in ("false", "0", "n", "no"):
+            singapore_pr = "No"
+        else:
+            singapore_pr = singapore_pr or "No"
         unique_id = str(get(row, "unique_id", "")).strip()
         team_name = str(get(row, "team_name", "")).strip()
         team_code = str(get(row, "team_code", "")).strip()
