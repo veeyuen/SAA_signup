@@ -141,8 +141,8 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb.save(bio)
     return bio.getvalue()
 # ---------------- UI ----------------
-st.set_page_config(page_title="Allcomers 4 Meet Signup", layout="wide")
-st.title("Allcomers 4 Meet Signup")
+st.set_page_config(page_title="SMTA International Masters T&F Signup", layout="wide")
+st.title("SMTA International Masters T&F Signup")
 
 def _apply_pending_text_updates():
     """Apply any pending text updates BEFORE widgets are instantiated."""
@@ -579,7 +579,13 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             on = str(r.get("OTHER_NAME", "") or "").strip()
             nric = str(r.get("NRIC", "") or "").strip()
             dob_val = parse_dob(r.get("DOB"))
-            dob_str = dob_val.strftime("%Y-%m-%d") if hasattr(dob_val, "strftime") and dob_val else str(r.get("DOB", "") or "").strip()
+            # Privacy: only show birth year in roster match/browse labels, not full DOB.
+            if hasattr(dob_val, "strftime") and dob_val:
+                dob_str = dob_val.strftime("%Y")
+            else:
+                _dob_raw = str(r.get("DOB", "") or "").strip()
+                _year_match = re.search(r"(?:19|20)\d{2}", _dob_raw)
+                dob_str = _year_match.group(0) if _year_match else ""
             gen = str(r.get("GENDER", "") or "").strip()
             nat = str(r.get("NATIONALITY", "") or "").strip()
             uid = str(r.get("UNIQUE_ID", "") or "").strip()
@@ -593,7 +599,7 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             if n4:
                 parts.append(f"NRIC(last4): {n4}")
             if dob_str:
-                parts.append(f"DOB: {dob_str}")
+                parts.append(f"Birth Year: {dob_str}")
             if gen:
                 parts.append(f"Gender: {gen}")
             if nat:
