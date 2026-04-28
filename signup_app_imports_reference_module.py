@@ -727,7 +727,7 @@ with c6:
     nationality = st.selectbox("Nationality", nationality_options, index=0, key="nationality")
     is_singapore = (str(nationality or '').strip().upper() in ('SGP','SIN','SG','SINGAPORE'))
     # Singapore PR status (separate from nationality code)
-    singapore_pr = st.checkbox('Singapore PR?', value=bool(st.session_state.get('singapore_pr', False)), key='singapore_pr')
+    singapore_pr = st.checkbox('Singapore PR?', key='singapore_pr')
 
 
 
@@ -748,11 +748,11 @@ with c5:
     ic_last4_norm = normalize_ic_last4(ic_last4)  # ALWAYS define
     # IC last-4 is required only for Singapore athletes (SGP) AND when UNIQUE_ID is not available
     unique_id_present_for_ic = bool((st.session_state.get("unique_id_override", "") or "").strip() or (st.session_state.get("unique_id", "") or "").strip())
-    ic_required = bool(is_singapore) and (bool(st.session_state.get("singapore_pr", False)) or (not unique_id_present_for_ic))
+    ic_required = bool(is_singapore) and (bool(singapore_pr) or (not unique_id_present_for_ic))
     ic_ok = True
     if ic_required and not ic_last4_norm:
         ic_ok = False
-        st.caption("IC format: 3 digits + 1 letter (e.g., 123A) — required for Singapore athletes unless UNIQUE_ID is available.")
+        st.warning("IC format: 3 digits + 1 letter (e.g., 123A) — required for Singapore PRs or Singapore athletes without UNIQUE_ID.")
     elif (not ic_last4_norm):
         # Not required and not provided
         ic_ok = True
