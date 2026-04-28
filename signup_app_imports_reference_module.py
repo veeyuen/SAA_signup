@@ -295,6 +295,7 @@ def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame, record_type
         team_code = str(get(row, "team_code", "")).strip()
         team_name = str(get(row, "team_name", "")).strip()
         nationality = str(get(row, "nationality", "")).strip()
+        singapore_pr = str(get(row, "singapore_pr", "") or get(row, "SINGAPORE_PR", "") or "").strip()
         unique_id = str(get(row, "unique_id", "")).strip()
 
         rt = (record_type or "I").strip().upper()[:1] or "I"
@@ -383,6 +384,8 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
             "birth_date": birth_date,
             "ic_last4": ic_last4,
             "nationality": nationality,
+            "singapore_pr": singapore_pr,
+            "singapore_pr": ("Yes" if bool(st.session_state.get("singapore_pr", False)) else "No"),
             "unique_id": unique_id,
             "team_name": team_name,
             "team_code": team_code,
@@ -723,6 +726,8 @@ with c6:
         nationality_options = ["", _nat_extra] + [x for x in nationality_options if x != ""]
     nationality = st.selectbox("Nationality", nationality_options, index=0, key="nationality")
     is_singapore = (str(nationality or '').strip().upper() in ('SGP','SIN','SG','SINGAPORE'))
+    # Singapore PR status (separate from nationality code)
+    singapore_pr = st.checkbox('Singapore PR?', value=bool(st.session_state.get('singapore_pr', False)), key='singapore_pr')
 
 
 
@@ -743,7 +748,7 @@ with c5:
     ic_last4_norm = normalize_ic_last4(ic_last4)  # ALWAYS define
     # IC last-4 is required only for Singapore athletes (SGP) AND when UNIQUE_ID is not available
     unique_id_present_for_ic = bool((st.session_state.get("unique_id_override", "") or "").strip() or (st.session_state.get("unique_id", "") or "").strip())
-    ic_required = bool(is_singapore) and (not unique_id_present_for_ic)
+    ic_required = bool(is_singapore) and (bool(st.session_state.get("singapore_pr", False)) or (not unique_id_present_for_ic))
     ic_ok = True
     if ic_required and not ic_last4_norm:
         ic_ok = False
@@ -854,14 +859,17 @@ ready_to_add = bool(waiver_ok) and bool(email_present) and bool(email_ok) and bo
 if st.button("Add entry", type="primary", disabled=not ready_to_add):
     missing = []
     _uid_present = bool((unique_id or "").strip())
+    _is_sgp_local = (str(nationality or "").strip().upper() in ("SGP","SIN","SG","SINGAPORE"))
+    _pr_local = bool(st.session_state.get("singapore_pr", False))
+    ic_required = bool(_is_sgp_local) and (_pr_local or (not _uid_present))
     missing_checks = [
         ("Name as per NRIC/Passport", (st.session_state.get("name_passport","") or "").strip()),
         ("Birth Date", birth_date),
         ("Email", email),
         ("Contact Number", contact_number),
     ]
-    _is_sgp = (str(nationality or "").strip().upper() in ("SGP","SIN","SG","SINGAPORE"))
-    if _is_sgp and (not _uid_present):
+        # IC required only if ic_required (Singapore + PR OR Singapore + no UNIQUE_ID)
+    if ic_required:
         missing_checks.insert(1, ("IC last 4", ic_last4))
     for k, v in missing_checks:
 
@@ -903,6 +911,8 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "ic_last4": ic_last4_norm,
             "unique_id": unique_id,
             "nationality": nationality,
+            "singapore_pr": singapore_pr,
+            "singapore_pr": ("Yes" if bool(st.session_state.get("singapore_pr", False)) else "No"),
             "contact_number": (contact_number or "").strip(),
             "email": email_norm,
             "team_code": team_code,
@@ -991,6 +1001,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "db_name_override": "",
             "athlete_roster_match": "(keep typed)",
             "events_selected": [],
+            "singapore_pr": False,
         }.items():
             st.session_state[f"{_k}__pending"] = _v
         st.rerun()
@@ -1174,6 +1185,7 @@ else:
 
             cG, cH, cI = st.columns(3)
             nationality_e = cG.selectbox("Nationality", nat_opts, index=nat_opts.index(_nat_cur) if _nat_cur in nat_opts else 0, key=f"e_nat_{idx}")
+            singapore_pr_e = st.checkbox("Singapore PR?", value=(str(original.get("singapore_pr","") or "").strip().lower() in ("yes","y","true","1")), key=f"e_pr_{idx}")
             contact_number_e = cH.text_input("Contact Number", value=original.get("contact_number",""), key=f"e_contact_{idx}")
             email_e = cI.text_input("Email", value=original.get("email",""), key=f"e_email_{idx}")
 
