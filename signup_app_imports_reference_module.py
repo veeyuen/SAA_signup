@@ -604,8 +604,6 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
                 parts.append(f"Gender: {gen}")
             if nat:
                 parts.append(f"Nat: {nat}")
-            if uid:
-                parts.append(f"UID: {uid}")
             team_piece = " ".join([p for p in [tcode, team] if p]).strip()
             if team_piece:
                 parts.append(f"Team: {team_piece}")
