@@ -734,6 +734,7 @@ with c4:
         min_value=dt.date(1900, 1, 1),
         max_value=_birth_max,
         key="birth_date",
+        format="DD-MM-YYYY",
     )
     # Live validation: birth date
     birth_ok = (st.session_state.get("birth_date") is not None) and (st.session_state.get("birth_date") <= dt.date.today())
@@ -1233,6 +1234,7 @@ else:
                 min_value=dt.date(1900, 1, 1),
                 max_value=safe_date_max(_bd),
                 key=f"e_birth_{idx}",
+                format="DD-MM-YYYY",
             )
             ic_last4_e = cF.text_input("IC Number (last 4)", value=original.get("ic_last4",""), key=f"e_ic_{idx}")
             ic_last4_norm_e = normalize_ic_last4(ic_last4_e)
