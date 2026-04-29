@@ -34,16 +34,110 @@ from reference_lists import (
     get_events,  # gender+division -> [(event_name,event_code), ...] filtered (blacked-out excluded)
 )
 
-DIVISIONS = {
-    1: "U15 (13–14)",
-    2: "U18 (15–17)",
-    3: "U20 (18–19)",
-    4: "Open (16+)",
-    5: "Novice (Vertical Jumps Only)",
-    6: "Intermediate (Vertical Jumps Only)",
-    7: "Advance (Vertical Jumps Only)",
-    8: "A Div (17–19)",
-}
+DIVISIONS = {1: 'Masters (30 & above)',
+ 2: 'Age (7-8)',
+ 3: 'Age (9-10)',
+ 4: 'Age (11-12)',
+ 5: 'Age (13-14)',
+ 6: 'Age (15-16)',
+ 7: 'Para',
+ 8: 'Age (5-6)',
+ 10: 'Age (17-18)'}
+
+# Event options derived from 'SMTFA INT - SCHEDULE 6&7 JUN NT.xlsx', sheet 'NT Version'.
+# Keys are (schedule_gender, division); values are (event_name, event_code/S-NO).
+SCHEDULE_EVENT_OPTIONS = {('GIRLS', 8): [('60M', '83'), ('150M', '254')],
+ ('BOYS', 8): [('60M', '84'), ('150M', '255')],
+ ('GIRLS', 2): [('60M', '85'), ('150M', '256'), ('400M', '298')],
+ ('BOYS', 2): [('60M', '86'), ('150M', '257'), ('400M', '299')],
+ ('GIRLS', 3): [('80M', '81'),
+                ('200M', '258'),
+                ('400M', '300'),
+                ('LONG JUMP (80 cm board)', '176'),
+                ('POLE VAULT', '204')],
+ ('BOYS', 3): [('80M', '82'),
+               ('200M', '259'),
+               ('400M', '301'),
+               ('LONG JUMP (80 cm board)', '177'),
+               ('POLE VAULT', '205')],
+ ('GIRLS', 4): [('100M', '73'),
+                ('200M', '260'),
+                ('600M', '302'),
+                ('POLE VAULT', '206'),
+                ('LONG JUMP (50 cm board)', '222')],
+ ('BOYS', 4): [('100M', '74'),
+               ('200M', '261'),
+               ('600M', '303'),
+               ('POLE VAULT', '207'),
+               ('LONG JUMP (50 cm board)', '285')],
+ ('GIRLS', 5): [('100M', '75'), ('200M', '262'), ('800M', '252'), ('LONG JUMP', '296')],
+ ('BOYS', 5): [('100M', '76'), ('200M', '263'), ('800M', '253'), ('LONG JUMP', '297')],
+ ('GIRLS', 6): [('100M', '77'), ('200M', '264'), ('800M', '250'), ('LONG JUMP', '304')],
+ ('BOYS', 6): [('100M', '78'), ('200M', '265'), ('800M', '251'), ('LONG JUMP', '305')],
+ ('GIRLS', 10): [('100M', '79'), ('200M', '266'), ('800M', '248')],
+ ('BOYS', 10): [('100M', '80'), ('200M', '267'), ('800M', '249')],
+ ('MEN', 1): [('HAMMER', '97'),
+              ('POLE VAULT', '209'),
+              ('TRIPLE JUMP', '200'),
+              ('SHOT PUT (7.26 KG)', '15'),
+              ('5000M', '23'),
+              ('100M', '39'),
+              ('JAVELIN (800G)', '67'),
+              ('110M HURDLES (99.1 CM)', '113'),
+              ('400M', '119'),
+              ('1500M', '141'),
+              ('LONG JUMP', '158'),
+              ('400H(91.4 CM) x 10', '210'),
+              ('DISCUS (2 KG)', '223'),
+              ('800M', '240'),
+              ('200M', '277'),
+              ('5000M WALK', '308'),
+              ('HIGH JUMP', '87'),
+              ('100M HURDLES (91.4 CM)', '107'),
+              ('SHOT PUT (6 KG)', '132'),
+              ('DISCUS (1.5KG)', '187'),
+              ('400H(84 CM) x 10', '214'),
+              ('JAVELIN (700G)', '227'),
+              ('100M HURDLES (84 CM)', '105'),
+              ('SHOT PUT (5 KG)', '129'),
+              ('DISCUS (1 KG)', '189'),
+              ('JAVELIN (600G)', '229'),
+              ('300H (76.2 CM) x 7', '218'),
+              ('SHOT PUT (4 KG)', '131'),
+              ('3000M WALK', '184'),
+              ('JAVELIN (500G)', '231'),
+              ('80M HURDLES (76.2 CM)', '103'),
+              ('200H (68.6 CM) x 5', '221'),
+              ('80M HURDLES (68.6 CM)', '100'),
+              ('4X100M RELAY', '307'),
+              ('4X400M RELAY', '317')],
+ ('WOMEN', 1): [('4X100M RELAY', '306'),
+                ('4X400M RELAY', '316'),
+                ('HAMMER', '98'),
+                ('POLE VAULT', '208'),
+                ('800M', '233'),
+                ('5000M', '1'),
+                ('JAVELIN (600G)', '35'),
+                ('100M', '50'),
+                ('HIGH JUMP', '60'),
+                ('TRIPLE JUMP', '91'),
+                ('400M', '134'),
+                ('1500M', '150'),
+                ('SHOT PUT(4 KG)', '162'),
+                ('LONG JUMP', '169'),
+                ('3000M WALK', '178'),
+                ('DISCUS (1 KG)', '193'),
+                ('200M', '270'),
+                ('100M HURDLES (84 CM)', '104'),
+                ('80M HURDLES (76.2 CM)', '101'),
+                ('400H(76.2 CM) x 10', '216'),
+                ('JAVELIN (500G)', '19'),
+                ('SHOT PUT (3 KG)', '166'),
+                ('300H (76.2 CM) x 7', '217'),
+                ('80M HURDLES (68.6 CM)', '99'),
+                ('200H (68.6 CM) x 5', '220')],
+ ('PARA WOMEN', 7): [('100M', '71'), ('200M', '268'), ('LONG JUMP', '294')],
+ ('PARA MEN', 7): [('100M', '72'), ('200M', '269'), ('LONG JUMP', '295')]}
 
 IC_LAST4_RE = re.compile(r"^\d{3}[A-Za-z]$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -81,14 +175,33 @@ def compute_unique_id(first_name: str, ic_last4: str, dob: date) -> str:
     ic = normalize_ic_last4(ic_last4)
     return f"{first_name.strip()[:1]}{ic[:4]}{dob.year % 100:02d}".upper()
 
-def allowed_events(gender: str, division_no: int):
-    """Return list of (event_name, event_code) for dropdown."""
+def _schedule_gender_for_division(gender: str, division_no: int) -> str:
+    """Map form gender to the schedule gender labels for the selected division."""
+    g = gender_to_code(gender) or (gender or "").strip().upper()
     d = int(division_no)
-    if d in (1, 2, 3, 4, 8):
-        return get_events(gender, d)
-    if d in (5, 6, 7):
-        return [("High Jump", "HJ"), ("Pole Vault", "PV")]
-    return []
+
+    if g == "M":
+        if d == 1:
+            return "MEN"
+        if d == 7:
+            return "PARA MEN"
+        return "BOYS"
+
+    if g == "F":
+        if d == 1:
+            return "WOMEN"
+        if d == 7:
+            return "PARA WOMEN"
+        return "GIRLS"
+
+    return ""
+
+
+def allowed_events(gender: str, division_no: int):
+    """Return list of (event_name, event_code) from the SMTFA schedule."""
+    d = int(division_no)
+    schedule_gender = _schedule_gender_for_division(gender, d)
+    return list(SCHEDULE_EVENT_OPTIONS.get((schedule_gender, d), []))
 
 def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb = openpyxl.Workbook()
