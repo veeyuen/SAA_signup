@@ -787,6 +787,7 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             dob = parse_dob(r.get("DOB"))
             gender_raw = str(r.get("GENDER", "") or "").strip().upper()
             nat_raw = str(r.get("NATIONALITY", "") or "").strip()
+            sgpr_raw = str(r.get("SINGAPORE_PR", "") or r.get("SG_PR", "") or r.get("PR_STATUS", "") or "").strip()
             uid = str(r.get("UNIQUE_ID", "") or "").strip()
             tname = str(r.get("TEAM_NAME", "") or "").strip()
             tcode_raw = str(r.get("TEAM_CODE", "") or "").strip()
@@ -821,11 +822,42 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
                 st.session_state["nationality__pending"] = nat_raw
                 st.session_state["nationality_override__pending"] = nat_raw
 
+            _nat_cf = nat_raw.casefold()
+            _sgpr_cf = sgpr_raw.casefold()
+            roster_is_sg_pr = (
+                _sgpr_cf in ("yes", "y", "true", "1", "pr", "singapore pr", "sg pr")
+                or _nat_cf in ("singapore pr", "sg pr")
+            )
+            st.session_state["singapore_pr__pending"] = bool(roster_is_sg_pr)
+            if roster_is_sg_pr and not nat_pick:
+                # Keep nationality as an IOC/WA code while using the checkbox for PR status.
+                st.session_state["nationality__pending"] = "SGP"
+                st.session_state["nationality_override__pending"] = ""
+
             # Unique ID override from roster
             st.session_state["unique_id_override__pending"] = uid
+            # Optional roster fields, if available
+            roster_email = str(r.get("EMAIL", "") or r.get("Email", "") or "").strip()
+            roster_contact = str(
+                r.get("CONTACT_NUMBER", "")
+                or r.get("CONTACT", "")
+                or r.get("MOBILE", "")
+                or r.get("PHONE", "")
+                or ""
+            ).strip()
+            if roster_email:
+                st.session_state["email__pending"] = roster_email
+            if roster_contact:
+                st.session_state["contact_number__pending"] = roster_contact
 
-            # Team code: if not in list, store as override so it still appears in the dropdown
+
+            # Team fields:
+            # The form now uses Team Name as the selected widget and shows Team Code automatically.
+            # Therefore we must set BOTH the code-related state and the team_name_selected widget key.
             tcode_pick = _match_option_case_insensitive(tcode_raw, TEAM_CODES)
+            resolved_team_code = tcode_pick or tcode_raw
+            resolved_team_name = tname or (get_team_name(resolved_team_code) if resolved_team_code else "")
+
             if tcode_pick:
                 st.session_state["team_code__pending"] = tcode_pick
                 st.session_state["team_code_override__pending"] = ""
@@ -833,8 +865,12 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
                 st.session_state["team_code__pending"] = tcode_raw
                 st.session_state["team_code_override__pending"] = tcode_raw
 
-            if tname:
-                st.session_state["team_name_override__pending"] = tname
+            if resolved_team_name:
+                st.session_state["team_name_selected__pending"] = resolved_team_name
+                st.session_state["team_name_override__pending"] = resolved_team_name
+            else:
+                st.session_state["team_name_selected__pending"] = ""
+                st.session_state["team_name_override__pending"] = ""
 
             st.session_state["athlete_roster_match__pending"] = "(keep typed)"
             st.rerun()
