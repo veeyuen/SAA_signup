@@ -141,8 +141,8 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb.save(bio)
     return bio.getvalue()
 # ---------------- UI ----------------
-st.set_page_config(page_title="SMTA International Masters T&F Signup", layout="wide")
-st.title("SMTA International Masters T&F Signup")
+st.set_page_config(page_title="Allcomers 4 Meet Signup", layout="wide")
+st.title("Allcomers 4 Meet Signup")
 
 def _apply_pending_text_updates():
     """Apply any pending text updates BEFORE widgets are instantiated."""
@@ -444,7 +444,7 @@ with st.sidebar:
     st.header("Team / Billing")
     default_team_code = st.selectbox("Default Team Code (optional)", [""] + TEAM_CODES, index=0, key="default_team_code")
     default_team_name = get_team_name(default_team_code) if default_team_code else ""
-    team_name_header = st.text_input("Team Name (for header)", value=default_team_name, key="team_name_header")
+    team_name_header = st.text_input("Default Team Name (for header)", value=default_team_name, key="team_name_header")
     billing_name = st.text_input("Billing contact name", value="", key="billing_name")
     billing_email = st.text_input("Billing email", value="", key="billing_email")
     charge_code = st.text_input("Charge code (optional)", value="", key="charge_code")
@@ -811,17 +811,43 @@ if not email_present:
 
 
 c9, c10 = st.columns(2)
-# Per-entry team selection; default from sidebar if present
-if default_team_code and default_team_code in TEAM_CODES:
-    if st.session_state.get("team_code") not in TEAM_CODES:
-        st.session_state["team_code"] = default_team_code
-team_code_options = list(TEAM_CODES)
-_tc_extra = (st.session_state.get("team_code_override", "") or "").strip()
-if _tc_extra and _tc_extra not in team_code_options:
-    team_code_options = [_tc_extra] + team_code_options
-team_code = c9.selectbox("Team Code", team_code_options, key="team_code")
-team_name_row = get_team_name(team_code)
-c10.text_input("Team Name (auto)", team_name_row, disabled=True)
+# Per-entry team selection; user selects Team Name, Team Code is auto-shown
+team_name_by_code = {code: (get_team_name(code) or code) for code in TEAM_CODES}
+team_code_by_name = {}
+team_name_options = []
+for _code, _name in team_name_by_code.items():
+    if _name and _name not in team_code_by_name:
+        team_code_by_name[_name] = _code
+        team_name_options.append(_name)
+
+_tc_extra = (st.session_state.get("team_code_override", "") or st.session_state.get("team_code", "") or "").strip()
+_tn_extra = (st.session_state.get("team_name_override", "") or "").strip()
+if _tn_extra and _tn_extra not in team_code_by_name:
+    team_name_options = [_tn_extra] + team_name_options
+    team_code_by_name[_tn_extra] = _tc_extra or ""
+elif _tc_extra and _tc_extra in TEAM_CODES:
+    _tn_from_code = get_team_name(_tc_extra) or _tc_extra
+    if _tn_from_code and _tn_from_code not in team_code_by_name:
+        team_name_options = [_tn_from_code] + team_name_options
+        team_code_by_name[_tn_from_code] = _tc_extra
+
+# Apply default/sidebar/roster value before the widget is created
+_default_team_name_selected = ""
+if _tn_extra:
+    _default_team_name_selected = _tn_extra
+elif _tc_extra:
+    _default_team_name_selected = get_team_name(_tc_extra) or _tc_extra
+elif default_team_code and default_team_code in TEAM_CODES:
+    _default_team_name_selected = get_team_name(default_team_code) or default_team_code
+
+if _default_team_name_selected and _default_team_name_selected in team_name_options:
+    if st.session_state.get("team_name_selected") not in team_name_options:
+        st.session_state["team_name_selected"] = _default_team_name_selected
+
+team_name_row = c9.selectbox("Team Name", team_name_options, key="team_name_selected")
+team_code = team_code_by_name.get(team_name_row, "")
+st.session_state["team_code"] = team_code
+c10.text_input("Team Code (auto)", team_code, disabled=True)
 
 c11, c12 = st.columns(2)
 event_division = c11.selectbox(
@@ -862,7 +888,10 @@ if not event_ok:
     st.warning("Please select at least one event (none available for this Gender + Division).")
 
 
-season_best = st.text_input("Season Best (optional)", key="season_best")
+season_best = st.text_input("Season Best", key="season_best")
+season_best_ok = bool((season_best or "").strip())
+if not season_best_ok:
+    st.warning("Season Best is required.")
 emergency_contact_name = st.text_input("Emergency Contact Name", key="emergency_contact_name")
 emergency_contact_number = st.text_input("Emergency Contact Number", key="emergency_contact_number")
 coach_full_name = st.text_input("Coach Full Name", key="coach_full_name")
@@ -874,7 +903,7 @@ email_norm = normalize_email(email)
 waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
 
 # Gate Add entry button (live checks)
-ready_to_add = bool(waiver_ok) and bool(email_present) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(gender_ok) and bool(event_ok)
+ready_to_add = bool(waiver_ok) and bool(email_present) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(gender_ok) and bool(event_ok) and bool(season_best_ok)
 
 
 
@@ -890,6 +919,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         ("Birth Date", birth_date),
         ("Email", email),
         ("Contact Number", contact_number),
+        ("Season Best", season_best),
     ]
         # IC required only if Singapore PR is ticked OR Singapore athlete has no UNIQUE_ID
     if ic_required:
@@ -917,6 +947,8 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
         st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
     elif not event_opts or not event_names or not selected_events:
         st.error("Please select at least one event for that Gender + Division combination.")
+    elif not (season_best or "").strip():
+        st.error("Season Best is required.")
     else:
         # Add one row per selected event
         added_events = []
@@ -1212,8 +1244,23 @@ else:
             email_e = cI.text_input("Email", value=original.get("email",""), key=f"e_email_{idx}")
 
             cJ, cK = st.columns(2)
-            team_code_e = cJ.selectbox("Team Code", tc_opts, index=tc_opts.index(_tc_cur) if _tc_cur in tc_opts else 0, key=f"e_team_code_{idx}")
-            team_name_override_e = cK.text_input("Team Name override (optional)", value=original.get("team_name_override",""), key=f"e_team_name_override_{idx}")
+            # Edit: select Team Name, auto-show Team Code
+            tc_name_by_code_e = {code: (get_team_name(code) or code) for code in tc_opts}
+            tc_code_by_name_e = {}
+            team_name_opts_e = []
+            for _code, _name in tc_name_by_code_e.items():
+                if _name and _name not in tc_code_by_name_e:
+                    tc_code_by_name_e[_name] = _code
+                    team_name_opts_e.append(_name)
+            _team_name_cur_e = (original.get("team_name", "") or get_team_name(_tc_cur) or _tc_cur).strip()
+            if _team_name_cur_e and _team_name_cur_e not in tc_code_by_name_e:
+                team_name_opts_e = [_team_name_cur_e] + team_name_opts_e
+                tc_code_by_name_e[_team_name_cur_e] = _tc_cur
+            _team_name_idx_e = team_name_opts_e.index(_team_name_cur_e) if _team_name_cur_e in team_name_opts_e else 0
+            team_name_e_selected = cJ.selectbox("Team Name", team_name_opts_e, index=_team_name_idx_e, key=f"e_team_name_{idx}")
+            team_code_e = tc_code_by_name_e.get(team_name_e_selected, _tc_cur)
+            cK.text_input("Team Code (auto)", value=team_code_e, disabled=True, key=f"e_team_code_auto_{idx}")
+            team_name_override_e = team_name_e_selected
 
             cL, cM = st.columns(2)
             # Event division & event
@@ -1240,7 +1287,7 @@ else:
             event_name_e = cM.selectbox("Event", event_names_e if event_names_e else ["(no events)"], index=0, key=f"e_event_{idx}")
 
             cN, cO, cP = st.columns(3)
-            season_best_e = cN.text_input("Season Best (optional)", value=original.get("season_best",""), key=f"e_sb_{idx}")
+            season_best_e = cN.text_input("Season Best", value=original.get("season_best",""), key=f"e_sb_{idx}")
             parq_e = cO.selectbox("PAR-Q completed?", ["Y","N"], index=0 if (original.get("parq","Y")=="Y") else 1, key=f"e_parq_{idx}")
             unique_id_e = cP.text_input("Unique ID", value=original.get("unique_id",""), key=f"e_uid_{idx}")
 
@@ -1277,6 +1324,8 @@ else:
                 errors.append("Birth Date cannot be in the future.")
             if not (contact_number_e or "").strip():
                 errors.append("Contact Number is required.")
+            if not (season_best_e or "").strip():
+                errors.append("Season Best is required.")
             if not is_valid_email(email_norm_e):
                 errors.append("Email is invalid.")
             if not is_valid_ic_last4(ic_norm_e):
