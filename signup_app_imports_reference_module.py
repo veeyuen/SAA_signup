@@ -176,18 +176,31 @@ def compute_unique_id(first_name: str, ic_last4: str, dob: date) -> str:
     return f"{first_name.strip()[:1]}{ic[:4]}{dob.year % 100:02d}".upper()
 
 def _schedule_gender_for_division(gender: str, division_no: int) -> str:
-    """Map form gender to the schedule gender labels for the selected division."""
-    g = gender_to_code(gender) or (gender or "").strip().upper()
-    d = int(division_no)
+    """Map form gender to the schedule gender labels for the selected division.
 
-    if g == "M":
+    Accepts form values (Male/Female), code values (M/F), and schedule labels
+    (MEN/WOMEN/BOYS/GIRLS/PARA MEN/PARA WOMEN).
+    """
+    d = int(division_no)
+    raw = (gender or "").strip().upper()
+    code = gender_to_code(gender)
+
+    # If a schedule label was passed in directly, keep it when appropriate.
+    if raw in ("MEN", "BOYS"):
+        return "MEN" if d == 1 else ("PARA MEN" if d == 7 else "BOYS")
+    if raw in ("WOMEN", "GIRLS"):
+        return "WOMEN" if d == 1 else ("PARA WOMEN" if d == 7 else "GIRLS")
+    if raw in ("PARA MEN", "PARA WOMEN"):
+        return raw
+
+    if code == "M":
         if d == 1:
             return "MEN"
         if d == 7:
             return "PARA MEN"
         return "BOYS"
 
-    if g == "F":
+    if code == "F":
         if d == 1:
             return "WOMEN"
         if d == 7:
@@ -198,10 +211,32 @@ def _schedule_gender_for_division(gender: str, division_no: int) -> str:
 
 
 def allowed_events(gender: str, division_no: int):
-    """Return list of (event_name, event_code) from the SMTFA schedule."""
+    """Return list of (event_name, event_code) from the SMTFA schedule.
+
+    If gender is blank/unrecognised, return the union of events for that division so
+    the dropdown is not empty while the user is still completing the form.
+    """
     d = int(division_no)
     schedule_gender = _schedule_gender_for_division(gender, d)
-    return list(SCHEDULE_EVENT_OPTIONS.get((schedule_gender, d), []))
+
+    exact = list(SCHEDULE_EVENT_OPTIONS.get((schedule_gender, d), []))
+    if exact:
+        return exact
+
+    # Fallback: show all unique event names for the selected division.
+    # This prevents the Select Event dropdown from being empty when gender is blank
+    # or when a schedule label is unexpected. The current gender still determines
+    # the correct event code once selected.
+    merged = []
+    seen = set()
+    for (_gender_key, _division_key), _opts in SCHEDULE_EVENT_OPTIONS.items():
+        if int(_division_key) != d:
+            continue
+        for _name, _code in _opts:
+            if _name not in seen:
+                merged.append((_name, _code))
+                seen.add(_name)
+    return merged
 
 def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb = openpyxl.Workbook()
@@ -999,7 +1034,7 @@ selected_events = c12.multiselect(
 # Live validation: must have at least one event selected
 event_ok = bool(event_opts) and len(selected_events) > 0
 if not event_ok:
-    st.warning("Please select at least one event (none available for this Gender + Division).")
+    st.warning("Please select at least one event for the selected division.")
 
 
 season_best = st.text_input("Season Best", key="season_best")
