@@ -409,10 +409,13 @@ def send_confirmation_email_smtp(to_email: str, subject: str, body: str) -> None
 
 
 def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame, record_type: str = "I") -> str:
-    """Build required semicolon-delimited export rows (no header) from the OUTPUT sheet.
+    """Build semicolon-delimited export rows (no header) from the OUTPUT sheet.
 
-    Row layout:
-    <I or E>; last_name; first_name; ; gender; dob; team_code; team_name; ; ; ; ; ; ; ; ; nationality; ; ; ; ; unique_id; ; ; ;
+    I format keeps the existing fixed-width layout:
+      I; last_name; first_name; ; gender; dob; team_code; team_name; ; ... nationality ... unique_id ...
+
+    E format follows the uploaded sample:
+      E; last_name; first_name; ; gender; dob; team_code; team_name; ; ; event_code; season_best; ; M; division; ; ;
     """
     if sheet_df is None or sheet_df.empty:
         return ""
@@ -432,52 +435,136 @@ def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame, record_type
         except Exception:
             return str(v).strip()
 
+    def fmt_gender(v):
+        raw = str(v or "").strip()
+        return gender_to_code(raw) or raw
+
+    def fmt_division(v):
+        s = str(v or "").strip()
+        if not s:
+            return ""
+        try:
+            f = float(s)
+            if f.is_integer():
+                return str(int(f))
+        except Exception:
+            pass
+        return s
+
+    def export_event_code(event_name, stored_event_code):
+        """Return the E-file event code shown in the uploaded sample.
+
+        The schedule S/NO may be stored internally as event_code, but the E file sample
+        expects codes such as 100, 200, 800, 100H, HJ, LJ, DT.
+        """
+        name = str(event_name or "").strip().upper()
+        stored = str(stored_event_code or "").strip().upper()
+
+        # If stored code already looks like an event code (not merely a schedule S/NO),
+        # keep it. Examples: 100H, HJ, LJ, DT.
+        if stored and not stored.isdigit():
+            return stored
+
+        # Running / hurdle events
+        m = re.search(r"(\d+)\s*M", name)
+        if m:
+            distance = m.group(1)
+            if "HURD" in name:
+                return f"{distance}H"
+            if "WALK" in name:
+                return f"{distance}W"
+            return distance
+
+        # Field-event codes commonly used in Meet Manager imports
+        if "HIGH JUMP" in name:
+            return "HJ"
+        if "LONG JUMP" in name:
+            return "LJ"
+        if "TRIPLE JUMP" in name:
+            return "TJ"
+        if "POLE VAULT" in name:
+            return "PV"
+        if "SHOT" in name:
+            return "SP"
+        if "DISCUS" in name:
+            return "DT"
+        if "JAVELIN" in name:
+            return "JT"
+        if "HAMMER" in name:
+            return "HT"
+
+        relay = re.search(r"(\d+)\s*[Xx]\s*(\d+)", name)
+        if relay:
+            return f"{relay.group(1)}X{relay.group(2)}"
+
+        return stored or name
+
+    rt = (record_type or "I").strip().upper()[:1] or "I"
+    if rt not in ("I", "E"):
+        rt = "I"
+
     lines = []
     for _, row in sheet_df.iterrows():
         last_name = str(get(row, "last_name", "")).strip()
         first_name = str(get(row, "first_name", "")).strip()
-        gender_raw = str(get(row, "gender", "")).strip()
-        gcode = gender_to_code(gender_raw)
-        gender = code_to_gender_display(gcode) or gender_raw
+        gender = fmt_gender(get(row, "gender", ""))
         dob = fmt_date(get(row, "dob", "") or get(row, "birth_date", "") or get(row, "date_of_birth", ""))
         team_code = str(get(row, "team_code", "")).strip()
         team_name = str(get(row, "team_name", "")).strip()
         nationality = str(get(row, "nationality", "")).strip()
-        singapore_pr = str(get(row, "singapore_pr", "") or get(row, "sg_pr", "") or get(row, "singapore_pr_status", "") or "").strip()
-        if singapore_pr.strip().lower() in ("true", "1", "y", "yes"):
-            singapore_pr = "Yes"
-        elif singapore_pr.strip().lower() in ("false", "0", "n", "no"):
-            singapore_pr = "No"
-        else:
-            singapore_pr = singapore_pr or "No"
-        singapore_pr = str(get(row, "singapore_pr", "") or get(row, "SINGAPORE_PR", "") or "").strip()
         unique_id = str(get(row, "unique_id", "")).strip()
+        event_name = str(get(row, "event", "")).strip()
+        event_code_stored = str(get(row, "event_code", "")).strip()
+        event_code_export = export_event_code(event_name, event_code_stored)
+        season_best = str(get(row, "season_best", "")).strip()
+        division = fmt_division(get(row, "event_division", "") or get(row, "division", ""))
 
-        rt = (record_type or "I").strip().upper()[:1] or "I"
-        if rt not in ("I", "E"):
-            rt = "I"
-        fields = [
-            rt,
-            last_name,
-            first_name,
-            "",
-            gender,
-            dob,
-            team_code,
-            team_name,
-            "", "", "", "", "", "", "", "",
-            nationality,
-            "", "", "", "",
-            unique_id,
-            "", "", "",
-        ]
+        if rt == "E":
+            fields = [
+                "E",
+                last_name,
+                first_name,
+                "",
+                gender,
+                dob,
+                team_code,
+                team_name,
+                "",
+                "",
+                event_code_export,
+                season_best,
+                "",
+                "M",
+                division,
+                "",
+                "",
+            ]
+            include_row = any([last_name, first_name, gender, dob, team_code, team_name, event_code_export, season_best, division])
+        else:
+            fields = [
+                "I",
+                last_name,
+                first_name,
+                "",
+                gender,
+                dob,
+                team_code,
+                team_name,
+                "", "", "", "", "", "", "", "",
+                nationality,
+                "", "", "", "",
+                unique_id,
+                "", "", "",
+            ]
+            include_row = any([last_name, first_name, gender, dob, team_code, team_name, nationality, unique_id])
 
-        if not any([last_name, first_name, gender, dob, team_code, team_name, nationality, unique_id]):
+        if not include_row:
             continue
 
         lines.append("; ".join(fields))
 
     return "\n".join(lines) + ("\n" if lines else "")
+
 
 def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
     if df is None or df.empty:
