@@ -834,14 +834,14 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             if n4:
                 parts.append(f"NRIC(last4): {n4}")
             if dob_str:
-                parts.append(f"Birth Year: {dob_str}")
+                parts.append(f"{dob_str}")
             if gen:
-                parts.append(f"Gender: {gen}")
+                parts.append(f"{gen}")
             if nat:
-                parts.append(f"Nat: {nat}")
+                parts.append(f"{nat}")
             team_piece = " ".join([p for p in [tcode, team] if p]).strip()
             if team_piece:
-                parts.append(f"Team: {team_piece}")
+                parts.append(f"{team_piece}")
             if parts:
                 label = label + " | " + " | ".join(parts)
             labels.append(label)
