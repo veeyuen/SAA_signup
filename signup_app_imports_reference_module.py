@@ -175,6 +175,27 @@ def compute_unique_id(first_name: str, ic_last4: str, dob: date) -> str:
     ic = normalize_ic_last4(ic_last4)
     return f"{first_name.strip()[:1]}{ic[:4]}{dob.year % 100:02d}".upper()
 
+
+
+def _event_sort_key(event_name: str):
+    """Sort timed/running events by distance, then field events alphabetically."""
+    name = str(event_name or "").strip()
+    upper = name.upper()
+
+    relay = re.search(r"\b(\d+)\s*[Xx]\s*(\d+(?:\.\d+)?)\s*M\b", upper)
+    if relay:
+        legs = float(relay.group(1))
+        leg_distance = float(relay.group(2))
+        return (0, legs * leg_distance, upper)
+
+    dist = re.search(r"\b(\d+(?:\.\d+)?)\s*(KM|M)\b", upper)
+    if dist:
+        value = float(dist.group(1))
+        metres = value * 1000 if dist.group(2) == "KM" else value
+        return (0, metres, upper)
+
+    return (1, float("inf"), upper)
+
 def _schedule_gender_for_division(gender: str, division_no: int) -> str:
     """Map form gender to the schedule gender labels for the selected division.
 
@@ -827,8 +848,16 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             tcode = str(r.get("TEAM_CODE", "") or "").strip()
             team = str(r.get("TEAM_NAME", "") or "").strip()
 
-            full_name = str(r.get("FULL_NAME", "") or "").strip()
-            label = full_name if full_name else f"{fn} {on} {ln}".strip()
+            # Privacy: roster dropdown labels show first name only and redact last name.
+            # Underlying roster row still contains full details for autofill after selection.
+            first_for_label = fn or str(r.get("FIRST_NAME", "") or "").strip()
+            last_for_label = ln or str(r.get("LAST_NAME", "") or "").strip()
+            label_parts = []
+            if first_for_label:
+                label_parts.append(first_for_label)
+            if last_for_label:
+                label_parts.append("*")
+            label = " ".join(label_parts).strip() or "(unnamed roster entry)"
             parts = []
             n4 = last4_from_nric(nric)
             if n4:
@@ -1137,6 +1166,7 @@ for _n, _c in (event_opts_raw or []):
     if _n not in _seen_event_names:
         event_opts.append((_n, _c))
         _seen_event_names.add(_n)
+event_opts = sorted(event_opts, key=lambda _x: _event_sort_key(_x[0]))
 event_names = [n for n, _ in event_opts]
 
 # Keep event selection consistent when options change (multi-select)
@@ -1553,6 +1583,7 @@ else:
                 if _n not in _seen_event_names_e:
                     event_opts_e.append((_n, _c))
                     _seen_event_names_e.add(_n)
+            event_opts_e = sorted(event_opts_e, key=lambda _x: _event_sort_key(_x[0]))
             event_names_e = [n for n, _ in event_opts_e]
             event_cur = (original.get("event","") or "").strip()
             if event_cur and event_cur not in event_names_e:
