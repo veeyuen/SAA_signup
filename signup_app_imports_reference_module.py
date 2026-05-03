@@ -1524,6 +1524,26 @@ else:
             first_name_e = cB.text_input("First Name", value=original.get("first_name", ""), key=f"e_first_{idx}")
             other_name_e = cC.text_input("Other Name (optional)", value=original.get("other_name", ""), key=f"e_other_{idx}")
 
+            full_name_default_e = (
+                original.get("full_name", "")
+                or original.get("name", "")
+                or " ".join([p for p in [first_name_e, other_name_e, last_name_e] if (p or "").strip()])
+            )
+            name_passport_default_e = (
+                original.get("name_passport", "")
+                or original.get("name_as_per_nric_passport", "")
+                or original.get("full_name", "")
+                or original.get("name", "")
+                or full_name_default_e
+            )
+            cName1, cName2 = st.columns(2)
+            full_name_e = cName1.text_input("Full Name (auto)", value=full_name_default_e, key=f"e_fullname_{idx}")
+            name_passport_e = cName2.text_input(
+                "Name as per NRIC/Passport",
+                value=name_passport_default_e,
+                key=f"e_name_passport_{idx}",
+            )
+
             cD, cE, cF = st.columns(3)
             gender_opts_e = ["", "Male", "Female"]
             _gcur = (original.get("gender","") or "").strip()
