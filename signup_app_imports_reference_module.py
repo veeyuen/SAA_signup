@@ -734,6 +734,13 @@ with c3:
 with c4:
     gender = st.selectbox("Gender", ["", "Male", "Female"], index=0, key="gender")
 
+# Name as per NRIC/Passport is a separate required field.
+# It is intentionally NOT auto-filled from First Name / Last Name / Full Name.
+passport_name = st.text_input("Name as per NRIC/Passport", key="name_passport")
+passport_ok = bool((passport_name or "").strip())
+if not passport_ok:
+    st.warning("Name as per NRIC/Passport is required.")
+
 # Live validation: gender (mandatory)
 gender_ok = gender in ('Male','Female')
 if not gender_ok:
@@ -754,7 +761,6 @@ prev_sig = (st.session_state.get("full_name_signature", "") or "").strip()
 if prev_sig and current_name_sig != prev_sig:
     # User typed a new name; clear roster-derived fields so they don't persist
     st.session_state["full_name__pending"] = ""
-    st.session_state["name_passport__pending"] = ""
     st.session_state["unique_id_override__pending"] = ""
     st.session_state["db_name_override__pending"] = ""
     st.session_state["full_name_signature__pending"] = ""
@@ -923,7 +929,14 @@ if _roster_enabled and _roster_url and len(search_text) >= 2:
             st.session_state["last_name__pending"] = ln
             st.session_state["other_name__pending"] = on
             st.session_state["full_name__pending"] = full_name_sel
-            st.session_state["name_passport__pending"] = full_name_sel
+            roster_name_passport = str(
+                r.get("NAME_PASSPORT", "")
+                or r.get("NAME_AS_PER_NRIC_PASSPORT", "")
+                or r.get("NAME AS PER NRIC/PASSPORT", "")
+                or ""
+            ).strip()
+            if roster_name_passport:
+                st.session_state["name_passport__pending"] = roster_name_passport
             st.session_state["full_name_signature__pending"] = "|".join([
                 (st.session_state.get("first_name__pending", "") or "").strip(),
                 (st.session_state.get("other_name__pending", "") or "").strip(),
@@ -1014,20 +1027,11 @@ if (not full_name_display) and typed_full_name:
     full_name_display = typed_full_name
 st.text_input("Full Name (auto)", key="full_name")
 
-# Name as per NRIC/Passport (mandatory) — additional field
-passport_name = (st.session_state.get("name_passport", "") or "").strip()
-if (not passport_name) and (st.session_state.get("full_name", "") or "").strip():
-    # Pre-fill once from Full Name (auto) for convenience
-    st.session_state["name_passport"] = (st.session_state.get("full_name", "") or "").strip()
-passport_name = st.text_input("Name as per NRIC/Passport", key="name_passport")
 # Live validation: name presence
-passport_ok = bool((st.session_state.get("name_passport", "") or "").strip())
 selected_from_roster = bool((st.session_state.get("unique_id_override", "") or "").strip() or (db_name_override or "").strip())
 first_last_ok = selected_from_roster or (bool((first_name or "").strip()) and bool((last_name or "").strip()))
 name_ok = passport_ok and first_last_ok
-if not passport_ok:
-    st.warning("Name as per NRIC/Passport is required.")
-elif not first_last_ok:
+if not first_last_ok:
     st.warning("First Name and Last Name are required unless you selected the athlete from the roster.")
 
 
@@ -1542,9 +1546,7 @@ else:
             name_passport_default_e = (
                 original.get("name_passport", "")
                 or original.get("name_as_per_nric_passport", "")
-                or original.get("full_name", "")
-                or original.get("name", "")
-                or full_name_default_e
+                or ""
             )
             cName1, cName2 = st.columns(2)
             full_name_e = cName1.text_input("Full Name (auto)", value=full_name_default_e, key=f"e_fullname_{idx}")
