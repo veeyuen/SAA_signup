@@ -1546,8 +1546,12 @@ else:
 
             cD, cE, cF = st.columns(3)
             gender_opts_e = ["", "Male", "Female"]
-            _gcur = (original.get("gender","") or "").strip()
-            _gidx = gender_opts_e.index(_gcur) if _gcur in gender_opts_e else 0
+            _graw = (original.get("gender","") or "").strip()
+            # Existing/preloaded rows may store gender as M/F, while the edit widget expects Male/Female.
+            _gcur = code_to_gender_display(gender_to_code(_graw)) or _graw
+            if _gcur not in gender_opts_e:
+                _gcur = ""
+            _gidx = gender_opts_e.index(_gcur)
             gender_e = cD.selectbox("Gender", gender_opts_e, index=_gidx, key=f"e_gender_{idx}")
             birth_date_e = cE.date_input(
                 "Birth Date",
