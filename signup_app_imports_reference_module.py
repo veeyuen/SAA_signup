@@ -636,6 +636,11 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
         team_code = str(get(row, "team_code", "")).strip()
         event = str(get(row, "event", "")).strip()
         event_code = str(get(row, "event_code", "")).strip()
+        season_best = str(get(row, "season_best", "") or get(row, "season best", "") or "").strip()
+        parq = str(get(row, "parq", "") or get(row, "par_q", "") or get(row, "par-q", "") or "").strip()
+        emergency_contact_name = str(get(row, "emergency_contact_name", "") or get(row, "emergency contact name", "") or "").strip()
+        emergency_contact_number = str(get(row, "emergency_contact_number", "") or get(row, "emergency contact number", "") or "").strip()
+        coach_full_name = str(get(row, "coach_full_name", "") or get(row, "coach full name", "") or "").strip()
         charge_code = str(get(row, "charge_code", "")).strip()
         po_to_be_sent = str(get(row, "po_to_be_sent", "")).strip()
         email = normalize_email(str(get(row, "email", "")).strip())
@@ -668,6 +673,11 @@ def _sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
             "event_code": event_code,
             "charge_code": charge_code,
             "po_to_be_sent": po_to_be_sent if po_to_be_sent in ("Yes","No") else "",
+            "season_best": season_best,
+            "parq": parq if parq in ("Y", "N") else "Y",
+            "emergency_contact_name": emergency_contact_name,
+            "emergency_contact_number": emergency_contact_number,
+            "coach_full_name": coach_full_name,
             "email": email,
             "contact_number": contact_number,
         })
@@ -1615,7 +1625,7 @@ else:
             event_name_e = cM.selectbox("Event", event_names_e if event_names_e else ["(no events)"], index=0, key=f"e_event_{idx}")
 
             cN, cO, cP = st.columns(3)
-            season_best_e = cN.text_input("Season Best", value=original.get("season_best",""), key=f"e_sb_{idx}")
+            season_best_e = cN.text_input("Season Best", value=(original.get("season_best", "") or original.get("season best", "")), key=f"e_sb_{idx}")
             parq_e = cO.selectbox("PAR-Q completed?", ["Y","N"], index=0 if (original.get("parq","Y")=="Y") else 1, key=f"e_parq_{idx}")
             unique_id_e = cP.text_input("Unique ID", value=original.get("unique_id",""), key=f"e_uid_{idx}")
 
@@ -1656,8 +1666,16 @@ else:
                 errors.append("Season Best is required.")
             if not is_valid_email(email_norm_e):
                 errors.append("Email is invalid.")
-            if not is_valid_ic_last4(ic_norm_e):
+
+            _uid_present_e = bool((unique_id_e or "").strip() or (original.get("unique_id", "") or "").strip())
+            _is_sgp_e = (str(nationality_e or "").strip().upper() in ("SGP", "SIN", "SG", "SINGAPORE"))
+            _pr_e = bool(singapore_pr_e)
+            ic_required_e = bool(_pr_e) or (bool(_is_sgp_e) and (not _uid_present_e))
+            if ic_required_e and not is_valid_ic_last4(ic_norm_e):
+                errors.append("IC last 4 is required and must be 3 digits followed by 1 letter (e.g., 123A).")
+            elif ic_norm_e and not is_valid_ic_last4(ic_norm_e):
                 errors.append("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
+
             if event_name_e == "(no events)":
                 errors.append("Event must be selected.")
 
@@ -1698,7 +1716,7 @@ else:
                     "event_code": event_code_e,
                     "season_best": (season_best_e or "").strip(),
                     "parq": parq_e,
-                    "unique_id": (unique_id_e or "").strip() or compute_unique_id((first_name_e or "").strip(), ic_norm_e, birth_date_e),
+                    "unique_id": (unique_id_e or "").strip() or (compute_unique_id((first_name_e or "").strip(), ic_norm_e, birth_date_e) if ic_norm_e else ""),
                     "charge_code": (charge_code_e or "").strip(),
                     "po_to_be_sent": po_e,
                     "emergency_contact_name": (emergency_name_e or "").strip(),
