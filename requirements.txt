@@ -6,3 +6,4 @@ Google-cloud-bigquery-storage
 google-cloud-bigquery
 google-auth
 gspread
+Authlib>=1.3.2
