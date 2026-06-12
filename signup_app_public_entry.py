@@ -15,6 +15,59 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
+
+def _secret_list(section: str, key: str) -> list[str]:
+    """Return a lowercase list from st.secrets[section][key], accepting TOML lists or comma strings."""
+    try:
+        value = st.secrets.get(section, {}).get(key, [])
+    except Exception:
+        value = []
+    if isinstance(value, str):
+        value = [x.strip() for x in value.split(",") if x.strip()]
+    return [str(x).strip().lower() for x in (value or []) if str(x).strip()]
+
+
+def require_google_login(required_group: str = "entry") -> str:
+    """Require Google/OIDC login and enforce a simple email allowlist."""
+    if not getattr(st, "user", None) or not st.user.is_logged_in:
+        st.title(APP_TITLE)
+        st.info("Please log in with Google to continue.")
+        st.button("Log in with Google", on_click=st.login)
+        st.stop()
+
+    user_email = (getattr(st.user, "email", "") or "").strip().lower()
+    if not user_email:
+        st.error("Login succeeded but no email address was returned. Please contact the administrator.")
+        st.button("Log out", on_click=st.logout)
+        st.stop()
+
+    admin_emails = set(_secret_list("access", "admin_emails"))
+    entry_emails = set(_secret_list("access", "entry_emails"))
+
+    try:
+        allow_unlisted = bool(st.secrets.get("access", {}).get("allow_unlisted_logged_in_users", False))
+    except Exception:
+        allow_unlisted = False
+
+    if required_group == "admin":
+        allowed = user_email in admin_emails
+        denied_message = "Admin access is required for this app."
+    else:
+        allowed = (user_email in admin_emails) or (user_email in entry_emails) or allow_unlisted
+        denied_message = "You are logged in, but your email is not on the access list."
+
+    if not allowed:
+        st.error(f"{denied_message} Access denied for {user_email}.")
+        st.button("Log out", on_click=st.logout)
+        st.stop()
+
+    with st.sidebar:
+        st.caption(f"Logged in as: {user_email}")
+        st.button("Log out", on_click=st.logout)
+
+    return user_email
+
+
 APP_VARIANT = "public_entry_only"
 import traceback as tb
 
@@ -45,6 +98,80 @@ DIVISIONS = {1: 'Masters (30 & above)',
  7: 'Para',
  8: 'Age (5-6)',
  10: 'Age (17-18)'}
+
+# ---------------------------------------------------------------------
+# Temporary 60m Sprint Championships mode
+# ---------------------------------------------------------------------
+# Set this to False after the 60m event has completed to revert to the
+# normal SMTFA signup title, divisions, and full event schedule.
+SPRINT_60M_ONLY_MODE = True
+
+DEFAULT_APP_TITLE = "SMTFA International Masters T&F Signup"
+SPRINT_60M_APP_TITLE = "60m Sprint Championships 2026"
+APP_TITLE = SPRINT_60M_APP_TITLE if SPRINT_60M_ONLY_MODE else DEFAULT_APP_TITLE
+
+# Relevant 60m divisions requested for this championship.
+# These are the only divisions shown when SPRINT_60M_ONLY_MODE is True.
+DIVISIONS_60M = {
+    "U7": "U7",
+    "U9": "U9",
+    "U13": "U13",
+    "U16": "U16",
+    "U18": "U18",
+    "U20": "U20",
+    "OPEN": "OPEN",
+    "Masters": "Masters",
+}
+
+
+def _active_divisions():
+    return DIVISIONS_60M if SPRINT_60M_ONLY_MODE else DIVISIONS
+
+
+def _default_division_key():
+    keys = list(_active_divisions().keys())
+    return keys[0] if keys else ""
+
+
+def _division_display_label(k):
+    if SPRINT_60M_ONLY_MODE:
+        return str(DIVISIONS_60M.get(k, k))
+    return f"{k} - {DIVISIONS[k]}"
+
+
+def _coerce_division_key_for_options(value, options):
+    """Return value coerced to one of the active selectbox option keys."""
+    if value in options:
+        return value
+
+    raw = str(value or "").strip()
+    for opt in options:
+        if str(opt).strip().lower() == raw.lower():
+            return opt
+
+    # Helpful bridge from old numeric divisions to the temporary 60m labels.
+    old_to_60m = {
+        "8": "U7",
+        "2": "U9",
+        "5": "U13",
+        "6": "U16",
+        "10": "U18",
+        "1": "Masters",
+    }
+    mapped = old_to_60m.get(raw)
+    if mapped in options:
+        return mapped
+
+    return options[0] if options else value
+
+
+def _division_value_for_storage(value):
+    """Store division as label in 60m mode; keep previous numeric behaviour otherwise."""
+    if SPRINT_60M_ONLY_MODE:
+        return str(value or "").strip()
+    return int(value)
+
+
 
 # Event options derived from 'SMTFA INT - SCHEDULE 6&7 JUN NT.xlsx', sheet 'NT Version'.
 # Keys are (schedule_gender, division); values are (event_name, event_code/S-NO).
@@ -234,11 +361,17 @@ def _schedule_gender_for_division(gender: str, division_no: int) -> str:
 
 
 def allowed_events(gender: str, division_no: int):
-    """Return list of (event_name, event_code) from the SMTFA schedule.
+    """Return list of (event_name, event_code) from the active event schedule.
 
-    If gender is blank/unrecognised, return the union of events for that division so
-    the dropdown is not empty while the user is still completing the form.
+    In temporary 60m Sprint Championships mode, only the 60M event is allowed
+    and only for the requested divisions.
     """
+    if SPRINT_60M_ONLY_MODE:
+        active_keys = {str(k).strip().lower() for k in DIVISIONS_60M.keys()}
+        if str(division_no or "").strip().lower() in active_keys:
+            return [("60M", "60")]
+        return []
+
     d = int(division_no)
     schedule_gender = _schedule_gender_for_division(gender, d)
 
@@ -312,8 +445,10 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb.save(bio)
     return bio.getvalue()
 # ---------------- UI ----------------
-st.set_page_config(page_title="SMTFA International Masters T&F Signup", layout="wide")
-st.title("SMTFA International Masters T&F Signup")
+st.set_page_config(page_title=APP_TITLE, layout="wide")
+
+current_user_email = require_google_login(required_group="entry")
+st.title(APP_TITLE)
 
 def _apply_pending_text_updates():
     """Apply any pending text updates BEFORE widgets are instantiated."""
@@ -1167,14 +1302,21 @@ st.session_state["team_code"] = team_code
 c10.text_input("Team Code (auto)", team_code, disabled=True)
 
 c11, c12 = st.columns(2)
+_active_division_keys = list(_active_divisions().keys())
+if _active_division_keys:
+    st.session_state["event_division"] = _coerce_division_key_for_options(
+        st.session_state.get("event_division", _active_division_keys[0]),
+        _active_division_keys,
+    )
+
 event_division = c11.selectbox(
-    "Event Division (1–8)",
-    options=list(DIVISIONS.keys()),
-    format_func=lambda k: f"{k} - {DIVISIONS[k]}",
+    "Event Division",
+    options=_active_division_keys,
+    format_func=_division_display_label,
     key="event_division",
 )
 
-event_opts_raw = allowed_events(gender_to_code(gender), int(event_division))
+event_opts_raw = allowed_events(gender_to_code(gender), event_division)
 # De-duplicate event names (some divisions have duplicates)
 event_opts = []
 _seen_event_names = set()
@@ -1190,6 +1332,8 @@ prev_selected = st.session_state.get("events_selected", [])
 if not isinstance(prev_selected, list):
     prev_selected = []
 prev_selected_valid = [e for e in prev_selected if e in event_names]
+if SPRINT_60M_ONLY_MODE and "60M" in event_names:
+    prev_selected_valid = ["60M"]
 if prev_selected_valid != prev_selected:
     st.session_state["events_selected"] = prev_selected_valid
 
@@ -1291,7 +1435,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
             "team_name": team_name_row,
             "charge_code": charge_code,
             "po_to_be_sent": po_to_be_sent,
-            "event_division": int(event_division),
+            "event_division": _division_value_for_storage(event_division),
             "season_best": (season_best or "").strip(),
             "emergency_contact_name": (emergency_contact_name or "").strip(),
             "emergency_contact_number": (emergency_contact_number or "").strip(),
