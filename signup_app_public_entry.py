@@ -106,6 +106,9 @@ DIVISIONS = {1: 'Masters (30 & above)',
 # normal SMTFA signup title, divisions, and full event schedule.
 SPRINT_60M_ONLY_MODE = True
 
+# Temporary rollout toggle: set to True to re-enable Google login.
+LOGIN_REQUIRED_FOR_THIS_ROLLOUT = False
+
 DEFAULT_APP_TITLE = "SMTFA International Masters T&F Signup"
 SPRINT_60M_APP_TITLE = "60m Sprint Championships 2026"
 APP_TITLE = SPRINT_60M_APP_TITLE if SPRINT_60M_ONLY_MODE else DEFAULT_APP_TITLE
@@ -447,7 +450,11 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
 # ---------------- UI ----------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-current_user_email = require_google_login(required_group="entry")
+current_user_email = (
+    require_google_login(required_group="entry")
+    if LOGIN_REQUIRED_FOR_THIS_ROLLOUT
+    else ""
+)
 st.title(APP_TITLE)
 
 def _apply_pending_text_updates():
