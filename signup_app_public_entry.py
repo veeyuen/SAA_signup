@@ -70,6 +70,7 @@ def require_google_login(required_group: str = "entry") -> str:
 
 APP_VARIANT = "public_entry_only"
 import traceback as tb
+import html
 
 import smtplib
 from email.message import EmailMessage
@@ -118,6 +119,7 @@ APP_TITLE = SPRINT_60M_APP_TITLE if SPRINT_60M_ONLY_MODE else DEFAULT_APP_TITLE
 DIVISIONS_60M = {
     "U7": "U7",
     "U9": "U9",
+    "U11": "U11",
     "U13": "U13",
     "U16": "U16",
     "U18": "U18",
@@ -542,13 +544,17 @@ def safe_date_max(v):
     return mx
 
 
-def send_confirmation_email_smtp(to_email: str, subject: str, body: str) -> None:
+def send_confirmation_email_smtp(to_email: str, subject: str, body: str, html_body: str | None = None) -> None:
     """Send a confirmation email via SMTP using Streamlit secrets.
 
     Required secrets:
       SMTP_HOST, SMTP_PORT (optional, default 587), SMTP_USER, SMTP_PASS
     Optional secrets:
       SMTP_FROM (display name + email) e.g. "SAA Entries <your@email>"
+
+    The email is sent as multipart/alternative when html_body is supplied:
+      - plain-text fallback: body
+      - HTML email body: html_body
     """
     host = (st.secrets.get("SMTP_HOST", "") or "").strip()
     user = (st.secrets.get("SMTP_USER", "") or "").strip()
@@ -563,7 +569,13 @@ def send_confirmation_email_smtp(to_email: str, subject: str, body: str) -> None
     msg["From"] = sender
     msg["To"] = to_email
     msg["Subject"] = subject
+
+    # Plain text fallback for email clients that block or do not render HTML.
     msg.set_content(body)
+
+    # HTML alternative for styled acknowledgement email and optional hosted images.
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
 
     with smtplib.SMTP(host, port, timeout=20) as smtp:
         smtp.ehlo()
@@ -571,6 +583,82 @@ def send_confirmation_email_smtp(to_email: str, subject: str, body: str) -> None
         smtp.ehlo()
         smtp.login(user, password)
         smtp.send_message(msg)
+
+
+def build_confirmation_email_html(full_name: str, events: list[str], team_name: str, unique_id: str) -> str:
+    """Build the HTML acknowledgement email body.
+
+    Optional Streamlit secret:
+      EMAIL_BANNER_URL = "https://raw.githubusercontent.com/.../banner.jpg"
+
+    If EMAIL_BANNER_URL is set, the image is displayed at the top of the email.
+    """
+    banner_url = (st.secrets.get("EMAIL_BANNER_URL", "") or "").strip()
+
+    safe_title = html.escape(APP_TITLE)
+    safe_full_name = html.escape(full_name or "")
+    safe_team_name = html.escape(team_name or "")
+    safe_unique_id = html.escape(unique_id or "")
+    safe_events = [html.escape(str(e or "")) for e in (events or [])]
+    safe_events_text = ", ".join(safe_events) if safe_events else ""
+
+    banner_html = ""
+    if banner_url:
+        safe_banner_url = html.escape(banner_url, quote=True)
+        banner_html = f"""
+          <tr>
+            <td style="padding:0 0 20px 0;">
+              <img src="{safe_banner_url}"
+                   alt="{safe_title}"
+                   style="display:block; width:100%; max-width:640px; height:auto; border:0; border-radius:8px;">
+            </td>
+          </tr>
+        """
+
+    return f"""<!doctype html>
+<html>
+  <body style="margin:0; padding:0; background-color:#f5f5f5; font-family:Arial, Helvetica, sans-serif; color:#222;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:#f5f5f5; padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px; background-color:#ffffff; border-radius:12px; padding:28px; border:1px solid #e6e6e6;">
+            {banner_html}
+            <tr>
+              <td>
+                <h2 style="margin:0 0 12px 0; font-size:24px; line-height:1.3; color:#111;">{safe_title}</h2>
+                <p style="font-size:16px; line-height:1.5; margin:0 0 18px 0;">Dear Participant,</p>
+                <p style="font-size:16px; line-height:1.5; margin:0 0 20px 0;">Your entry has been successfully received.</p>
+
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse; margin:20px 0;">
+                  <tr>
+                    <td style="padding:10px 12px; border:1px solid #e6e6e6; font-weight:bold; width:34%; background-color:#fafafa;">Full Name</td>
+                    <td style="padding:10px 12px; border:1px solid #e6e6e6;">{safe_full_name}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:10px 12px; border:1px solid #e6e6e6; font-weight:bold; background-color:#fafafa;">Event(s)</td>
+                    <td style="padding:10px 12px; border:1px solid #e6e6e6;">{safe_events_text}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:10px 12px; border:1px solid #e6e6e6; font-weight:bold; background-color:#fafafa;">Team</td>
+                    <td style="padding:10px 12px; border:1px solid #e6e6e6;">{safe_team_name}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:10px 12px; border:1px solid #e6e6e6; font-weight:bold; background-color:#fafafa;">Unique ID</td>
+                    <td style="padding:10px 12px; border:1px solid #e6e6e6;">{safe_unique_id}</td>
+                  </tr>
+                </table>
+
+                <p style="font-size:16px; line-height:1.5; margin:20px 0 0 0;">Thank you.</p>
+                <p style="font-size:16px; line-height:1.5; margin:6px 0 0 0;">SAA</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"""
+
 
 
 def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame, record_type: str = "I") -> str:
@@ -1469,14 +1557,21 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
                     "Thank you.\n\n"
                     "SAA\n"
                 )
+                _html_body = build_confirmation_email_html(
+                    full_name=_full,
+                    events=list(added_events) if isinstance(added_events, list) else [str(added_events)],
+                    team_name=team_name_row,
+                    unique_id=_uid_disp,
+                )
                 st.session_state["email_last_attempt"] = {
                     "ts": dt.datetime.utcnow().isoformat() + "Z",
                     "to": email_norm,
                     "subject": _subj,
                     "events": list(added_events) if isinstance(added_events, list) else str(added_events),
                     "status": "attempting",
+                    "format": "html",
                 }
-                send_confirmation_email_smtp(email_norm, _subj, _body)
+                send_confirmation_email_smtp(email_norm, _subj, _body, html_body=_html_body)
                 st.session_state["email_last_attempt"]["status"] = "sent"
                 st.toast("Confirmation email sent.")
         except Exception as e:
