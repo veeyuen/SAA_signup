@@ -610,9 +610,6 @@ def build_confirmation_email_html(full_name: str, events: list[str], team_name: 
     if payment_qr_url:
         safe_payment_qr_url = html.escape(payment_qr_url, quote=True)
         payment_qr_html = f"""
-    <p style="font-size:16px; line-height:1.5; margin:8px 0 12px 0;">
-      <a href="{safe_payment_qr_url}" target="_blank" style="color:#0645ad;">{safe_payment_qr_url}</a>
-    </p>
     <p style="margin:0 0 24px 0;">
       <img src="{safe_payment_qr_url}"
            alt="Payment QR Code"
@@ -634,7 +631,7 @@ def build_confirmation_email_html(full_name: str, events: list[str], team_name: 
       Unique ID: {safe_unique_id}
     </p>
 
-    <p style="font-size:16px; line-height:1.5; margin:0 0 8px 0;">Payment QR code:</p>
+    <p style="font-size:16px; line-height:1.5; margin:0 0 8px 0;">Your payment QR code</p>
     {payment_qr_html}
 
     <p style="font-size:16px; line-height:1.5; margin:24px 0 16px 0;">Thank you.</p>
@@ -1542,7 +1539,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
                     f"Event(s): {', '.join(added_events)}\n"
                     f"Team: {team_name_row}\n"
                     f"Unique ID: {_uid_disp}\n\n"
-                    f"Payment QR code:\n{_payment_qr_url}\n\n"
+                    f"Your payment QR code:\n{_payment_qr_url}\n\n"
                     "Thank you.\n\n"
                     "SAA\n"
                 )
