@@ -586,77 +586,60 @@ def send_confirmation_email_smtp(to_email: str, subject: str, body: str, html_bo
 def build_confirmation_email_html(full_name: str, events: list[str], team_name: str, unique_id: str) -> str:
     """Build the HTML acknowledgement email body.
 
-    Optional Streamlit secret:
-      EMAIL_BANNER_URL = "https://raw.githubusercontent.com/.../banner.jpg"
+    Optional Streamlit secrets:
+      EMAIL_PAYMENT_QR_URL = "https://raw.githubusercontent.com/.../QR_Code.png"
 
-    If EMAIL_BANNER_URL is set, the image is displayed at the top of the email.
+    Backward-compatible fallback:
+      EMAIL_BANNER_URL is also accepted if EMAIL_PAYMENT_QR_URL is not set.
     """
-    banner_url = (st.secrets.get("EMAIL_BANNER_URL", "") or "").strip()
+    payment_qr_url = (
+        st.secrets.get("EMAIL_PAYMENT_QR_URL", "")
+        or st.secrets.get("EMAIL_BANNER_URL", "")
+        or ""
+    ).strip()
 
-    safe_title = html.escape(APP_TITLE)
     safe_full_name = html.escape(full_name or "")
     safe_team_name = html.escape(team_name or "")
     safe_unique_id = html.escape(unique_id or "")
     safe_events = [html.escape(str(e or "")) for e in (events or [])]
     safe_events_text = ", ".join(safe_events) if safe_events else ""
 
-    banner_html = ""
-    if banner_url:
-        safe_banner_url = html.escape(banner_url, quote=True)
-        banner_html = f"""
-          <tr>
-            <td style="padding:0 0 20px 0;">
-              <img src="{safe_banner_url}"
-                   alt="{safe_title}"
-                   style="display:block; width:100%; max-width:640px; height:auto; border:0; border-radius:8px;">
-            </td>
-          </tr>
+    payment_qr_html = ""
+    if payment_qr_url:
+        safe_payment_qr_url = html.escape(payment_qr_url, quote=True)
+        payment_qr_html = f"""
+    <p style="font-size:16px; line-height:1.5; margin:8px 0 12px 0;">
+      <a href="{safe_payment_qr_url}" target="_blank" style="color:#0645ad;">{safe_payment_qr_url}</a>
+    </p>
+    <p style="margin:0 0 24px 0;">
+      <img src="{safe_payment_qr_url}"
+           alt="Payment QR Code"
+           style="display:block; max-width:260px; width:100%; height:auto; border:1px solid #ddd; border-radius:8px;">
+    </p>
         """
 
     return f"""<!doctype html>
 <html>
-  <body style="margin:0; padding:0; background-color:#f5f5f5; font-family:Arial, Helvetica, sans-serif; color:#222;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:#f5f5f5; padding:24px 0;">
-      <tr>
-        <td align="center">
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px; background-color:#ffffff; border-radius:12px; padding:28px; border:1px solid #e6e6e6;">
-            {banner_html}
-            <tr>
-              <td>
-                <h2 style="margin:0 0 12px 0; font-size:24px; line-height:1.3; color:#111;">{safe_title}</h2>
-                <p style="font-size:16px; line-height:1.5; margin:0 0 18px 0;">Dear Participant,</p>
-                <p style="font-size:16px; line-height:1.5; margin:0 0 20px 0;">Your entry has been successfully received.</p>
+  <body style="margin:0; padding:24px; font-family:Arial, Helvetica, sans-serif; color:#222; background-color:#ffffff;">
+    <p style="font-size:16px; line-height:1.5; margin:0 0 16px 0;">Dear Participant,</p>
 
-                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse; margin:20px 0;">
-                  <tr>
-                    <td style="padding:10px 12px; border:1px solid #e6e6e6; font-weight:bold; width:34%; background-color:#fafafa;">Full Name</td>
-                    <td style="padding:10px 12px; border:1px solid #e6e6e6;">{safe_full_name}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding:10px 12px; border:1px solid #e6e6e6; font-weight:bold; background-color:#fafafa;">Event(s)</td>
-                    <td style="padding:10px 12px; border:1px solid #e6e6e6;">{safe_events_text}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding:10px 12px; border:1px solid #e6e6e6; font-weight:bold; background-color:#fafafa;">Team</td>
-                    <td style="padding:10px 12px; border:1px solid #e6e6e6;">{safe_team_name}</td>
-                  </tr>
-                  <tr>
-                    <td style="padding:10px 12px; border:1px solid #e6e6e6; font-weight:bold; background-color:#fafafa;">Unique ID</td>
-                    <td style="padding:10px 12px; border:1px solid #e6e6e6;">{safe_unique_id}</td>
-                  </tr>
-                </table>
+    <p style="font-size:16px; line-height:1.5; margin:0 0 20px 0;">Your entry has been successfully received.</p>
 
-                <p style="font-size:16px; line-height:1.5; margin:20px 0 0 0;">Thank you.</p>
-                <p style="font-size:16px; line-height:1.5; margin:6px 0 0 0;">SAA</p>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
+    <p style="font-size:16px; line-height:1.6; margin:0 0 20px 0;">
+      Full Name: {safe_full_name}<br>
+      Event(s): {safe_events_text}<br>
+      Team: {safe_team_name}<br>
+      Unique ID: {safe_unique_id}
+    </p>
+
+    <p style="font-size:16px; line-height:1.5; margin:0 0 8px 0;">Payment QR code:</p>
+    {payment_qr_html}
+
+    <p style="font-size:16px; line-height:1.5; margin:24px 0 16px 0;">Thank you.</p>
+
+    <p style="font-size:16px; line-height:1.5; margin:0;">SAA</p>
   </body>
 </html>"""
-
 
 
 def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame, record_type: str = "I") -> str:
@@ -1545,6 +1528,11 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
                 _subj = "Entry confirmation"
                 _full = (st.session_state.get("full_name", "") or "").strip() or (db_name_override or typed_full_name)
                 _uid_disp = (st.session_state.get("unique_id_override", "") or "").strip() or unique_id
+                _payment_qr_url = (
+                    st.secrets.get("EMAIL_PAYMENT_QR_URL", "")
+                    or st.secrets.get("EMAIL_BANNER_URL", "")
+                    or ""
+                ).strip()
                 _body = (
                     "Dear Participant,\n\n"
                     "Your entry has been successfully received.\n\n"
@@ -1552,6 +1540,7 @@ if st.button("Add entry", type="primary", disabled=not ready_to_add):
                     f"Event(s): {', '.join(added_events)}\n"
                     f"Team: {team_name_row}\n"
                     f"Unique ID: {_uid_disp}\n\n"
+                    f"Payment QR code:\n{_payment_qr_url}\n\n"
                     "Thank you.\n\n"
                     "SAA\n"
                 )
