@@ -474,44 +474,6 @@ def _apply_pending_text_updates():
 _apply_pending_text_updates()
 
 
-current_user_email = require_google_login(required_group="entry")
-
-def require_google_login(required_group: str = "entry"):
-    if not st.user.is_logged_in:
-        st.title("SMTFA International Masters T&F Signup")
-        st.info("Please log in with Google to continue.")
-        st.button("Log in with Google", on_click=st.login)
-        st.stop()
-
-    user_email = (st.user.email or "").strip().lower()
-
-    admin_emails = {
-        e.strip().lower()
-        for e in st.secrets.get("access", {}).get("admin_emails", [])
-    }
-
-    entry_emails = {
-        e.strip().lower()
-        for e in st.secrets.get("access", {}).get("entry_emails", [])
-    }
-
-    if required_group == "admin":
-        allowed = user_email in admin_emails
-    else:
-        allowed = user_email in admin_emails or user_email in entry_emails
-
-    if not allowed:
-        st.error(f"Access denied for {user_email}.")
-        st.button("Log out", on_click=st.logout)
-        st.stop()
-
-    with st.sidebar:
-        st.caption(f"Logged in as: {user_email}")
-        st.button("Log out", on_click=st.logout)
-
-    return user_email
-
-
 # ---------------- Hidden configuration (no sidebar controls) ----------------
 ROSTER_SHEET_URL = st.secrets.get(
     "ROSTER_SHEET_URL",
