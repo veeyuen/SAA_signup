@@ -1,5 +1,5 @@
 openpyxl
-streamlit
+streamlit>=1.42.0
 pandas
 requests
 Google-cloud-bigquery-storage
