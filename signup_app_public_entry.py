@@ -450,6 +450,32 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     wb.save(bio)
     return bio.getvalue()
 
+# ---------------- UI ----------------
+st.set_page_config(page_title=APP_TITLE, layout="wide")
+
+current_user_email = (
+    require_google_login(required_group="entry")
+    if LOGIN_REQUIRED_FOR_THIS_ROLLOUT
+    else ""
+)
+st.title(APP_TITLE)
+
+def _apply_pending_text_updates():
+    """Apply any pending text updates BEFORE widgets are instantiated."""
+    pending = [k for k in list(st.session_state.keys()) if k.endswith("__pending")]
+    for pk in pending:
+        base = pk[:-9]  # strip '__pending'
+        st.session_state[base] = st.session_state.get(pk, "")
+        try:
+            del st.session_state[pk]
+        except Exception:
+            pass
+
+_apply_pending_text_updates()
+
+
+current_user_email = require_google_login(required_group="entry")
+
 def require_google_login(required_group: str = "entry"):
     if not st.user.is_logged_in:
         st.title("SMTFA International Masters T&F Signup")
@@ -484,28 +510,6 @@ def require_google_login(required_group: str = "entry"):
         st.button("Log out", on_click=st.logout)
 
     return user_email
-# ---------------- UI ----------------
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-
-current_user_email = (
-    require_google_login(required_group="entry")
-    if LOGIN_REQUIRED_FOR_THIS_ROLLOUT
-    else ""
-)
-st.title(APP_TITLE)
-
-def _apply_pending_text_updates():
-    """Apply any pending text updates BEFORE widgets are instantiated."""
-    pending = [k for k in list(st.session_state.keys()) if k.endswith("__pending")]
-    for pk in pending:
-        base = pk[:-9]  # strip '__pending'
-        st.session_state[base] = st.session_state.get(pk, "")
-        try:
-            del st.session_state[pk]
-        except Exception:
-            pass
-
-_apply_pending_text_updates()
 
 
 # ---------------- Hidden configuration (no sidebar controls) ----------------

@@ -449,6 +449,8 @@ def export_entries_to_excel(header_info: dict, entries: pd.DataFrame) -> bytes:
     return bio.getvalue()
 # ---------------- UI ----------------
 
+current_user_email = require_google_login(required_group="admin")
+
 def require_google_login(required_group: str = "entry"):
     if not st.user.is_logged_in:
         st.title("SMTFA International Masters T&F Signup")
