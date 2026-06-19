@@ -108,7 +108,7 @@ DIVISIONS = {1: 'Masters (30 & above)',
 SPRINT_60M_ONLY_MODE = True
 
 # Temporary rollout toggle: set to True to re-enable Google login.
-LOGIN_REQUIRED_FOR_THIS_ROLLOUT = False
+LOGIN_REQUIRED_FOR_THIS_ROLLOUT = True
 
 DEFAULT_APP_TITLE = "SMTFA International Masters T&F Signup"
 SPRINT_60M_APP_TITLE = "60m Sprint Championships 2026"
