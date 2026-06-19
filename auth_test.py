@@ -6,7 +6,7 @@ st.title("Auth Test")
 
 if not st.user.is_logged_in:
     st.info("Not logged in yet.")
-    st.button("Log in with Google", on_click=st.login)
+    st.button("Log in with Google", on_click=lambda: st.login("google"))
     st.stop()
 
 st.success("Logged in successfully.")
