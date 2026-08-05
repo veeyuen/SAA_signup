@@ -31,8 +31,8 @@ def require_google_login(required_group: str = "entry") -> str:
     """Require Google/OIDC login and enforce a simple email allowlist."""
     if not getattr(st, "user", None) or not st.user.is_logged_in:
         st.title(APP_TITLE)
-        st.info("Please log in with Google to continue.")
-        st.button("Log in with Google", on_click=st.login)
+        st.info("Please log in with email to continue.")
+        st.button("Log in with email", on_click=lambda: st.login("auth0"))
         st.stop()
 
     user_email = (getattr(st.user, "email", "") or "").strip().lower()
