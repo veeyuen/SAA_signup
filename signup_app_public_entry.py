@@ -474,6 +474,53 @@ current_user_email = (
 )
 st.title(APP_TITLE)
 
+
+def show_stripe_return_status():
+    """Show a safe return screen after Stripe redirects back to Streamlit.
+
+    The redirect itself is not treated as proof of payment. The Stripe webhook
+    remains responsible for saving the confirmed registration and sending the
+    acknowledgement email.
+    """
+    payment_result = str(st.query_params.get("payment_result", "") or "").strip().lower()
+    if not payment_result:
+        return
+
+    pending_checkout = st.session_state.get("pending_checkout", {}) or {}
+    registration_id = str(pending_checkout.get("registration_id", "") or "").strip()
+
+    if payment_result == "cancelled":
+        st.warning("Payment was cancelled. Your registration has not been confirmed.")
+        if registration_id:
+            st.caption(f"Registration reference: {registration_id}")
+
+        if st.button("Return to registration form", type="primary"):
+            st.session_state.pop("pending_checkout", None)
+            st.query_params.clear()
+            st.rerun()
+
+        st.stop()
+
+    if payment_result == "success":
+        session_id = str(st.query_params.get("session_id", "") or "").strip()
+
+        st.success("Your payment has been submitted to Stripe.")
+        st.info(
+            "Your registration will be saved and the acknowledgement email will be "
+            "sent only after Stripe's webhook confirms that the payment succeeded."
+        )
+
+        if registration_id:
+            st.write(f"Registration reference: `{registration_id}`")
+        if session_id:
+            st.caption(f"Stripe Checkout session: {session_id}")
+
+        st.stop()
+
+
+show_stripe_return_status()
+
+
 def _apply_pending_text_updates():
     """Apply any pending text updates BEFORE widgets are instantiated."""
     pending = [k for k in list(st.session_state.keys()) if k.endswith("__pending")]
@@ -1459,27 +1506,68 @@ ready_to_add = bool(waiver_ok) and bool(email_present) and bool(email_ok) and bo
 
 
 
-# Add payment button
+# Existing pending Checkout session, if one has already been created.
+_pending_checkout = st.session_state.get("pending_checkout", {}) or {}
+if _pending_checkout:
+    st.success("Your registration is pending payment.")
+    st.write(f"Amount payable: **SGD {_pending_checkout.get('amount', '')}**")
+
+    _pending_registration_id = str(
+        _pending_checkout.get("registration_id", "") or ""
+    ).strip()
+    if _pending_registration_id:
+        st.caption(f"Registration reference: {_pending_registration_id}")
+
+    st.link_button(
+        "Pay by Card or PayNow",
+        str(_pending_checkout.get("payment_url", "") or ""),
+        type="primary",
+    )
+
+    st.warning(
+        "Your registration has not yet been saved to the confirmed-entry sheet. "
+        "It will be saved only after Stripe verifies successful payment."
+    )
+
+    if st.button("Cancel this payment request and edit the form"):
+        st.session_state.pop("pending_checkout", None)
+        st.rerun()
+
+    st.stop()
+
+
+# Create a Stripe Checkout session and pending registration.
 if st.button("Proceed to payment", type="primary", disabled=not ready_to_add):
     missing = []
     _uid_present = bool((unique_id or "").strip())
-    _is_sgp_local = (str(nationality or "").strip().upper() in ("SGP","SIN","SG","SINGAPORE"))
+    _is_sgp_local = (
+        str(nationality or "").strip().upper()
+        in ("SGP", "SIN", "SG", "SINGAPORE")
+    )
     _pr_local = bool(st.session_state.get("singapore_pr", False))
-    ic_required = bool(_pr_local) or (bool(_is_sgp_local) and (not _uid_present))
+    ic_required = bool(_pr_local) or (
+        bool(_is_sgp_local) and (not _uid_present)
+    )
+
     missing_checks = [
-        ("Name as per NRIC/Passport", (st.session_state.get("name_passport","") or "").strip()),
+        (
+            "Name as per NRIC/Passport",
+            (st.session_state.get("name_passport", "") or "").strip(),
+        ),
         ("Birth Date", birth_date),
         ("Email", email),
         ("Contact Number", contact_number),
         ("Season Best", season_best),
     ]
-        # IC required only if Singapore PR is ticked OR Singapore athlete has no UNIQUE_ID
+
+    # IC is required only if Singapore PR is ticked, or a Singapore athlete
+    # does not already have a UNIQUE_ID.
     if ic_required:
         missing_checks.insert(1, ("IC last 4", ic_last4))
-    for k, v in missing_checks:
 
-        if not v:
-            missing.append(k)
+    for field_name, field_value in missing_checks:
+        if not field_value:
+            missing.append(field_name)
 
     if not waiver_ok:
         st.error("Please tick the waiver acknowledgement.")
@@ -1487,148 +1575,238 @@ if st.button("Proceed to payment", type="primary", disabled=not ready_to_add):
         st.error("Missing: " + ", ".join(missing))
     elif not gender_ok:
         st.error("Please select Gender (Male or Female).")
-    elif not ((st.session_state.get("name_passport","") or "").strip()):
+    elif not (
+        (st.session_state.get("name_passport", "") or "").strip()
+    ):
         st.error("Name as per NRIC/Passport is required.")
-    elif (not ((st.session_state.get("unique_id_override","") or "").strip() or (db_name_override or "").strip())) and (not (((first_name or "").strip()) and ((last_name or "").strip()))):
-        st.error("First Name and Last Name are required unless you selected the athlete from the roster.")
+    elif (
+        not (
+            (st.session_state.get("unique_id_override", "") or "").strip()
+            or (db_name_override or "").strip()
+        )
+        and not (
+            bool((first_name or "").strip())
+            and bool((last_name or "").strip())
+        )
+    ):
+        st.error(
+            "First Name and Last Name are required unless you selected "
+            "the athlete from the roster."
+        )
     elif not is_valid_email(email_norm):
-        st.error("Please enter a valid email address (e.g., name@example.com).")
-    elif (str(nationality or '').strip().upper() in ('SGP','SIN','SG','SINGAPORE')) and (not _uid_present) and (not is_valid_ic_last4(ic_last4_norm)):
-        st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
-    elif _uid_present and ic_last4_norm and (not is_valid_ic_last4(ic_last4_norm)):
-        st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
+        st.error(
+            "Please enter a valid email address "
+            "(e.g., name@example.com)."
+        )
+    elif (
+        str(nationality or "").strip().upper()
+        in ("SGP", "SIN", "SG", "SINGAPORE")
+        and (not _uid_present)
+        and (not is_valid_ic_last4(ic_last4_norm))
+    ):
+        st.error(
+            "IC last 4 must be 3 digits followed by 1 letter "
+            "(e.g., 123A)."
+        )
+    elif (
+        _uid_present
+        and ic_last4_norm
+        and (not is_valid_ic_last4(ic_last4_norm))
+    ):
+        st.error(
+            "IC last 4 must be 3 digits followed by 1 letter "
+            "(e.g., 123A)."
+        )
     elif not event_opts or not event_names or not selected_events:
-        st.error("Please select at least one event for that Gender + Division combination.")
+        st.error(
+            "Please select at least one event for that "
+            "Gender + Division combination."
+        )
     elif not (season_best or "").strip():
         st.error("Season Best is required.")
     else:
-        # Add one row per selected event
+        registration_id = (
+            "SAA-"
+            + secrets.token_urlsafe(9)
+            .replace("-", "")
+            .replace("_", "")
+            .upper()
+        )
+
+        full_name_for_payment = (
+            (st.session_state.get("full_name", "") or "").strip()
+            or (db_name_override or typed_full_name)
+        )
+        unique_id_for_payment = (
+            (st.session_state.get("unique_id_override", "") or "").strip()
+            or unique_id
+        )
+
+        # Build rows but do NOT add them to st.session_state.entries and do NOT
+        # sync them to the confirmed output sheet yet.
+        entry_rows = []
         added_events = []
-        for _ev in selected_events:
-            _code = dict(event_opts).get(_ev, "")
-            st.session_state.entries.append({
-            "name": (db_name_override or typed_full_name),
-            "full_name": (st.session_state.get("full_name", "") or db_name_override or typed_full_name),
-            "name_passport": (st.session_state.get("name_passport", "") or "").strip(),
-            "last_name": (last_name or "").strip(),
-            "first_name": (first_name or "").strip(),
-            "other_name": (other_name or "").strip(),
-            "gender": gender,
-            "birth_date": birth_date,
-            "ic_last4": ic_last4_norm,
-            "unique_id": unique_id,
-            "nationality": nationality,
-            "singapore_pr": singapore_pr,
-            "contact_number": (contact_number or "").strip(),
-            "email": email_norm,
-            "team_code": team_code,
-            "team_name": team_name_row,
-            "charge_code": charge_code,
-            "po_to_be_sent": po_to_be_sent,
-            "event_division": _division_value_for_storage(event_division),
-            "season_best": (season_best or "").strip(),
-            "emergency_contact_name": (emergency_contact_name or "").strip(),
-            "emergency_contact_number": (emergency_contact_number or "").strip(),
-            "coach_full_name": (coach_full_name or "").strip(),
-            "parq": parq,
-            "event": _ev,
-            "event_code": _code,
-            })
-            added_events.append(_ev)
-        st.success(f"Added {len(added_events)} entry(ies).")
-        # Send confirmation email (SMTP) — do not block saving if email fails
-        try:
-            if email_norm and is_valid_email(email_norm):
-                _subj = "Entry confirmation"
-                _full = (st.session_state.get("full_name", "") or "").strip() or (db_name_override or typed_full_name)
-                _uid_disp = (st.session_state.get("unique_id_override", "") or "").strip() or unique_id
-                _payment_qr_url = (
-                    st.secrets.get("EMAIL_PAYMENT_QR_URL", "")
-                    or st.secrets.get("EMAIL_BANNER_URL", "")
-                    or ""
-                ).strip()
-                _body = (
-                    "Dear Participant,\n\n"
-                    "Your entry has been successfully received.\n\n"
-                    f"Full Name: {_full}\n"
-                    f"Event(s): {', '.join(added_events)}\n"
-                    f"Team: {team_name_row}\n"
-                    f"Unique ID: {_uid_disp}\n\n"
-                    f"Your payment QR code:\n{_payment_qr_url}\n\n"
-                    "Thank you.\n\n"
-                    "SAA\n"
-                )
-                _html_body = build_confirmation_email_html(
-                    full_name=_full,
-                    events=list(added_events) if isinstance(added_events, list) else [str(added_events)],
-                    team_name=team_name_row,
-                    unique_id=_uid_disp,
-                )
-                st.session_state["email_last_attempt"] = {
-                    "ts": dt.datetime.utcnow().isoformat() + "Z",
-                    "to": email_norm,
-                    "subject": _subj,
-                    "events": list(added_events) if isinstance(added_events, list) else str(added_events),
-                    "status": "attempting",
-                    "format": "html",
+
+        for selected_event in selected_events:
+            event_code = dict(event_opts).get(selected_event, "")
+
+            entry_rows.append(
+                {
+                    "registration_id": registration_id,
+                    "payment_provider": "stripe",
+                    "name": (db_name_override or typed_full_name),
+                    "full_name": full_name_for_payment,
+                    "name_passport": (
+                        st.session_state.get("name_passport", "") or ""
+                    ).strip(),
+                    "last_name": (last_name or "").strip(),
+                    "first_name": (first_name or "").strip(),
+                    "other_name": (other_name or "").strip(),
+                    "gender": gender,
+                    "birth_date": (
+                        birth_date.isoformat() if birth_date else ""
+                    ),
+                    "ic_last4": ic_last4_norm,
+                    "unique_id": unique_id_for_payment,
+                    "nationality": nationality,
+                    "singapore_pr": singapore_pr,
+                    "contact_number": (contact_number or "").strip(),
+                    "email": email_norm,
+                    "team_code": team_code,
+                    "team_name": team_name_row,
+                    "charge_code": charge_code,
+                    "po_to_be_sent": po_to_be_sent,
+                    "event_division": _division_value_for_storage(
+                        event_division
+                    ),
+                    "season_best": (season_best or "").strip(),
+                    "emergency_contact_name": (
+                        emergency_contact_name or ""
+                    ).strip(),
+                    "emergency_contact_number": (
+                        emergency_contact_number or ""
+                    ).strip(),
+                    "coach_full_name": (
+                        coach_full_name or ""
+                    ).strip(),
+                    "parq": parq,
+                    "event": selected_event,
+                    "event_code": event_code,
                 }
-                send_confirmation_email_smtp(email_norm, _subj, _body, html_body=_html_body)
-                st.session_state["email_last_attempt"]["status"] = "sent"
-                st.toast("Confirmation email sent.")
-        except Exception as e:
-            st.session_state["email_last_attempt"] = {
-                "ts": dt.datetime.utcnow().isoformat() + "Z",
-                "to": email_norm,
-                "status": "failed",
-                "error_type": type(e).__name__,
-                "error": repr(e),
-                "traceback": tb.format_exc(),
-            }
-            st.warning(f"Entry added, but email failed: {type(e).__name__}: {repr(e)}")
-            with st.expander("Email error traceback"):
-                st.code(st.session_state["email_last_attempt"]["traceback"])
+            )
+            added_events.append(selected_event)
 
+        price_per_event = Decimal(
+            str(st.secrets.get("STRIPE_PRICE_PER_EVENT", "10.00"))
+        )
+        total_amount = price_per_event * Decimal(len(entry_rows))
+        amount_str = f"{total_amount:.2f}"
 
-        # Sync "Current entries" to output Google Sheet (optional)
-        if st.session_state.get("sync_enabled") and (st.session_state.get("output_sheet_url") or "").strip():
-            try:
-                sync_entries_to_sheet(
-                    st.session_state.entries,
-                    sheet_url_or_id=st.session_state.get("output_sheet_url", ""),
-                    worksheet=((st.session_state.get("output_worksheet") or "").strip() or None),
-                )
-                st.toast("Synced to output Google Sheet.")
-            except Exception as e:
-                st.warning(f"Output sheet sync failed: {type(e).__name__}: {repr(e)}")
+        currency = str(
+            st.secrets.get("STRIPE_CURRENCY", "sgd") or "sgd"
+        ).strip().lower()
 
+        if currency != "sgd":
+            st.error(
+                "Stripe PayNow requires STRIPE_CURRENCY to be set to 'sgd'."
+            )
+            st.stop()
 
-        # Auto-clear form fields for the next entry (use __pending to avoid Streamlit widget-state mutation errors)
-        for _k, _v in {
-            "last_name": "",
-            "first_name": "",
-            "other_name": "",
-            "gender": "",
-            "birth_date": None,
-            "ic_last4": "",
-            "contact_number": "",
-            "email": "",
-            "season_best": "",
-            "emergency_contact_name": "",
-            "emergency_contact_number": "",
-            "coach_full_name": "",
-            "waiver_ok": False,
-            "db_name_override": "",
-            "athlete_roster_match": "(keep typed)",
-            "events_selected": [],
-            "singapore_pr": False,
-        }.items():
-            st.session_state[f"{_k}__pending"] = _v
+        stripe_secret_key = str(
+            st.secrets.get("STRIPE_SECRET_KEY", "") or ""
+        ).strip()
+        public_app_url = str(
+            st.secrets.get(
+                "PUBLIC_APP_URL",
+                "https://saapublicaccess.streamlit.app",
+            )
+            or ""
+        ).strip()
+
+        pending_sheet_url = str(
+            st.secrets.get("PENDING_PAYMENT_SHEET_URL", "") or ""
+        ).strip()
+        pending_worksheet_name = str(
+            st.secrets.get(
+                "PENDING_PAYMENT_WORKSHEET",
+                "PendingPayments",
+            )
+            or "PendingPayments"
+        ).strip()
+
+        if not stripe_secret_key:
+            st.error("Stripe is not configured: STRIPE_SECRET_KEY is missing.")
+            st.stop()
+
+        if not pending_sheet_url:
+            st.error(
+                "Pending-payment storage is not configured: "
+                "PENDING_PAYMENT_SHEET_URL is missing."
+            )
+            st.stop()
+
+        try:
+            checkout = create_registration_checkout(
+                secret_key=stripe_secret_key,
+                registration_id=registration_id,
+                amount=amount_str,
+                currency=currency,
+                customer_email=email_norm,
+                description=(
+                    f"{APP_TITLE}: {', '.join(added_events)}"
+                ),
+                public_app_url=public_app_url,
+            )
+
+            google_client = create_google_client(
+                dict(st.secrets["gcp_service_account"])
+            )
+
+            pending_worksheet = get_pending_worksheet(
+                google_client,
+                pending_sheet_url,
+                pending_worksheet_name,
+            )
+
+            save_pending_registration(
+                worksheet=pending_worksheet,
+                registration_id=registration_id,
+                login_email=current_user_email,
+                athlete_email=email_norm,
+                full_name=full_name_for_payment,
+                team_name=team_name_row,
+                events=added_events,
+                entry_rows=entry_rows,
+                amount=amount_str,
+                currency=currency,
+                stripe_session_id=checkout["session_id"],
+            )
+
+        except Exception as exc:
+            st.error(
+                "Unable to start payment: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            st.stop()
+
+        # Persist the payment link across Streamlit reruns so that a user does
+        # not accidentally create multiple Checkout Sessions.
+        st.session_state["pending_checkout"] = {
+            "registration_id": registration_id,
+            "session_id": checkout["session_id"],
+            "payment_url": checkout["payment_url"],
+            "amount": amount_str,
+            "currency": currency,
+        }
+
         st.rerun()
 
 
-
 # -------- Public entry-only mode --------
-# Existing/current entries, download buttons, and edit/delete controls are intentionally hidden
-# in this app variant. Entries are still saved to session state and synced to the output
-# Google Sheet when "Add entry" succeeds above.
-st.caption("Entry-only mode: existing entries and edit controls are hidden.")
+# Existing/current entries, download buttons, and edit/delete controls are intentionally hidden.
+# Registrations are written to the confirmed output sheet only by the Stripe webhook
+# after successful payment.
+st.caption(
+    "Entry-only mode: existing entries and edit controls are hidden. "
+    "Payment confirmation is handled by Stripe."
+)
