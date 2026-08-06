@@ -16,6 +16,19 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
+import json
+import secrets
+from decimal import Decimal
+
+# Import modules for Stripe
+
+from stripe_checkout import create_registration_checkout
+from payment_store import (
+    create_google_client,
+    get_pending_worksheet,
+    save_pending_registration,
+)
+
 
 def _secret_list(section: str, key: str) -> list[str]:
     """Return a lowercase list from st.secrets[section][key], accepting TOML lists or comma strings."""
