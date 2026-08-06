@@ -1,0 +1,5 @@
+functions-framework
+flask
+stripe
+gspread
+google-auth
