@@ -1459,8 +1459,8 @@ ready_to_add = bool(waiver_ok) and bool(email_present) and bool(email_ok) and bo
 
 
 
-# Add entry button
-if st.button("Add entry", type="primary", disabled=not ready_to_add):
+# Add payment button
+if st.button("Proceed to payment", type="primary", disabled=not ready_to_add):
     missing = []
     _uid_present = bool((unique_id or "").strip())
     _is_sgp_local = (str(nationality or "").strip().upper() in ("SGP","SIN","SG","SINGAPORE"))
