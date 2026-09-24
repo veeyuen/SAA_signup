@@ -75,6 +75,10 @@ from signup.cart import (
     total_amount as cart_total_amount,
     total_event_entries as cart_total_event_entries,
 )
+from signup.transaction_store import (
+    TransactionSheetStore,
+    TransactionStoreError,
+)
 from signup.validation import (
     is_valid_email,
     is_valid_ic_last4,
@@ -106,6 +110,11 @@ if not CONFIG_SHEET_URL:
     st.error("CONFIG_SHEET_URL is missing from Streamlit secrets.")
     st.stop()
 
+TRANSACTION_SHEET_URL = str(
+    st.secrets.get("TRANSACTION_SHEET_URL", CONFIG_SHEET_URL)
+    or CONFIG_SHEET_URL
+).strip()
+
 pilot_config = PilotConfigRepository(CONFIG_SHEET_URL)
 
 if not LOGIN_REQUIRED_FOR_THIS_ROLLOUT:
@@ -131,12 +140,16 @@ def show_stripe_return_status():
         return
 
     pending_checkout = st.session_state.get("pending_checkout", {}) or {}
-    registration_id = str(pending_checkout.get("registration_id", "") or "").strip()
+    order_id = str(
+        pending_checkout.get("order_id", "")
+        or pending_checkout.get("registration_id", "")
+        or ""
+    ).strip()
 
     if payment_result == "cancelled":
         st.warning("Payment was cancelled. Your registration has not been confirmed.")
-        if registration_id:
-            st.caption(f"Registration reference: {registration_id}")
+        if order_id:
+            st.caption(f"Order reference: {order_id}")
 
         if st.button("Return to registration form", type="primary"):
             st.session_state.pop("pending_checkout", None)
@@ -154,8 +167,8 @@ def show_stripe_return_status():
             "sent only after Stripe's webhook confirms that the payment succeeded."
         )
 
-        if registration_id:
-            st.write(f"Registration reference: `{registration_id}`")
+        if order_id:
+            st.write(f"Order reference: `{order_id}`")
         if session_id:
             st.caption(f"Stripe Checkout session: {session_id}")
 
@@ -865,6 +878,195 @@ def _new_id(prefix: str) -> str:
     )
 
 
+def _iso_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def _draft_order_id() -> str:
+    order_id = str(st.session_state.get("draft_order_id", "") or "").strip()
+    if not order_id:
+        order_id = _new_id("ORD")
+        st.session_state["draft_order_id"] = order_id
+    return order_id
+
+
+def _transaction_store() -> TransactionSheetStore:
+    try:
+        google_client = create_google_client(
+            dict(st.secrets["gcp_service_account"])
+        )
+    except Exception as exc:
+        raise TransactionStoreError(
+            "Could not create the Google Sheets service-account client: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    return TransactionSheetStore(
+        google_client=google_client,
+        sheet_url=TRANSACTION_SHEET_URL,
+    )
+
+
+def _system_int(key: str, default: int) -> int:
+    raw = pilot_config.system_value(key, str(default))
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_transaction_bundle(
+    *,
+    order_id: str,
+    payment_id: str,
+    payment_type: str,
+    order_status: str,
+    registration_status: str,
+    event_status: str,
+    payment_status: str,
+    technical_payment_status: str,
+    total_amount: Decimal,
+    cart: list[dict],
+) -> dict:
+    now_iso = _iso_now()
+
+    expiry = ""
+    if payment_type == "STRIPE":
+        expiry_hours = _system_int("PENDING_PAYMENT_EXPIRY_HOURS", 72)
+        expiry = (
+            dt.datetime.now(dt.timezone.utc)
+            + dt.timedelta(hours=expiry_hours)
+        ).isoformat()
+
+    order = {
+        "ORDER_ID": order_id,
+        "COMPETITION_ID": selected_competition_id,
+        "USER_ID": current_user.user_id,
+        "ORGANIZATION_ID": current_organization.organization_id,
+        "ENTRY_COUNT": cart_total_event_entries(),
+        "ENTRY_SUBTOTAL": f"{total_amount:.2f}",
+        "PROCESSING_FEE": "",
+        "TOTAL_AMOUNT": f"{total_amount:.2f}",
+        "PAYMENT_TYPE": payment_type,
+        "STATUS": order_status,
+        "CREATED_AT": now_iso,
+        "EXPIRES_AT": expiry,
+        "UPDATED_AT": now_iso,
+    }
+
+    registrations = []
+    event_entries = []
+
+    for item in cart:
+        rows = item.get("entry_rows", []) or []
+        first_row = rows[0] if rows else {}
+
+        registrations.append(
+            {
+                "REGISTRATION_ID": item.get("registration_id", ""),
+                "ORDER_ID": order_id,
+                "COMPETITION_ID": selected_competition_id,
+                "ATHLETE_ID": first_row.get("unique_id", ""),
+                "ORGANIZATION_ID": current_organization.organization_id,
+                "SUBMITTED_BY_USER_ID": current_user.user_id,
+                "DIVISION": item.get("division", ""),
+                "STATUS": registration_status,
+                "CREATED_AT": now_iso,
+                "UPDATED_AT": now_iso,
+                "IS_DELETED": False,
+                "ATHLETE_NAME": item.get("athlete_name", ""),
+                "DOB": first_row.get("birth_date", ""),
+                "GENDER": first_row.get("gender", ""),
+                "NATIONALITY": first_row.get("nationality", ""),
+                "TEAM_CODE": current_organization.team_code,
+                "TEAM_NAME": current_organization.organization_name,
+                "EMAIL": item.get("athlete_email", ""),
+                "CONTACT_NUMBER": first_row.get("contact_number", ""),
+            }
+        )
+
+        for row in rows:
+            event_entries.append(
+                {
+                    "ENTRY_ID": row.get("entry_id", ""),
+                    "REGISTRATION_ID": item.get("registration_id", ""),
+                    "ORDER_ID": order_id,
+                    "PAYMENT_ID": payment_id,
+                    "COMPETITION_ID": selected_competition_id,
+                    "ATHLETE_ID": row.get("unique_id", ""),
+                    "ORGANIZATION_ID": current_organization.organization_id,
+                    "EVENT_NAME": row.get("event", ""),
+                    "EVENT_CODE": row.get("event_code", ""),
+                    "DIVISION": row.get("event_division", ""),
+                    "SEASON_BEST": row.get("season_best", ""),
+                    "ENTRY_FEE": row.get("entry_fee", ""),
+                    "REGISTRATION_PERIOD": row.get(
+                        "registration_period", registration_period
+                    ),
+                    "PAYMENT_STATUS": payment_status,
+                    "PAYMENT_STATUS_CHANGED_AT": now_iso,
+                    "STATUS": event_status,
+                    "CREATED_AT": now_iso,
+                    "UPDATED_AT": now_iso,
+                    "IS_DELETED": False,
+                    "ATHLETE_NAME": row.get("full_name", ""),
+                    "DOB": row.get("birth_date", ""),
+                    "GENDER": row.get("gender", ""),
+                    "NATIONALITY": row.get("nationality", ""),
+                    "TEAM_CODE": current_organization.team_code,
+                    "TEAM_NAME": current_organization.organization_name,
+                    "EMAIL": row.get("email", ""),
+                    "CONTACT_NUMBER": row.get("contact_number", ""),
+                }
+            )
+
+    waiver_version = pilot_config.system_value(
+        "DEFAULT_WAIVER_VERSION",
+        "TEST_WAIVER_V1",
+    )
+    waiver = {
+        "WAIVER_ID": "WVR-" + order_id.removeprefix("ORD-"),
+        "ORDER_ID": order_id,
+        "COMPETITION_ID": selected_competition_id,
+        "ORGANIZATION_ID": current_organization.organization_id,
+        "SIGNED_BY_USER_ID": current_user.user_id,
+        "SIGNED_BY_NAME": (
+            current_user.display_name or current_user_email
+        ),
+        "WAIVER_VERSION": waiver_version,
+        "SIGNED_AT": now_iso,
+    }
+
+    payment = {
+        "PAYMENT_ID": payment_id,
+        "ORDER_ID": order_id,
+        "PROVIDER": (
+            "stripe"
+            if payment_type == "STRIPE"
+            else ("invoice" if payment_type == "INVOICE" else "none")
+        ),
+        "STRIPE_CHECKOUT_SESSION_ID": "",
+        "STRIPE_PAYMENT_INTENT_ID": "",
+        "PAYMENT_METHOD": payment_type,
+        "AMOUNT": f"{total_amount:.2f}",
+        "PROCESSING_FEE": "",
+        "DISPLAY_STATUS": payment_status,
+        "STRIPE_STATUS": technical_payment_status,
+        "CREATED_AT": now_iso,
+        "PAID_AT": now_iso if payment_status == "NO_COST" else "",
+        "LAST_ATTEMPT_AT": "",
+        "FAILURE_REASON": "",
+    }
+
+    return {
+        "order": order,
+        "registrations": registrations,
+        "event_entries": event_entries,
+        "waiver": waiver,
+        "payment": payment,
+    }
+
+
 def _queue_clear_athlete_form() -> None:
     """Clear athlete widgets safely on the next rerun."""
     values = {
@@ -913,6 +1115,7 @@ def _build_current_athlete_cart_item() -> dict:
         event_code = dict(event_opts).get(selected_event, "")
         entry_rows.append(
             {
+                "entry_id": _new_id("ENT"),
                 "registration_id": registration_id,
                 "payment_provider": "",
                 "payment_status": configured_payment_status,
@@ -1157,7 +1360,7 @@ else:
 
     submit_disabled = not order_waiver_ok
 
-    # ---------------- No-cost / school direct pilot submission ----------------
+    # ---------------- No-cost / school transactional submission ----------------
     if is_school_order or is_no_cost_order:
         submit_label = (
             "Submit school entries"
@@ -1170,29 +1373,59 @@ else:
             type="primary",
             disabled=submit_disabled,
         ):
-            order_id = _new_id("ORD")
-            now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+            order_id = _draft_order_id()
+            payment_id = "PAY-" + order_id.removeprefix("ORD-")
 
+            payment_type = "INVOICE" if is_school_order else "NO_COST"
+            stakeholder_payment_status = (
+                "REQUIRED" if is_school_order else "NO_COST"
+            )
+            technical_payment_status = (
+                "invoice_pending" if is_school_order else "no_cost"
+            )
+
+            bundle = _build_transaction_bundle(
+                order_id=order_id,
+                payment_id=payment_id,
+                payment_type=payment_type,
+                order_status="CONFIRMED",
+                registration_status="CONFIRMED",
+                event_status="CONFIRMED",
+                payment_status=stakeholder_payment_status,
+                technical_payment_status=technical_payment_status,
+                total_amount=total_amount,
+                cart=cart,
+            )
+
+            # Keep the existing OUTPUT sheet as a compatibility projection for
+            # downstream processes while the transaction sheets become the
+            # system of record.
+            now_iso = _iso_now()
             new_rows = []
             for row in cart_entry_rows():
                 final_row = dict(row)
                 final_row["order_id"] = order_id
+                final_row["payment_id"] = payment_id
                 final_row["order_created_at"] = now_iso
                 final_row["submitted_by"] = current_user_email
-
-                if is_school_order:
-                    final_row["payment_provider"] = "invoice"
-                    final_row["payment_status"] = "REQUIRED"
-                    final_row["order_status"] = "CONFIRMED"
-                else:
-                    final_row["payment_provider"] = "none"
-                    final_row["payment_status"] = "NO_COST"
-                    final_row["order_status"] = "CONFIRMED"
-
+                final_row["payment_provider"] = (
+                    "invoice" if is_school_order else "none"
+                )
+                final_row["payment_status"] = stakeholder_payment_status
+                final_row["order_status"] = "CONFIRMED"
                 new_rows.append(final_row)
 
             try:
-                st.session_state.entries.extend(new_rows)
+                store = _transaction_store()
+                store.persist_order_bundle(**bundle)
+
+                existing_order_ids = {
+                    str(existing.get("order_id", "") or "")
+                    for existing in st.session_state.entries
+                }
+                if order_id not in existing_order_ids:
+                    st.session_state.entries.extend(new_rows)
+
                 sync_entries_to_sheet(
                     st.session_state.entries,
                     sheet_url_or_id=st.session_state.get(
@@ -1206,7 +1439,7 @@ else:
                         or None
                     ),
                 )
-            except Exception as exc:
+            except (TransactionStoreError, Exception) as exc:
                 st.error(
                     "Unable to submit order: "
                     f"{type(exc).__name__}: {exc}"
@@ -1220,14 +1453,16 @@ else:
                 )
                 st.stop()
 
-    # ---------------- Paid Affiliate / Associate aggregate Stripe checkout ----------------
+    # ---------------- Paid Affiliate / Associate transactional Stripe checkout ----------------
     elif is_online_paid_order:
         if st.button(
             "Proceed to payment",
             type="primary",
             disabled=submit_disabled,
         ):
-            order_id = _new_id("ORD")
+            order_id = _draft_order_id()
+            payment_id = "PAY-" + order_id.removeprefix("ORD-")
+
             currency = str(
                 st.secrets.get("STRIPE_CURRENCY", "sgd") or "sgd"
             ).strip().lower()
@@ -1272,6 +1507,21 @@ else:
                 )
                 st.stop()
 
+            # Persist the order before contacting Stripe. A retry uses the same
+            # draft ORDER_ID, so interrupted multi-sheet writes are idempotent.
+            bundle = _build_transaction_bundle(
+                order_id=order_id,
+                payment_id=payment_id,
+                payment_type="STRIPE",
+                order_status="PENDING_PAYMENT",
+                registration_status="PENDING_PAYMENT",
+                event_status="PENDING_PAYMENT",
+                payment_status="REQUIRED",
+                technical_payment_status="not_started",
+                total_amount=total_amount,
+                cart=cart,
+            )
+
             entry_rows = []
             all_events = []
             athlete_names = []
@@ -1282,6 +1532,7 @@ else:
                 for row in item.get("entry_rows", []) or []:
                     pending_row = dict(row)
                     pending_row["order_id"] = order_id
+                    pending_row["payment_id"] = payment_id
                     pending_row["payment_provider"] = "stripe"
                     pending_row["payment_status"] = "PAYMENT_STARTED"
                     entry_rows.append(pending_row)
@@ -1293,6 +1544,9 @@ else:
             )
 
             try:
+                store = _transaction_store()
+                store.persist_order_bundle(**bundle)
+
                 checkout = create_registration_checkout(
                     secret_key=stripe_secret_key,
                     registration_id=order_id,
@@ -1336,7 +1590,35 @@ else:
                     stripe_session_id=checkout["session_id"],
                 )
 
+                attempt_time = _iso_now()
+                store.mark_payment_started(
+                    order_id=order_id,
+                    payment_id=payment_id,
+                    stripe_session_id=checkout["session_id"],
+                    attempted_at=attempt_time,
+                )
+
             except Exception as exc:
+                # If Stripe Checkout itself never started, stakeholder-facing
+                # status remains REQUIRED. The technical failure is surfaced to
+                # the user and can be retried with the same ORDER_ID.
+                try:
+                    if "store" in locals():
+                        store.update_by_id(
+                            "PAYMENTS",
+                            payment_id,
+                            {
+                                "DISPLAY_STATUS": "REQUIRED",
+                                "STRIPE_STATUS": "checkout_error",
+                                "LAST_ATTEMPT_AT": _iso_now(),
+                                "FAILURE_REASON": (
+                                    f"{type(exc).__name__}: {exc}"
+                                ),
+                            },
+                        )
+                except Exception:
+                    pass
+
                 st.error(
                     "Unable to start payment: "
                     f"{type(exc).__name__}: {exc}"
@@ -1346,6 +1628,7 @@ else:
             st.session_state["pending_checkout"] = {
                 "order_id": order_id,
                 "registration_id": order_id,
+                "payment_id": payment_id,
                 "session_id": checkout["session_id"],
                 "payment_url": checkout["payment_url"],
                 "amount": amount_str,

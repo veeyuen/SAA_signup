@@ -6,6 +6,11 @@ import streamlit as st
 
 CART_KEY = "registration_cart"
 CART_COMPETITION_KEY = "cart_competition_id"
+DRAFT_ORDER_KEY = "draft_order_id"
+
+
+def _invalidate_order_draft() -> None:
+    st.session_state.pop(DRAFT_ORDER_KEY, None)
 
 
 def get_cart() -> list[dict]:
@@ -45,6 +50,7 @@ def add_item(item: dict, competition_id: str) -> None:
     )
     cart.append(item)
     st.session_state[CART_KEY] = cart
+    _invalidate_order_draft()
 
 
 def remove_item(cart_item_id: str) -> None:
@@ -54,12 +60,14 @@ def remove_item(cart_item_id: str) -> None:
         if str(item.get("cart_item_id", "")) != str(cart_item_id)
     ]
     st.session_state[CART_KEY] = cart
+    _invalidate_order_draft()
     if not cart:
         st.session_state.pop(CART_COMPETITION_KEY, None)
 
 
 def clear_cart() -> None:
     st.session_state[CART_KEY] = []
+    _invalidate_order_draft()
     st.session_state.pop(CART_COMPETITION_KEY, None)
 
 

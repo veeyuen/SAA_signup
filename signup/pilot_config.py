@@ -160,6 +160,25 @@ class PilotConfigRepository:
                 f"{type(exc).__name__}: {exc}"
             ) from exc
 
+    def system_value(self, config_key: str, default: str = "") -> str:
+        """Read one value from SYSTEM_CONFIG; return default when absent."""
+        df = self.table("SYSTEM_CONFIG")
+        _require_columns(
+            df,
+            "SYSTEM_CONFIG",
+            ["CONFIG_KEY", "CONFIG_VALUE"],
+        )
+        target = _clean(config_key).casefold()
+        matches = df[
+            df["CONFIG_KEY"].map(
+                lambda x: _clean(x).casefold() == target
+            )
+        ]
+        if matches.empty:
+            return default
+        value = _clean(matches.iloc[0].get("CONFIG_VALUE"))
+        return value if value != "" else default
+
     def get_user(self, email: str) -> ConfiguredUser | None:
         df = self.table("USERS")
         _require_columns(
