@@ -102,6 +102,41 @@ SHEETS: dict[str, list[str]] = {
         "WAIVER_VERSION",
         "SIGNED_AT",
     ],
+    "REFUNDS": [
+        "REFUND_ID",
+        "PAYMENT_ID",
+        "ORDER_ID",
+        "ENTRY_ID",
+        "REGISTRATION_ID",
+        "REQUESTED_AMOUNT",
+        "APPROVED_AMOUNT",
+        "CURRENCY",
+        "REASON",
+        "STATUS",
+        "REQUESTED_BY_USER_ID",
+        "REQUESTED_BY_EMAIL",
+        "REQUESTED_AT",
+        "APPROVED_BY_USER_ID",
+        "APPROVED_AT",
+        "STRIPE_REFUND_ID",
+        "STRIPE_STATUS",
+        "COMPLETED_AT",
+        "FAILURE_REASON",
+        "UPDATED_AT",
+    ],
+    "AUDIT_LOG": [
+        "AUDIT_ID",
+        "TIMESTAMP",
+        "USER_ID",
+        "USER_EMAIL",
+        "ACTION",
+        "ENTITY_TYPE",
+        "ENTITY_ID",
+        "ORDER_ID",
+        "BEFORE_JSON",
+        "AFTER_JSON",
+        "REASON",
+    ],
 }
 
 
@@ -111,6 +146,8 @@ ID_COLUMNS = {
     "EVENT_ENTRIES": "ENTRY_ID",
     "PAYMENTS": "PAYMENT_ID",
     "WAIVERS": "WAIVER_ID",
+    "REFUNDS": "REFUND_ID",
+    "AUDIT_LOG": "AUDIT_ID",
 }
 
 
@@ -488,6 +525,46 @@ class TransactionSheetStore:
         for idx, header in enumerate(info.headers):
             result[header] = row_values[idx] if idx < len(row_values) else ""
         return result
+
+    def list_rows(self, sheet_name: str) -> list[dict[str, str]]:
+        """Return all data rows from a transaction worksheet as dictionaries."""
+        info = self._worksheet_info(sheet_name)
+        try:
+            values = info.worksheet.get_all_values()
+        except Exception as exc:
+            raise TransactionStoreError(
+                f"Could not read '{sheet_name}': {type(exc).__name__}: {exc}"
+            ) from exc
+
+        rows: list[dict[str, str]] = []
+        for row_values in values[info.header_row:]:
+            if not any(_clean(v) for v in row_values):
+                continue
+            row: dict[str, str] = {}
+            for idx, header in enumerate(info.headers):
+                row[header] = row_values[idx] if idx < len(row_values) else ""
+            rows.append(row)
+        return rows
+
+    def append_audit_log(self, row: dict[str, Any]) -> bool:
+        """Append one immutable audit record, idempotently by AUDIT_ID."""
+        return self.append_if_missing("AUDIT_LOG", row)
+
+    def create_refund_request(self, row: dict[str, Any]) -> bool:
+        """Record a refund request only; this method never calls Stripe."""
+        entry_id = _clean(row.get("ENTRY_ID"))
+        if entry_id:
+            existing = self.list_rows("REFUNDS")
+            open_statuses = {"REFUND_REQUESTED", "REFUND_STARTED"}
+            for existing_row in existing:
+                if (
+                    _clean(existing_row.get("ENTRY_ID")) == entry_id
+                    and _normalise(existing_row.get("STATUS")) in open_statuses
+                ):
+                    raise TransactionStoreError(
+                        f"Entry {entry_id} already has an open refund request."
+                    )
+        return self.append_if_missing("REFUNDS", row)
 
     def persist_order_bundle(
         self,

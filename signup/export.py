@@ -43,6 +43,13 @@ def sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
 
     entries = []
     for _, row in df.iterrows():
+        # Admin withdrawals are soft deletes. Keep the historical OUTPUT row
+        # for traceability but exclude it from operational entry exports.
+        is_deleted_raw = str(get(row, "is_deleted", "") or "").strip().casefold()
+        entry_status = str(get(row, "entry_status", "") or "").strip().upper()
+        if is_deleted_raw in {"true", "1", "yes", "y"} or entry_status == "WITHDRAWN":
+            continue
+
         first_name = str(get(row, "first_name", "") or get(row, "firstname", "") or get(row, "first", "")).strip()
         other_name = str(get(row, "other_name", "") or get(row, "othername", "")).strip()
         last_name = str(get(row, "last_name", "") or get(row, "lastname", "") or get(row, "last", "")).strip()

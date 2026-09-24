@@ -79,10 +79,13 @@ def append_confirmed_entries_if_missing(
     headers = worksheet.row_values(1)
 
     required_extra = [
+        "entry_id",
         "order_id",
         "payment_id",
         "registration_id",
         "payment_status",
+        "entry_status",
+        "is_deleted",
         "stripe_checkout_session_id",
         "stripe_payment_intent_id",
     ]
@@ -140,6 +143,8 @@ def append_confirmed_entries_if_missing(
         # Preserve the event row's original registration_id.
         enriched["order_id"] = order_id
         enriched["payment_status"] = "PAYMENT_COMPLETE"
+        enriched["entry_status"] = "CONFIRMED"
+        enriched["is_deleted"] = False
         enriched["stripe_checkout_session_id"] = stripe_session_id
         enriched["stripe_payment_intent_id"] = stripe_payment_intent_id
 
