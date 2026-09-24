@@ -10,7 +10,6 @@ from flask import Request, jsonify
 
 from payment_store import (
     create_google_client,
-    find_pending_registration,
     get_pending_worksheet,
     update_pending_fields,
 )
@@ -41,11 +40,118 @@ def _transaction_sheet_url() -> str:
     ).strip()
 
 
-def _payment_method_from_session(session) -> str:
-    methods = session.get("payment_method_types") or []
-    if isinstance(methods, (list, tuple)):
-        return ",".join(str(value) for value in methods if value)
-    return str(methods or "").strip()
+def _normalise_header(value: str) -> str:
+    import re
+
+    return re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        str(value or "").strip().casefold(),
+    ).strip("_")
+
+
+def _find_pending_for_session(worksheet, reference_id: str, session_id: str):
+    """Find the PendingPayments row for this order and exact Stripe session.
+
+    Older test data can contain more than one row for the same ORDER_ID. Matching
+    by session first prevents a webhook for one attempt from mutating another.
+    """
+    values = worksheet.get_all_values()
+    if not values:
+        return None, None
+
+    headers = values[0]
+    header_map = {_normalise_header(h): i for i, h in enumerate(headers)}
+    reg_idx = header_map.get("registration_id")
+    session_idx = header_map.get("stripe_checkout_session_id")
+    if reg_idx is None:
+        return None, None
+
+    matches = []
+    for row_number, row in enumerate(values[1:], start=2):
+        reg_value = row[reg_idx] if reg_idx < len(row) else ""
+        if str(reg_value or "").strip() != str(reference_id or "").strip():
+            continue
+        padded = list(row) + [""] * max(0, len(headers) - len(row))
+        record = {
+            headers[i]: padded[i] if i < len(padded) else ""
+            for i in range(len(headers))
+        }
+        matches.append((row_number, record))
+        if session_idx is not None and session_id:
+            stored_session = padded[session_idx] if session_idx < len(padded) else ""
+            if str(stored_session or "").strip() == session_id:
+                return row_number, record
+
+    if not matches:
+        return None, None
+
+    # For a single current row, use it and let the explicit session-mismatch
+    # guard below decide whether the event is valid. For legacy duplicates with
+    # no exact match, use the newest row rather than an arbitrary first row.
+    return matches[-1]
+
+
+def _actual_payment_method(session: dict) -> str:
+    """Return the payment method actually used (e.g. card or paynow).
+
+    Checkout Session.payment_method_types is only the list offered to the user.
+    The actual method is obtained from the PaymentIntent/Charge when the webhook
+    has STRIPE_SECRET_KEY configured. If Stripe lookup is unavailable, return an
+    empty string rather than writing the misleading offered-method list.
+    """
+    secret_key = str(os.environ.get("STRIPE_SECRET_KEY", "") or "").strip()
+    payment_intent_id = str(session.get("payment_intent", "") or "").strip()
+    if not secret_key or not payment_intent_id:
+        return ""
+
+    previous_key = getattr(stripe, "api_key", None)
+    stripe.api_key = secret_key
+    try:
+        intent = stripe.PaymentIntent.retrieve(
+            payment_intent_id,
+            expand=["latest_charge"],
+        )
+        if not isinstance(intent, dict):
+            if hasattr(intent, "to_dict_recursive"):
+                intent = intent.to_dict_recursive()
+            elif hasattr(intent, "to_dict"):
+                intent = intent.to_dict()
+
+        charge = (intent or {}).get("latest_charge")
+        if isinstance(charge, str) and charge:
+            charge = stripe.Charge.retrieve(charge)
+        if charge is not None and not isinstance(charge, dict):
+            if hasattr(charge, "to_dict_recursive"):
+                charge = charge.to_dict_recursive()
+            elif hasattr(charge, "to_dict"):
+                charge = charge.to_dict()
+
+        details = (charge or {}).get("payment_method_details") or {}
+        method = str(details.get("type", "") or "").strip().lower()
+        if method:
+            return method
+
+        payment_method = (intent or {}).get("payment_method")
+        if isinstance(payment_method, dict):
+            return str(payment_method.get("type", "") or "").strip().lower()
+        if isinstance(payment_method, str) and payment_method:
+            pm = stripe.PaymentMethod.retrieve(payment_method)
+            if not isinstance(pm, dict):
+                if hasattr(pm, "to_dict_recursive"):
+                    pm = pm.to_dict_recursive()
+                elif hasattr(pm, "to_dict"):
+                    pm = pm.to_dict()
+            return str((pm or {}).get("type", "") or "").strip().lower()
+    except Exception as exc:
+        print(
+            "Could not resolve actual Stripe payment method; "
+            f"leaving PAYMENT_METHOD unchanged: {type(exc).__name__}: {exc}"
+        )
+    finally:
+        stripe.api_key = previous_key
+
+    return ""
 
 
 def _mark_transaction_failure(
@@ -177,9 +283,12 @@ def stripe_webhook(request: Request):
         ),
     )
 
-    row_number, pending = find_pending_registration(
+    actual_session_id = str(session.get("id", "") or "").strip()
+
+    row_number, pending = _find_pending_for_session(
         pending_worksheet,
         reference_id,
+        actual_session_id,
     )
 
     if not pending or not row_number:
@@ -187,12 +296,30 @@ def stripe_webhook(request: Request):
             {"error": "Pending registration/order not found"}
         ), 404
 
-    actual_session_id = str(session.get("id", "") or "").strip()
+    expected_session_id = str(
+        pending.get("stripe_checkout_session_id", "") or ""
+    ).strip()
 
     # ------------------------------------------------------------------
     # Explicit Stripe failure / expiry
     # ------------------------------------------------------------------
     if event_type in handled_failure_events:
+        # If the user has already been issued a replacement Checkout session,
+        # a delayed expiry/failure event from an older attempt must not downgrade
+        # the current order or trigger endless Stripe retries.
+        if (
+            expected_session_id
+            and actual_session_id
+            and actual_session_id != expected_session_id
+        ):
+            return jsonify(
+                {
+                    "received": True,
+                    "ignored": "stale_checkout_failure",
+                    "session_id": actual_session_id,
+                }
+            ), 200
+
         failure_status = (
             "EXPIRED"
             if event_type == "checkout.session.expired"
@@ -229,10 +356,6 @@ def stripe_webhook(request: Request):
         return jsonify(
             {"received": True, "paid": False}
         ), 200
-
-    expected_session_id = str(
-        pending.get("stripe_checkout_session_id", "") or ""
-    ).strip()
 
     if (
         expected_session_id
@@ -358,7 +481,7 @@ def stripe_webhook(request: Request):
                 stripe_session_id=actual_session_id,
                 stripe_payment_intent_id=payment_intent_id,
                 paid_at=confirmed_at,
-                payment_method=_payment_method_from_session(session),
+                payment_method=_actual_payment_method(session),
                 processing_fee="",
             )
         except TransactionStoreError as exc:
