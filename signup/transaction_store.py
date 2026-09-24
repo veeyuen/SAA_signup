@@ -580,19 +580,22 @@ class TransactionSheetStore:
                 "The matched PAYMENTS row is missing PAYMENT_ID or ORDER_ID."
             )
 
+        payment_updates = {
+            "STRIPE_PAYMENT_INTENT_ID": stripe_payment_intent_id,
+            "PROCESSING_FEE": processing_fee,
+            "DISPLAY_STATUS": "PAYMENT_COMPLETE",
+            "STRIPE_STATUS": "paid",
+            "PAID_AT": paid_at,
+            "LAST_ATTEMPT_AT": paid_at,
+            "FAILURE_REASON": "",
+        }
+        if str(payment_method or "").strip():
+            payment_updates["PAYMENT_METHOD"] = str(payment_method).strip()
+
         self.update_by_id(
             "PAYMENTS",
             payment_id,
-            {
-                "STRIPE_PAYMENT_INTENT_ID": stripe_payment_intent_id,
-                "PAYMENT_METHOD": payment_method,
-                "PROCESSING_FEE": processing_fee,
-                "DISPLAY_STATUS": "PAYMENT_COMPLETE",
-                "STRIPE_STATUS": "paid",
-                "PAID_AT": paid_at,
-                "LAST_ATTEMPT_AT": paid_at,
-                "FAILURE_REASON": "",
-            },
+            payment_updates,
         )
         self.update_by_id(
             "ORDERS",

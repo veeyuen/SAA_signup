@@ -91,12 +91,12 @@ import json
 import secrets
 from decimal import Decimal
 
-from stripe_checkout import create_registration_checkout
 from payment_store import (
     create_google_client,
     get_pending_worksheet,
-    save_pending_registration,
 )
+from signup.pending_payment import upsert_pending_registration
+from signup.stripe_payment import get_or_create_registration_checkout
 
 APP_VARIANT = "public_entry_only"
 
@@ -807,10 +807,30 @@ elif not selected_events:
     st.warning("Please select at least one event for the selected division.")
 
 
-season_best = st.text_input("Season Best", key="season_best")
-season_best_ok = bool((season_best or "").strip())
-if not season_best_ok:
-    st.warning("Season Best is required.")
+def _season_best_state_key(event_name: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9]+", "_", str(event_name or "")).strip("_")
+    return f"season_best_event__{safe}"
+
+
+season_best_by_event = {}
+if selected_events:
+    st.markdown("**Season Best by event**")
+    st.caption("Enter one Season Best for each selected event.")
+    _sb_columns = st.columns(min(3, max(1, len(selected_events))))
+    for _sb_index, _sb_event in enumerate(selected_events):
+        with _sb_columns[_sb_index % len(_sb_columns)]:
+            _sb_value = st.text_input(
+                f"{_sb_event} Season Best",
+                key=_season_best_state_key(_sb_event),
+            )
+        season_best_by_event[_sb_event] = str(_sb_value or "").strip()
+
+season_best_ok = bool(selected_events) and all(
+    season_best_by_event.get(event_name, "")
+    for event_name in selected_events
+)
+if selected_events and not season_best_ok:
+    st.warning("Season Best is required for every selected event.")
 emergency_contact_name = st.text_input("Emergency Contact Name", key="emergency_contact_name")
 emergency_contact_number = st.text_input("Emergency Contact Number", key="emergency_contact_number")
 coach_full_name = st.text_input("Coach Full Name", key="coach_full_name")
@@ -849,11 +869,20 @@ if _pending_checkout:
     if _pending_order_id:
         st.caption(f"Order reference: {_pending_order_id}")
 
-    st.link_button(
-        "Pay by Card or PayNow",
-        str(_pending_checkout.get("payment_url", "") or ""),
-        type="primary",
-    )
+    _pending_payment_url = str(
+        _pending_checkout.get("payment_url", "") or ""
+    ).strip()
+    if _pending_payment_url:
+        st.link_button(
+            "Pay by Card or PayNow",
+            _pending_payment_url,
+            type="primary",
+        )
+    else:
+        st.info(
+            "Stripe has already accepted or completed this Checkout session. "
+            "Please wait for webhook confirmation rather than starting another payment."
+        )
 
     st.warning(
         "The order is not yet confirmed. It will be written to the confirmed "
@@ -1047,7 +1076,7 @@ def _build_transaction_bundle(
         ),
         "STRIPE_CHECKOUT_SESSION_ID": "",
         "STRIPE_PAYMENT_INTENT_ID": "",
-        "PAYMENT_METHOD": payment_type,
+        "PAYMENT_METHOD": "" if payment_type == "STRIPE" else payment_type,
         "AMOUNT": f"{total_amount:.2f}",
         "PROCESSING_FEE": "",
         "DISPLAY_STATUS": payment_status,
@@ -1088,7 +1117,6 @@ def _queue_clear_athlete_form() -> None:
         "contact_number": "",
         "email": "",
         "events_selected": [],
-        "season_best": "",
         "emergency_contact_name": "",
         "emergency_contact_number": "",
         "coach_full_name": "",
@@ -1096,6 +1124,12 @@ def _queue_clear_athlete_form() -> None:
     }
     for key, value in values.items():
         st.session_state[f"{key}__pending"] = value
+
+    # Season Best inputs are dynamic because each selected event has its own
+    # field. Queue all current event-specific fields for clearing as well.
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("season_best_event__"):
+            st.session_state[f"{key}__pending"] = ""
 
 
 def _build_current_athlete_cart_item() -> dict:
@@ -1146,7 +1180,7 @@ def _build_current_athlete_cart_item() -> dict:
                 "charge_code": charge_code,
                 "po_to_be_sent": po_to_be_sent,
                 "event_division": event_division,
-                "season_best": (season_best or "").strip(),
+                "season_best": season_best_by_event.get(selected_event, ""),
                 "emergency_contact_name": (
                     emergency_contact_name or ""
                 ).strip(),
@@ -1205,8 +1239,14 @@ if add_to_cart_clicked:
         ("Birth Date", birth_date),
         ("Email", email),
         ("Contact Number", contact_number),
-        ("Season Best", season_best),
     ]
+    for _event_name in selected_events:
+        missing_checks.append(
+            (
+                f"Season Best ({_event_name})",
+                season_best_by_event.get(_event_name, ""),
+            )
+        )
     if ic_required:
         missing_checks.insert(1, ("IC last 4", ic_last4))
 
@@ -1547,7 +1587,29 @@ else:
                 store = _transaction_store()
                 store.persist_order_bundle(**bundle)
 
-                checkout = create_registration_checkout(
+                # Reuse an existing usable Stripe Checkout session for this
+                # order. This closes the duplicate-session path caused by
+                # retries/double-clicks while still allowing a replacement
+                # after a genuinely failed/expired session.
+                payment_row = store.find_first(
+                    "PAYMENTS",
+                    "ORDER_ID",
+                    order_id,
+                ) or {}
+                existing_session_id = str(
+                    payment_row.get("STRIPE_CHECKOUT_SESSION_ID", "") or ""
+                ).strip()
+                existing_stripe_status = str(
+                    payment_row.get("STRIPE_STATUS", "") or ""
+                ).strip().lower()
+                force_new_checkout = existing_stripe_status in {
+                    "failed",
+                    "expired",
+                    "async_payment_failed",
+                    "session_expired",
+                }
+
+                checkout = get_or_create_registration_checkout(
                     secret_key=stripe_secret_key,
                     registration_id=order_id,
                     amount=amount_str,
@@ -1558,6 +1620,8 @@ else:
                     ),
                     description=order_description,
                     public_app_url=public_app_url,
+                    existing_session_id=existing_session_id,
+                    force_new=force_new_checkout,
                 )
 
                 google_client = create_google_client(
@@ -1569,7 +1633,7 @@ else:
                     pending_worksheet_name,
                 )
 
-                save_pending_registration(
+                upsert_pending_registration(
                     worksheet=pending_worksheet,
                     registration_id=order_id,
                     login_email=current_user_email,
@@ -1591,12 +1655,16 @@ else:
                 )
 
                 attempt_time = _iso_now()
-                store.mark_payment_started(
-                    order_id=order_id,
-                    payment_id=payment_id,
-                    stripe_session_id=checkout["session_id"],
-                    attempted_at=attempt_time,
-                )
+                # Do not downgrade an already-paid transaction merely because
+                # the user revisited the payment button while webhook processing
+                # is completing.
+                if checkout.get("payment_status") != "paid":
+                    store.mark_payment_started(
+                        order_id=order_id,
+                        payment_id=payment_id,
+                        stripe_session_id=checkout["session_id"],
+                        attempted_at=attempt_time,
+                    )
 
             except Exception as exc:
                 # If Stripe Checkout itself never started, stakeholder-facing
