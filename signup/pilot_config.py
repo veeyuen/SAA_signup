@@ -8,6 +8,7 @@ COMPETITION_EVENTS. Transactional registration/payment storage remains separate.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import datetime as dt
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
@@ -48,6 +49,19 @@ def _as_bool(value, default: bool = False) -> bool:
     if raw in {"false", "0", "no", "n", "inactive"}:
         return False
     return default
+
+
+def _as_int_or_none(value) -> int | None:
+    raw = _clean(value)
+    if raw == "":
+        return None
+    try:
+        number = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not number.is_integer():
+        return None
+    return int(number)
 
 
 def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -309,7 +323,44 @@ class PilotConfigRepository:
                 f"Invalid FEE_PER_ENTRY_SGD value {raw!r} for {competition_id}."
             ) from exc
 
-    def division_rows(self, competition_id: str, gender: str = "") -> list[dict]:
+    @staticmethod
+    def age_on_date(birth_date, as_of) -> int | None:
+        """Return exact age on the supplied date, or None for invalid dates."""
+        if birth_date is None or as_of is None:
+            return None
+
+        birth_ts = pd.to_datetime(birth_date, errors="coerce")
+        as_of_ts = pd.to_datetime(as_of, errors="coerce")
+        if pd.isna(birth_ts) or pd.isna(as_of_ts):
+            return None
+
+        birth = birth_ts.date()
+        check_date = as_of_ts.date()
+        if birth > check_date:
+            return None
+
+        return (
+            check_date.year
+            - birth.year
+            - ((check_date.month, check_date.day) < (birth.month, birth.day))
+        )
+
+    def division_rows(
+        self,
+        competition_id: str,
+        gender: str = "",
+        birth_date=None,
+        competition_start_at=None,
+    ) -> list[dict]:
+        """Return divisions offered by the competition and eligible for the athlete.
+
+        Eligibility uses exact age on COMPETITION_START_AT and MIN_AGE / MAX_AGE
+        from the DIVISIONS worksheet. A blank MAX_AGE means no upper age limit.
+        """
+        athlete_age = self.age_on_date(birth_date, competition_start_at)
+        if athlete_age is None:
+            return []
+
         events = self.table("COMPETITION_EVENTS")
         _require_columns(
             events,
@@ -333,40 +384,67 @@ class PilotConfigRepository:
                 _clean(gender).casefold()
             )
 
-        codes = []
+        offered_codes = []
         seen = set()
         for value in events.loc[mask, "DIVISION_CODE"]:
             code = _clean(value)
             if code and code not in seen:
-                codes.append(code)
+                offered_codes.append(code)
                 seen.add(code)
+
+        divs = self.table("DIVISIONS")
+        _require_columns(
+            divs,
+            "DIVISIONS",
+            [
+                "DIVISION_CODE",
+                "DIVISION_NAME",
+                "MIN_AGE",
+                "MAX_AGE",
+                "DISPLAY_ORDER",
+                "ACTIVE",
+            ],
+        )
 
         labels = {}
         order = {}
-        try:
-            divs = self.table("DIVISIONS")
-            _require_columns(
-                divs,
-                "DIVISIONS",
-                ["DIVISION_CODE", "DIVISION_NAME", "ACTIVE"],
-            )
-            for _, row in divs.iterrows():
-                if not _as_bool(row.get("ACTIVE"), False):
-                    continue
-                code = _clean(row.get("DIVISION_CODE"))
-                labels[code] = _clean(row.get("DIVISION_NAME")) or code
-                try:
-                    order[code] = int(float(_clean(row.get("DISPLAY_ORDER")) or 9999))
-                except ValueError:
-                    order[code] = 9999
-        except PilotConfigError:
-            raise
+        eligible = {}
 
+        for _, row in divs.iterrows():
+            if not _as_bool(row.get("ACTIVE"), False):
+                continue
+
+            code = _clean(row.get("DIVISION_CODE"))
+            if not code:
+                continue
+
+            min_age = _as_int_or_none(row.get("MIN_AGE"))
+            max_age = _as_int_or_none(row.get("MAX_AGE"))
+
+            # A configured minimum age is required. MAX_AGE may be blank/open-ended.
+            is_age_eligible = (
+                min_age is not None
+                and athlete_age >= min_age
+                and (max_age is None or athlete_age <= max_age)
+            )
+
+            labels[code] = _clean(row.get("DIVISION_NAME")) or code
+            display_order = _as_int_or_none(row.get("DISPLAY_ORDER"))
+            order[code] = display_order if display_order is not None else 9999
+            eligible[code] = is_age_eligible
+
+        codes = [
+            code
+            for code in offered_codes
+            if eligible.get(code, False)
+        ]
         codes.sort(key=lambda code: (order.get(code, 9999), code))
+
         return [
             {
                 "code": code,
                 "label": labels.get(code, code),
+                "age": athlete_age,
             }
             for code in codes
         ]

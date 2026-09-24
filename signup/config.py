@@ -12,9 +12,9 @@ DIVISIONS = {
 
 SPRINT_60M_ONLY_MODE = True
 
-DEFAULT_APP_TITLE = "SMTFA International Masters T&F Signup"
-SPRINT_60M_APP_TITLE = "60m Sprint Championships 2026"
-APP_TITLE = SPRINT_60M_APP_TITLE if SPRINT_60M_ONLY_MODE else DEFAULT_APP_TITLE
+DEFAULT_APP_TITLE = "SAA Competitions Signup"
+SPRINT_60M_APP_TITLE = "SAA Competitions Signup"
+APP_TITLE = "SAA Competitions Signup"
 
 DIVISIONS_60M = {
     "U7": "U7",
