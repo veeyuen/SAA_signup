@@ -674,6 +674,8 @@ try:
     _division_rows = pilot_config.division_rows(
         competition_id=selected_competition_id,
         gender=gender,
+        birth_date=birth_date if birth_ok else None,
+        competition_start_at=selected_competition.competition_start_at,
     )
 except PilotConfigError as exc:
     st.error(f"Configuration error: {exc}")
@@ -728,9 +730,31 @@ selected_events = c12.multiselect(
     disabled=(not event_names),
 )
 
-# Live validation: must have at least one event selected
+# Live validation: DOB first determines age-eligible divisions; gender + division
+# then determine the configured event list.
 event_ok = bool(event_opts) and len(selected_events) > 0
-if not event_ok:
+
+if birth_ok and not _active_division_keys:
+    athlete_age = pilot_config.age_on_date(
+        birth_date,
+        selected_competition.competition_start_at,
+    )
+    competition_date = (
+        selected_competition.competition_start_at.date()
+        if selected_competition.competition_start_at is not None
+        else None
+    )
+    age_text = f"age {athlete_age}" if athlete_age is not None else "this age"
+    date_text = (
+        f" on {competition_date.strftime('%d-%m-%Y')}"
+        if competition_date is not None
+        else ""
+    )
+    st.warning(
+        "No eligible divisions with configured events are available for "
+        f"{age_text}{date_text}."
+    )
+elif not event_ok:
     st.warning("Please select at least one event for the selected division.")
 
 
