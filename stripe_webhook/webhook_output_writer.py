@@ -44,12 +44,17 @@ def append_confirmed_entries_if_missing(
     gc,
     output_sheet_url_or_id: str,
     output_worksheet: str,
-    registration_id: str,
+    order_id: str,
     entry_rows: list[dict],
     stripe_session_id: str,
     stripe_payment_intent_id: str,
 ) -> bool:
-    """Append confirmed rows once, using registration_id for idempotency."""
+    """Append confirmed rows once, using ORDER_ID for idempotency.
+
+    Each event row keeps its original athlete-level REGISTRATION_ID. This is
+    required for multi-athlete orders where one ORDER_ID contains more than
+    one registration.
+    """
     spreadsheet = _open_spreadsheet(gc, output_sheet_url_or_id)
     worksheet = (
         spreadsheet.worksheet(output_worksheet)
@@ -58,26 +63,27 @@ def append_confirmed_entries_if_missing(
     )
 
     headers = worksheet.row_values(1)
+
+    required_extra = [
+        "order_id",
+        "payment_id",
+        "registration_id",
+        "payment_status",
+        "stripe_checkout_session_id",
+        "stripe_payment_intent_id",
+    ]
+
     if not headers:
         base_headers = list(entry_rows[0].keys()) if entry_rows else []
+        normalized_base = [_normalize_header(h) for h in base_headers]
         headers = base_headers + [
-            h for h in [
-                "registration_id",
-                "payment_status",
-                "stripe_checkout_session_id",
-                "stripe_payment_intent_id",
-            ]
-            if h not in base_headers
+            h
+            for h in required_extra
+            if _normalize_header(h) not in normalized_base
         ]
         worksheet.append_row(headers)
     else:
         normalized = [_normalize_header(h) for h in headers]
-        required_extra = [
-            "registration_id",
-            "payment_status",
-            "stripe_checkout_session_id",
-            "stripe_payment_intent_id",
-        ]
         for extra in required_extra:
             if extra not in normalized:
                 headers.append(extra)
@@ -85,14 +91,14 @@ def append_confirmed_entries_if_missing(
                 normalized.append(extra)
 
     normalized_headers = [_normalize_header(h) for h in headers]
-    registration_col = normalized_headers.index("registration_id") + 1
+    order_col = normalized_headers.index("order_id") + 1
 
-    existing_registration_ids = {
+    existing_order_ids = {
         str(value).strip()
-        for value in worksheet.col_values(registration_col)[1:]
+        for value in worksheet.col_values(order_col)[1:]
         if str(value).strip()
     }
-    if registration_id in existing_registration_ids:
+    if order_id in existing_order_ids:
         return False
 
     existing_rows = worksheet.get_all_values()
@@ -101,12 +107,12 @@ def append_confirmed_entries_if_missing(
     rows_to_append = []
     for offset, entry in enumerate(entry_rows):
         enriched = dict(entry)
-        enriched["registration_id"] = registration_id
-        enriched["payment_status"] = "PAID"
+
+        # Preserve the event row's original registration_id.
+        enriched["order_id"] = order_id
+        enriched["payment_status"] = "PAYMENT_COMPLETE"
         enriched["stripe_checkout_session_id"] = stripe_session_id
-        enriched["stripe_payment_intent_id"] = (
-            stripe_payment_intent_id
-        )
+        enriched["stripe_payment_intent_id"] = stripe_payment_intent_id
 
         row_values = []
         for header in normalized_headers:

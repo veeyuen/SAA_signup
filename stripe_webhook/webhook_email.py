@@ -32,11 +32,17 @@ def send_paid_confirmation_email(
     event_text = ", ".join(str(event) for event in (events or []))
     subject = "Registration confirmed"
 
+    reference_label = (
+        "Order reference"
+        if str(registration_id or "").upper().startswith("ORD-")
+        else "Registration reference"
+    )
+
     text_body = (
         "Dear Participant,\n\n"
         "Your payment has been received and your registration "
         "is confirmed.\n\n"
-        f"Registration reference: {registration_id}\n"
+        f"{reference_label}: {registration_id}\n"
         f"Full Name: {full_name}\n"
         f"Event(s): {event_text}\n"
         f"Team: {team_name}\n"
@@ -51,7 +57,7 @@ def send_paid_confirmation_email(
         <p>Dear Participant,</p>
         <p>Your payment has been received and your registration is confirmed.</p>
         <p>
-          Registration reference: {html.escape(registration_id)}<br>
+          {html.escape(reference_label)}: {html.escape(registration_id)}<br>
           Full Name: {html.escape(full_name)}<br>
           Event(s): {html.escape(event_text)}<br>
           Team: {html.escape(team_name)}<br>
