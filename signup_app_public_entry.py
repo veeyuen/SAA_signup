@@ -64,6 +64,17 @@ from signup.pilot_config import (
     PilotConfigRepository,
     require_configured_user,
 )
+from signup.cart import (
+    add_item as add_cart_item,
+    cart_competition_id,
+    cart_has_items,
+    clear_cart,
+    flatten_entry_rows as cart_entry_rows,
+    get_cart,
+    remove_item as remove_cart_item,
+    total_amount as cart_total_amount,
+    total_event_entries as cart_total_event_entries,
+)
 from signup.validation import (
     is_valid_email,
     is_valid_ic_last4,
@@ -173,12 +184,26 @@ _competition_by_id = {
 }
 _competition_ids = list(_competition_by_id.keys())
 
+# A cart belongs to one competition. While it contains entries the competition
+# selector is locked so fee/event rules cannot change underneath the cart.
+get_cart()
+_cart_locked_competition_id = cart_competition_id()
+if (
+    cart_has_items()
+    and _cart_locked_competition_id
+    and _cart_locked_competition_id in _competition_by_id
+):
+    st.session_state["selected_competition_id"] = _cart_locked_competition_id
+
 selected_competition_id = st.selectbox(
     "Competition",
     options=_competition_ids,
     format_func=lambda cid: _competition_by_id[cid].competition_name,
     key="selected_competition_id",
+    disabled=cart_has_items(),
 )
+if cart_has_items():
+    st.caption("Competition is locked while the cart contains entries.")
 selected_competition = _competition_by_id[selected_competition_id]
 registration_period = pilot_config.registration_period(selected_competition)
 
@@ -781,24 +806,35 @@ parq = st.selectbox("PAR-Q completed?", ["Y", "N"], key="parq")
 ic_last4_norm = normalize_ic_last4(ic_last4)
 email_norm = normalize_email(email)
 
-waiver_ok = st.checkbox("I acknowledge the waiver (as per the original form).", value=False, key="waiver_ok")
-
-# Gate Add entry button (live checks)
-ready_to_add = bool(waiver_ok) and bool(email_present) and bool(email_ok) and bool(ic_ok) and bool(birth_ok) and bool(contact_ok) and bool(name_ok) and bool(gender_ok) and bool(event_ok) and bool(season_best_ok)
+# The waiver is accepted once for the whole order at cart review, rather than
+# once for each athlete added to the same order.
+ready_to_add = (
+    bool(email_present)
+    and bool(email_ok)
+    and bool(ic_ok)
+    and bool(birth_ok)
+    and bool(contact_ok)
+    and bool(name_ok)
+    and bool(gender_ok)
+    and bool(event_ok)
+    and bool(season_best_ok)
+)
 
 
 
 # Existing pending Checkout session, if one has already been created.
 _pending_checkout = st.session_state.get("pending_checkout", {}) or {}
 if _pending_checkout:
-    st.success("Your registration is pending payment.")
+    st.success("Your order is pending payment.")
     st.write(f"Amount payable: **SGD {_pending_checkout.get('amount', '')}**")
 
-    _pending_registration_id = str(
-        _pending_checkout.get("registration_id", "") or ""
+    _pending_order_id = str(
+        _pending_checkout.get("order_id", "")
+        or _pending_checkout.get("registration_id", "")
+        or ""
     ).strip()
-    if _pending_registration_id:
-        st.caption(f"Registration reference: {_pending_registration_id}")
+    if _pending_order_id:
+        st.caption(f"Order reference: {_pending_order_id}")
 
     st.link_button(
         "Pay by Card or PayNow",
@@ -807,43 +843,150 @@ if _pending_checkout:
     )
 
     st.warning(
-        "Your registration has not yet been saved to the confirmed-entry sheet. "
-        "It will be saved only after Stripe verifies successful payment."
+        "The order is not yet confirmed. It will be written to the confirmed "
+        "entry sheet only after Stripe verifies successful payment."
     )
 
-    if st.button("Cancel this payment request and edit the form"):
+    if st.button("Cancel this payment request and return to cart"):
         st.session_state.pop("pending_checkout", None)
         st.rerun()
 
     st.stop()
 
 
-# Phase 1 leaves school invoicing and no-cost final submission for the
-# transactional/cart milestone. Configuration, organisation mapping and pricing
-# can still be fully tested for those account types.
-_checkout_supported = (
-    current_organization.organization_type in {"AFFILIATE", "ASSOCIATE"}
-    and selected_entry_fee > Decimal("0")
-)
-
-if current_organization.organization_type == "SCHOOL":
-    st.info(
-        "School account detected. Post-event MOE invoicing will be enabled in "
-        "the next transactional/cart phase; no Stripe payment is started here."
-    )
-elif selected_entry_fee == Decimal("0"):
-    st.info(
-        "This competition is configured as No cost. Final no-cost submission "
-        "will be enabled in the next transactional/cart phase."
+def _new_id(prefix: str) -> str:
+    return (
+        prefix
+        + "-"
+        + secrets.token_urlsafe(9)
+        .replace("-", "")
+        .replace("_", "")
+        .upper()
     )
 
-# Create a Stripe Checkout session and pending registration.
-if st.button(
-    "Proceed to payment",
-    type="primary",
-    disabled=(not ready_to_add) or (not _checkout_supported),
-):
-    missing = []
+
+def _queue_clear_athlete_form() -> None:
+    """Clear athlete widgets safely on the next rerun."""
+    values = {
+        "last_name": "",
+        "first_name": "",
+        "other_name": "",
+        "gender": "",
+        "name_passport": "",
+        "full_name": "",
+        "db_name_override": "",
+        "full_name_signature": "",
+        "athlete_roster_match": "(keep typed)",
+        "unique_id_override": "",
+        "nationality": "",
+        "nationality_override": "",
+        "singapore_pr": False,
+        "birth_date": None,
+        "ic_last4": "",
+        "contact_number": "",
+        "email": "",
+        "events_selected": [],
+        "season_best": "",
+        "emergency_contact_name": "",
+        "emergency_contact_number": "",
+        "coach_full_name": "",
+        "parq": "Y",
+    }
+    for key, value in values.items():
+        st.session_state[f"{key}__pending"] = value
+
+
+def _build_current_athlete_cart_item() -> dict:
+    registration_id = _new_id("REG")
+
+    full_name_for_order = (
+        (st.session_state.get("full_name", "") or "").strip()
+        or (db_name_override or typed_full_name)
+    )
+    unique_id_for_order = (
+        (st.session_state.get("unique_id_override", "") or "").strip()
+        or unique_id
+    )
+
+    entry_rows = []
+    for selected_event in selected_events:
+        event_code = dict(event_opts).get(selected_event, "")
+        entry_rows.append(
+            {
+                "registration_id": registration_id,
+                "payment_provider": "",
+                "payment_status": configured_payment_status,
+                "competition_id": selected_competition_id,
+                "competition_name": selected_competition.competition_name,
+                "registration_period": registration_period,
+                "organization_id": current_organization.organization_id,
+                "organization_type": current_organization.organization_type,
+                "entry_fee": f"{selected_entry_fee:.2f}",
+                "name": (db_name_override or typed_full_name),
+                "full_name": full_name_for_order,
+                "name_passport": (
+                    st.session_state.get("name_passport", "") or ""
+                ).strip(),
+                "last_name": (last_name or "").strip(),
+                "first_name": (first_name or "").strip(),
+                "other_name": (other_name or "").strip(),
+                "gender": gender,
+                "birth_date": birth_date.isoformat() if birth_date else "",
+                "ic_last4": ic_last4_norm,
+                "unique_id": unique_id_for_order,
+                "nationality": nationality,
+                "singapore_pr": singapore_pr,
+                "contact_number": (contact_number or "").strip(),
+                "email": email_norm,
+                "team_code": team_code,
+                "team_name": team_name_row,
+                "charge_code": charge_code,
+                "po_to_be_sent": po_to_be_sent,
+                "event_division": event_division,
+                "season_best": (season_best or "").strip(),
+                "emergency_contact_name": (
+                    emergency_contact_name or ""
+                ).strip(),
+                "emergency_contact_number": (
+                    emergency_contact_number or ""
+                ).strip(),
+                "coach_full_name": (coach_full_name or "").strip(),
+                "parq": parq,
+                "event": selected_event,
+                "event_code": event_code,
+            }
+        )
+
+    subtotal = selected_entry_fee * Decimal(len(entry_rows))
+
+    return {
+        "registration_id": registration_id,
+        "athlete_name": full_name_for_order,
+        "athlete_email": email_norm,
+        "division": event_division,
+        "events": list(selected_events),
+        "entry_rows": entry_rows,
+        "fee_per_event": f"{selected_entry_fee:.2f}",
+        "subtotal": f"{subtotal:.2f}",
+    }
+
+
+# ---------------- Multi-athlete cart ----------------
+_add_col, _cart_hint_col = st.columns([1, 2])
+with _add_col:
+    add_to_cart_clicked = st.button(
+        "Add athlete to cart",
+        type="primary",
+        disabled=not ready_to_add,
+        use_container_width=True,
+    )
+with _cart_hint_col:
+    st.caption(
+        "Add one or more athletes, then review the combined order below before "
+        "payment or submission."
+    )
+
+if add_to_cart_clicked:
     _uid_present = bool((unique_id or "").strip())
     _is_sgp_local = (
         str(nationality or "").strip().upper()
@@ -855,262 +998,363 @@ if st.button(
     )
 
     missing_checks = [
-        (
-            "Name as per NRIC/Passport",
-            (st.session_state.get("name_passport", "") or "").strip(),
-        ),
+        ("Name as per NRIC/Passport", (st.session_state.get("name_passport", "") or "").strip()),
         ("Birth Date", birth_date),
         ("Email", email),
         ("Contact Number", contact_number),
         ("Season Best", season_best),
     ]
-
-    # IC is required only if Singapore PR is ticked, or a Singapore athlete
-    # does not already have a UNIQUE_ID.
     if ic_required:
         missing_checks.insert(1, ("IC last 4", ic_last4))
 
-    for field_name, field_value in missing_checks:
-        if not field_value:
-            missing.append(field_name)
+    missing = [
+        field_name
+        for field_name, field_value in missing_checks
+        if not field_value
+    ]
 
-    if not waiver_ok:
-        st.error("Please tick the waiver acknowledgement.")
-    elif missing:
+    if missing:
         st.error("Missing: " + ", ".join(missing))
     elif not gender_ok:
         st.error("Please select Gender (Male or Female).")
-    elif not (
-        (st.session_state.get("name_passport", "") or "").strip()
-    ):
-        st.error("Name as per NRIC/Passport is required.")
-    elif (
-        not (
-            (st.session_state.get("unique_id_override", "") or "").strip()
-            or (db_name_override or "").strip()
-        )
-        and not (
-            bool((first_name or "").strip())
-            and bool((last_name or "").strip())
-        )
-    ):
-        st.error(
-            "First Name and Last Name are required unless you selected "
-            "the athlete from the roster."
-        )
     elif not is_valid_email(email_norm):
-        st.error(
-            "Please enter a valid email address "
-            "(e.g., name@example.com)."
-        )
-    elif (
-        str(nationality or "").strip().upper()
-        in ("SGP", "SIN", "SG", "SINGAPORE")
-        and (not _uid_present)
-        and (not is_valid_ic_last4(ic_last4_norm))
-    ):
-        st.error(
-            "IC last 4 must be 3 digits followed by 1 letter "
-            "(e.g., 123A)."
-        )
-    elif (
-        _uid_present
-        and ic_last4_norm
-        and (not is_valid_ic_last4(ic_last4_norm))
-    ):
-        st.error(
-            "IC last 4 must be 3 digits followed by 1 letter "
-            "(e.g., 123A)."
-        )
-    elif not event_opts or not event_names or not selected_events:
-        st.error(
-            "Please select at least one event for that "
-            "Gender + Division combination."
-        )
-    elif not (season_best or "").strip():
-        st.error("Season Best is required.")
+        st.error("Please enter a valid email address.")
+    elif ic_required and not is_valid_ic_last4(ic_last4_norm):
+        st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
+    elif not selected_events:
+        st.error("Please select at least one event.")
     else:
-        registration_id = (
-            "SAA-"
-            + secrets.token_urlsafe(9)
-            .replace("-", "")
-            .replace("_", "")
-            .upper()
-        )
+        cart_item = _build_current_athlete_cart_item()
 
-        full_name_for_payment = (
-            (st.session_state.get("full_name", "") or "").strip()
-            or (db_name_override or typed_full_name)
-        )
-        unique_id_for_payment = (
-            (st.session_state.get("unique_id_override", "") or "").strip()
-            or unique_id
-        )
-
-        # Build rows but do NOT add them to st.session_state.entries and do NOT
-        # sync them to the confirmed output sheet yet.
-        entry_rows = []
-        added_events = []
-
-        for selected_event in selected_events:
-            event_code = dict(event_opts).get(selected_event, "")
-
-            entry_rows.append(
-                {
-                    "registration_id": registration_id,
-                    "payment_provider": "stripe",
-                    "payment_status": configured_payment_status,
-                    "competition_id": selected_competition_id,
-                    "competition_name": selected_competition.competition_name,
-                    "registration_period": registration_period,
-                    "organization_id": current_organization.organization_id,
-                    "organization_type": current_organization.organization_type,
-                    "entry_fee": f"{selected_entry_fee:.2f}",
-                    "name": (db_name_override or typed_full_name),
-                    "full_name": full_name_for_payment,
-                    "name_passport": (
-                        st.session_state.get("name_passport", "") or ""
-                    ).strip(),
-                    "last_name": (last_name or "").strip(),
-                    "first_name": (first_name or "").strip(),
-                    "other_name": (other_name or "").strip(),
-                    "gender": gender,
-                    "birth_date": (
-                        birth_date.isoformat() if birth_date else ""
-                    ),
-                    "ic_last4": ic_last4_norm,
-                    "unique_id": unique_id_for_payment,
-                    "nationality": nationality,
-                    "singapore_pr": singapore_pr,
-                    "contact_number": (contact_number or "").strip(),
-                    "email": email_norm,
-                    "team_code": team_code,
-                    "team_name": team_name_row,
-                    "charge_code": charge_code,
-                    "po_to_be_sent": po_to_be_sent,
-                    "event_division": event_division,
-                    "season_best": (season_best or "").strip(),
-                    "emergency_contact_name": (
-                        emergency_contact_name or ""
-                    ).strip(),
-                    "emergency_contact_number": (
-                        emergency_contact_number or ""
-                    ).strip(),
-                    "coach_full_name": (
-                        coach_full_name or ""
-                    ).strip(),
-                    "parq": parq,
-                    "event": selected_event,
-                    "event_code": event_code,
-                }
-            )
-            added_events.append(selected_event)
-
-        # Pricing now comes from COMPETITION_FEES rather than a global
-        # STRIPE_PRICE_PER_EVENT secret.
-        price_per_event = selected_entry_fee
-        total_amount = price_per_event * Decimal(len(entry_rows))
-        amount_str = f"{total_amount:.2f}"
-
-        currency = str(
-            st.secrets.get("STRIPE_CURRENCY", "sgd") or "sgd"
-        ).strip().lower()
-
-        if currency != "sgd":
-            st.error(
-                "Stripe PayNow requires STRIPE_CURRENCY to be set to 'sgd'."
-            )
-            st.stop()
-
-        stripe_secret_key = str(
-            st.secrets.get("STRIPE_SECRET_KEY", "") or ""
-        ).strip()
-        public_app_url = str(
-            st.secrets.get(
-                "PUBLIC_APP_URL",
-                "https://saapublicaccess.streamlit.app",
-            )
-            or ""
-        ).strip()
-
-        pending_sheet_url = str(
-            st.secrets.get("PENDING_PAYMENT_SHEET_URL", "") or ""
-        ).strip()
-        pending_worksheet_name = str(
-            st.secrets.get(
-                "PENDING_PAYMENT_WORKSHEET",
-                "PendingPayments",
-            )
-            or "PendingPayments"
-        ).strip()
-
-        if not stripe_secret_key:
-            st.error("Stripe is not configured: STRIPE_SECRET_KEY is missing.")
-            st.stop()
-
-        if not pending_sheet_url:
-            st.error(
-                "Pending-payment storage is not configured: "
-                "PENDING_PAYMENT_SHEET_URL is missing."
-            )
-            st.stop()
-
-        try:
-            checkout = create_registration_checkout(
-                secret_key=stripe_secret_key,
-                registration_id=registration_id,
-                amount=amount_str,
-                currency=currency,
-                customer_email=email_norm,
-                description=(
-                    f"{selected_competition.competition_name}: "
-                    f"{', '.join(added_events)}"
+        # Guard against accidentally adding the same athlete/event/division twice.
+        existing_keys = {
+            (
+                str(row.get("unique_id", "") or "").strip().casefold()
+                or (
+                    str(row.get("full_name", "") or "").strip().casefold()
+                    + "|"
+                    + str(row.get("birth_date", "") or "")
                 ),
-                public_app_url=public_app_url,
+                str(row.get("event_division", "") or "").strip().casefold(),
+                str(row.get("event", "") or "").strip().casefold(),
             )
-
-            google_client = create_google_client(
-                dict(st.secrets["gcp_service_account"])
+            for existing_item in get_cart()
+            for row in (existing_item.get("entry_rows", []) or [])
+        }
+        new_keys = {
+            (
+                str(row.get("unique_id", "") or "").strip().casefold()
+                or (
+                    str(row.get("full_name", "") or "").strip().casefold()
+                    + "|"
+                    + str(row.get("birth_date", "") or "")
+                ),
+                str(row.get("event_division", "") or "").strip().casefold(),
+                str(row.get("event", "") or "").strip().casefold(),
             )
-
-            pending_worksheet = get_pending_worksheet(
-                google_client,
-                pending_sheet_url,
-                pending_worksheet_name,
-            )
-
-            save_pending_registration(
-                worksheet=pending_worksheet,
-                registration_id=registration_id,
-                login_email=current_user_email,
-                athlete_email=email_norm,
-                full_name=full_name_for_payment,
-                team_name=team_name_row,
-                events=added_events,
-                entry_rows=entry_rows,
-                amount=amount_str,
-                currency=currency,
-                stripe_session_id=checkout["session_id"],
-            )
-
-        except Exception as exc:
-            st.error(
-                "Unable to start payment: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            st.stop()
-
-        # Persist the payment link across Streamlit reruns so that a user does
-        # not accidentally create multiple Checkout Sessions.
-        st.session_state["pending_checkout"] = {
-            "registration_id": registration_id,
-            "session_id": checkout["session_id"],
-            "payment_url": checkout["payment_url"],
-            "amount": amount_str,
-            "currency": currency,
+            for row in cart_item["entry_rows"]
         }
 
+        if existing_keys.intersection(new_keys):
+            st.error(
+                "At least one of these athlete/event entries is already in the cart."
+            )
+        else:
+            try:
+                add_cart_item(
+                    cart_item,
+                    competition_id=selected_competition_id,
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                _queue_clear_athlete_form()
+                st.toast("Athlete added to cart.")
+                st.rerun()
+
+
+st.divider()
+st.subheader("Order Cart")
+
+cart = get_cart()
+if not cart:
+    st.info("Your cart is empty. Add an athlete above to start an order.")
+else:
+    summary_rows = []
+    for item in cart:
+        summary_rows.append(
+            {
+                "Athlete": item.get("athlete_name", ""),
+                "Division": item.get("division", ""),
+                "Events": ", ".join(item.get("events", []) or []),
+                "Entries": len(item.get("entry_rows", []) or []),
+                "Fee / event": f"S${Decimal(str(item.get('fee_per_event', '0'))):.2f}",
+                "Subtotal": f"S${Decimal(str(item.get('subtotal', '0'))):.2f}",
+            }
+        )
+
+    st.dataframe(
+        pd.DataFrame(summary_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    for index, item in enumerate(cart, start=1):
+        _row1, _row2 = st.columns([5, 1])
+        _row1.caption(
+            f"{index}. {item.get('athlete_name', '')} — "
+            f"{', '.join(item.get('events', []) or [])}"
+        )
+        if _row2.button(
+            "Remove",
+            key=f"remove_cart_{item.get('cart_item_id', index)}",
+            use_container_width=True,
+        ):
+            remove_cart_item(item.get("cart_item_id", ""))
+            st.rerun()
+
+    total_entries = cart_total_event_entries()
+    total_amount = cart_total_amount()
+
+    _m1, _m2, _m3 = st.columns(3)
+    _m1.metric("Athletes", len(cart))
+    _m2.metric("Event entries", total_entries)
+    _m3.metric("Order total", f"S${total_amount:.2f}")
+
+    if st.button("Clear cart", key="clear_registration_cart"):
+        clear_cart()
+        st.session_state.pop("order_waiver_ok", None)
         st.rerun()
+
+    order_waiver_ok = st.checkbox(
+        "I acknowledge the competition waiver for all entries in this order.",
+        value=False,
+        key="order_waiver_ok",
+    )
+
+    st.caption(
+        "The cart is held in this browser session until you submit the order."
+    )
+
+    is_school_order = (
+        current_organization.organization_type == "SCHOOL"
+    )
+    is_no_cost_order = total_amount == Decimal("0.00")
+    is_online_paid_order = (
+        current_organization.organization_type in {"AFFILIATE", "ASSOCIATE"}
+        and total_amount > Decimal("0.00")
+    )
+
+    if is_school_order:
+        st.info(
+            "School order: entries will be confirmed now and billed through the "
+            "post-event MOE invoice process."
+        )
+    elif is_no_cost_order:
+        st.info("No-cost order: no Stripe payment is required.")
+    else:
+        st.info("Paid order: one Stripe payment will cover the entire cart.")
+
+    submit_disabled = not order_waiver_ok
+
+    # ---------------- No-cost / school direct pilot submission ----------------
+    if is_school_order or is_no_cost_order:
+        submit_label = (
+            "Submit school entries"
+            if is_school_order
+            else "Submit no-cost registration"
+        )
+
+        if st.button(
+            submit_label,
+            type="primary",
+            disabled=submit_disabled,
+        ):
+            order_id = _new_id("ORD")
+            now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+
+            new_rows = []
+            for row in cart_entry_rows():
+                final_row = dict(row)
+                final_row["order_id"] = order_id
+                final_row["order_created_at"] = now_iso
+                final_row["submitted_by"] = current_user_email
+
+                if is_school_order:
+                    final_row["payment_provider"] = "invoice"
+                    final_row["payment_status"] = "REQUIRED"
+                    final_row["order_status"] = "CONFIRMED"
+                else:
+                    final_row["payment_provider"] = "none"
+                    final_row["payment_status"] = "NO_COST"
+                    final_row["order_status"] = "CONFIRMED"
+
+                new_rows.append(final_row)
+
+            try:
+                st.session_state.entries.extend(new_rows)
+                sync_entries_to_sheet(
+                    st.session_state.entries,
+                    sheet_url_or_id=st.session_state.get(
+                        "output_sheet_url", ""
+                    ),
+                    worksheet=(
+                        (
+                            st.session_state.get("output_worksheet", "")
+                            or ""
+                        ).strip()
+                        or None
+                    ),
+                )
+            except Exception as exc:
+                st.error(
+                    "Unable to submit order: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                clear_cart()
+                st.session_state.pop("order_waiver_ok", None)
+                st.success(
+                    f"Order {order_id} submitted successfully with "
+                    f"{total_entries} event entries."
+                )
+                st.stop()
+
+    # ---------------- Paid Affiliate / Associate aggregate Stripe checkout ----------------
+    elif is_online_paid_order:
+        if st.button(
+            "Proceed to payment",
+            type="primary",
+            disabled=submit_disabled,
+        ):
+            order_id = _new_id("ORD")
+            currency = str(
+                st.secrets.get("STRIPE_CURRENCY", "sgd") or "sgd"
+            ).strip().lower()
+
+            if currency != "sgd":
+                st.error(
+                    "Stripe PayNow requires STRIPE_CURRENCY to be set to 'sgd'."
+                )
+                st.stop()
+
+            stripe_secret_key = str(
+                st.secrets.get("STRIPE_SECRET_KEY", "") or ""
+            ).strip()
+            public_app_url = str(
+                st.secrets.get(
+                    "PUBLIC_APP_URL",
+                    "https://saapublicaccess.streamlit.app",
+                )
+                or ""
+            ).strip()
+            pending_sheet_url = str(
+                st.secrets.get("PENDING_PAYMENT_SHEET_URL", "") or ""
+            ).strip()
+            pending_worksheet_name = str(
+                st.secrets.get(
+                    "PENDING_PAYMENT_WORKSHEET",
+                    "PendingPayments",
+                )
+                or "PendingPayments"
+            ).strip()
+
+            if not stripe_secret_key:
+                st.error(
+                    "Stripe is not configured: STRIPE_SECRET_KEY is missing."
+                )
+                st.stop()
+
+            if not pending_sheet_url:
+                st.error(
+                    "Pending-payment storage is not configured: "
+                    "PENDING_PAYMENT_SHEET_URL is missing."
+                )
+                st.stop()
+
+            entry_rows = []
+            all_events = []
+            athlete_names = []
+
+            for item in cart:
+                athlete_names.append(item.get("athlete_name", ""))
+                all_events.extend(item.get("events", []) or [])
+                for row in item.get("entry_rows", []) or []:
+                    pending_row = dict(row)
+                    pending_row["order_id"] = order_id
+                    pending_row["payment_provider"] = "stripe"
+                    pending_row["payment_status"] = "PAYMENT_STARTED"
+                    entry_rows.append(pending_row)
+
+            amount_str = f"{total_amount:.2f}"
+            order_description = (
+                f"{selected_competition.competition_name}: "
+                f"{len(cart)} athlete(s), {total_entries} event entry/entries"
+            )
+
+            try:
+                checkout = create_registration_checkout(
+                    secret_key=stripe_secret_key,
+                    registration_id=order_id,
+                    amount=amount_str,
+                    currency=currency,
+                    customer_email=(
+                        normalize_email(billing_email)
+                        or current_user_email
+                    ),
+                    description=order_description,
+                    public_app_url=public_app_url,
+                )
+
+                google_client = create_google_client(
+                    dict(st.secrets["gcp_service_account"])
+                )
+                pending_worksheet = get_pending_worksheet(
+                    google_client,
+                    pending_sheet_url,
+                    pending_worksheet_name,
+                )
+
+                save_pending_registration(
+                    worksheet=pending_worksheet,
+                    registration_id=order_id,
+                    login_email=current_user_email,
+                    athlete_email=(
+                        normalize_email(billing_email)
+                        or current_user_email
+                    ),
+                    full_name=(
+                        athlete_names[0]
+                        if len(athlete_names) == 1
+                        else f"{len(athlete_names)} athletes"
+                    ),
+                    team_name=current_organization.organization_name,
+                    events=all_events,
+                    entry_rows=entry_rows,
+                    amount=amount_str,
+                    currency=currency,
+                    stripe_session_id=checkout["session_id"],
+                )
+
+            except Exception as exc:
+                st.error(
+                    "Unable to start payment: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                st.stop()
+
+            st.session_state["pending_checkout"] = {
+                "order_id": order_id,
+                "registration_id": order_id,
+                "session_id": checkout["session_id"],
+                "payment_url": checkout["payment_url"],
+                "amount": amount_str,
+                "currency": currency,
+                "athlete_count": len(cart),
+                "event_entry_count": total_entries,
+            }
+
+            st.rerun()
 
 
 # -------- Public entry-only mode --------
@@ -1118,6 +1362,7 @@ if st.button(
 # Registrations are written to the confirmed output sheet only by the Stripe webhook
 # after successful payment.
 st.caption(
-    "Entry-only mode: existing entries and edit controls are hidden. "
-    "Payment confirmation is handled by Stripe."
+    "Entry-only mode: add athletes to one competition cart, then submit the "
+    "combined order. Paid orders are confirmed only after Stripe webhook "
+    "verification."
 )
