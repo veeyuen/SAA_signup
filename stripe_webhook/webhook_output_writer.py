@@ -15,6 +15,20 @@ def _normalize_header(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value).strip("_")
 
 
+def _ensure_column_capacity(worksheet, required_columns: int) -> None:
+    """Expand the Google Sheet grid before writing headers past its last column."""
+    current_columns = int(getattr(worksheet, "col_count", 0) or 0)
+    if current_columns >= required_columns:
+        return
+
+    columns_to_add = required_columns - current_columns
+    try:
+        worksheet.add_cols(columns_to_add)
+    except AttributeError:
+        # Compatibility fallback for older gspread versions.
+        worksheet.resize(cols=required_columns)
+
+
 def _entry_value_for_header(entry: dict, normalized_header: str):
     aliases = {
         "dob": "birth_date",
@@ -81,14 +95,29 @@ def append_confirmed_entries_if_missing(
             for h in required_extra
             if _normalize_header(h) not in normalized_base
         ]
+
+        _ensure_column_capacity(worksheet, len(headers))
         worksheet.append_row(headers)
     else:
         normalized = [_normalize_header(h) for h in headers]
-        for extra in required_extra:
-            if extra not in normalized:
-                headers.append(extra)
-                worksheet.update_cell(1, len(headers), extra)
-                normalized.append(extra)
+        missing_headers = [
+            extra
+            for extra in required_extra
+            if extra not in normalized
+        ]
+
+        # Google Sheets worksheets have a fixed grid size. The legacy OUTPUT
+        # sheet currently has 27 columns, so writing AB1 (column 28) fails
+        # unless the grid is expanded first.
+        _ensure_column_capacity(
+            worksheet,
+            len(headers) + len(missing_headers),
+        )
+
+        for extra in missing_headers:
+            headers.append(extra)
+            worksheet.update_cell(1, len(headers), extra)
+            normalized.append(extra)
 
     normalized_headers = [_normalize_header(h) for h in headers]
     order_col = normalized_headers.index("order_id") + 1
