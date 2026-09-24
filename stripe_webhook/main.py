@@ -95,8 +95,23 @@ def stripe_webhook(request: Request):
     except stripe.error.SignatureVerificationError:
         return jsonify({"error": "Invalid signature"}), 400
 
+    # Recent stripe-python versions return Stripe Event/StripeObject
+    # instances rather than plain dictionaries. Convert them before
+    # using dict-style access such as .get().
+    if not isinstance(event, dict):
+        if hasattr(event, "to_dict_recursive"):
+            event = event.to_dict_recursive()
+        elif hasattr(event, "to_dict"):
+            event = event.to_dict()
+
     event_type = str(event.get("type", "") or "")
     session = event["data"]["object"]
+
+    if not isinstance(session, dict):
+        if hasattr(session, "to_dict_recursive"):
+            session = session.to_dict_recursive()
+        elif hasattr(session, "to_dict"):
+            session = session.to_dict()
 
     handled_success_events = {
         "checkout.session.completed",
