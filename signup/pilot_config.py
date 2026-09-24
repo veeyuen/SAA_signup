@@ -64,6 +64,16 @@ def _as_int_or_none(value) -> int | None:
     return int(number)
 
 
+def _gender_key(value) -> str:
+    """Normalize common gender labels/codes used by the app/config sheets."""
+    raw = _clean(value).casefold()
+    if raw in {"m", "male", "men", "boy", "boys"}:
+        return "M"
+    if raw in {"f", "female", "women", "woman", "girl", "girls"}:
+        return "F"
+    return raw.upper()
+
+
 def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out.columns = [str(c).strip().upper() for c in out.columns]
@@ -380,9 +390,8 @@ class PilotConfigRepository:
             & events["ACTIVE"].map(lambda x: _as_bool(x, False))
         )
         if _clean(gender):
-            mask &= events["GENDER"].map(lambda x: _clean(x).casefold()).eq(
-                _clean(gender).casefold()
-            )
+            requested_gender = _gender_key(gender)
+            mask &= events["GENDER"].map(_gender_key).eq(requested_gender)
 
         offered_codes = []
         seen = set()
@@ -472,11 +481,11 @@ class PilotConfigRepository:
             ],
         )
 
+        requested_gender = _gender_key(gender)
+
         matches = df[
             df["COMPETITION_ID"].map(_clean).eq(_clean(competition_id))
-            & df["GENDER"].map(lambda x: _clean(x).casefold()).eq(
-                _clean(gender).casefold()
-            )
+            & df["GENDER"].map(_gender_key).eq(requested_gender)
             & df["DIVISION_CODE"].map(_clean).eq(_clean(division_code))
             & df["ACTIVE"].map(lambda x: _as_bool(x, False))
         ]

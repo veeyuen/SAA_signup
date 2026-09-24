@@ -703,10 +703,14 @@ event_division = c11.selectbox(
 )
 
 try:
-    event_opts_raw = pilot_config.event_options(
-        competition_id=selected_competition_id,
-        gender=gender,
-        division_code=event_division if _active_division_keys else "",
+    event_opts_raw = (
+        pilot_config.event_options(
+            competition_id=selected_competition_id,
+            gender=gender,
+            division_code=event_division if _active_division_keys else "",
+        )
+        if gender_ok and _active_division_keys
+        else []
     )
 except PilotConfigError as exc:
     st.error(f"Configuration error: {exc}")
@@ -734,7 +738,9 @@ selected_events = c12.multiselect(
 # then determine the configured event list.
 event_ok = bool(event_opts) and len(selected_events) > 0
 
-if birth_ok and not _active_division_keys:
+if not gender_ok:
+    st.info("Select Gender to load the available events.")
+elif birth_ok and not _active_division_keys:
     athlete_age = pilot_config.age_on_date(
         birth_date,
         selected_competition.competition_start_at,
@@ -754,7 +760,12 @@ if birth_ok and not _active_division_keys:
         "No eligible divisions with configured events are available for "
         f"{age_text}{date_text}."
     )
-elif not event_ok:
+elif _active_division_keys and not event_names:
+    st.warning(
+        "No active events are configured for "
+        f"{gender} / {event_division} in {selected_competition.competition_name}."
+    )
+elif not selected_events:
     st.warning("Please select at least one event for the selected division.")
 
 
