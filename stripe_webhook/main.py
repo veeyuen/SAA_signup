@@ -253,7 +253,30 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
         or metadata.get("target_entry_fee", "")
         or ""
     ).strip()
+    refund_group_id = str(
+        refund_row.get("REFUND_GROUP_ID", "")
+        or metadata.get("refund_group_id", "")
+        or ""
+    ).strip()
+    refund_sequence = str(
+        refund_row.get("REFUND_SEQUENCE", "")
+        or metadata.get("refund_sequence", "")
+        or ""
+    ).strip()
+    refund_group_total = str(
+        refund_row.get("REFUND_GROUP_TOTAL", "")
+        or metadata.get("refund_group_total", "")
+        or ""
+    ).strip()
+    source_payment_purpose = str(
+        refund_row.get("SOURCE_PAYMENT_PURPOSE", "")
+        or metadata.get("source_payment_purpose", "")
+        or ""
+    ).strip()
     is_fee_decrease_refund = refund_type == "FEE_DECREASE"
+    is_split_withdrawal = (
+        refund_type == "WITHDRAWAL_SPLIT" and bool(refund_group_id)
+    )
 
     stripe_status = str(refund_obj.get("status", "") or "").strip().lower()
     failure_reason = str(refund_obj.get("failure_reason", "") or "").strip()
@@ -261,13 +284,20 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
 
     if event_type == "refund.failed" or stripe_status in {"failed", "canceled"}:
         internal_status = "REFUND_FAILED"
-        entry_payment_status = "PAYMENT_COMPLETE"
+        entry_payment_status = (
+            "REFUND_STARTED" if is_split_withdrawal else "PAYMENT_COMPLETE"
+        )
     elif stripe_status == "succeeded":
         internal_status = "REFUND_COMPLETE"
         # A fee decrease leaves the registration active and fully settled at
-        # its revised amount. Withdrawal refunds keep REFUND_COMPLETE.
+        # its revised amount. A split withdrawal is complete only when every
+        # child allocation in the group has completed.
         entry_payment_status = (
-            "PAYMENT_COMPLETE" if is_fee_decrease_refund else "REFUND_COMPLETE"
+            "PAYMENT_COMPLETE"
+            if is_fee_decrease_refund
+            else "REFUND_STARTED"
+            if is_split_withdrawal
+            else "REFUND_COMPLETE"
         )
     else:
         internal_status = "REFUND_STARTED"
@@ -283,6 +313,10 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
         "REFUND_TYPE": refund_type,
         "ORIGINAL_ENTRY_FEE": original_entry_fee,
         "TARGET_ENTRY_FEE": target_entry_fee,
+        "REFUND_GROUP_ID": refund_group_id,
+        "REFUND_SEQUENCE": refund_sequence,
+        "REFUND_GROUP_TOTAL": refund_group_total,
+        "SOURCE_PAYMENT_PURPOSE": source_payment_purpose,
         "STRIPE_REFUND_ID": stripe_refund_id,
         "STRIPE_STATUS": stripe_status,
         "FAILURE_REASON": failure_reason,
@@ -301,6 +335,30 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
 
     try:
         store.update_by_id("REFUNDS", refund_id, updates)
+
+        group_completed_now = False
+        group_rows: list[dict[str, str]] = []
+        if is_split_withdrawal:
+            group_rows = [
+                row
+                for row in store.list_rows("REFUNDS")
+                if str(row.get("REFUND_GROUP_ID", "") or "").strip()
+                == refund_group_id
+            ]
+            if not group_rows:
+                raise TransactionStoreError(
+                    f"Refund group {refund_group_id} could not be reloaded."
+                )
+            group_completed_now = all(
+                str(row.get("STATUS", "") or "").strip().upper()
+                == "REFUND_COMPLETE"
+                for row in group_rows
+            )
+            entry_payment_status = (
+                "REFUND_COMPLETE"
+                if group_completed_now
+                else "REFUND_STARTED"
+            )
 
         fee_decrease_applied_now = False
         entry_fee_before = ""
@@ -385,6 +443,87 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
                     "REASON": f"Stripe refund {stripe_refund_id} completed",
                 }
             )
+
+        if is_split_withdrawal and group_completed_now:
+            # Stripe can deliver refund.created/refund.updated close together, and
+            # separate child refunds in the same group can also complete nearly
+            # concurrently. Elect exactly one completed child as the business-level
+            # completion-audit leader using the latest persisted completion/update
+            # timestamp (then sequence/id as deterministic tie-breakers). This avoids
+            # the duplicate business audit observed earlier with fee-decrease webhooks.
+            completion_leader = max(
+                group_rows,
+                key=lambda row: (
+                    str(
+                        row.get("COMPLETED_AT", "")
+                        or row.get("UPDATED_AT", "")
+                        or ""
+                    ).strip(),
+                    str(row.get("REFUND_SEQUENCE", "") or "").strip(),
+                    str(row.get("REFUND_ID", "") or "").strip(),
+                ),
+            )
+            completion_leader_id = str(
+                completion_leader.get("REFUND_ID", "") or ""
+            ).strip()
+
+            if refund_id == completion_leader_id:
+                try:
+                    computed_group_total = sum(
+                        (
+                            Decimal(
+                                str(row.get("APPROVED_AMOUNT", "") or "0")
+                            )
+                            for row in group_rows
+                        ),
+                        Decimal("0"),
+                    )
+                    group_total_value = (
+                        refund_group_total
+                        or f"{computed_group_total:.2f}"
+                    )
+                except Exception:
+                    group_total_value = refund_group_total
+
+                store.append_audit_log(
+                    {
+                        "AUDIT_ID": f"AUD-RFG-COMPLETE-{refund_group_id}",
+                        "TIMESTAMP": now,
+                        "USER_ID": "SYSTEM_STRIPE",
+                        "USER_EMAIL": "",
+                        "ACTION": "MULTI_PAYMENT_WITHDRAWAL_REFUND_COMPLETED",
+                        "ENTITY_TYPE": "REFUND_GROUP",
+                        "ENTITY_ID": refund_group_id,
+                        "ORDER_ID": order_id,
+                        "BEFORE_JSON": "{}",
+                        "AFTER_JSON": json.dumps(
+                            {
+                                "REFUND_GROUP_ID": refund_group_id,
+                                "TOTAL": group_total_value,
+                                "ALLOCATIONS": [
+                                    {
+                                        "REFUND_ID": str(
+                                            row.get("REFUND_ID", "") or ""
+                                        ).strip(),
+                                        "PAYMENT_ID": str(
+                                            row.get("PAYMENT_ID", "") or ""
+                                        ).strip(),
+                                        "AMOUNT": str(
+                                            row.get("APPROVED_AMOUNT", "") or ""
+                                        ).strip(),
+                                        "STRIPE_REFUND_ID": str(
+                                            row.get("STRIPE_REFUND_ID", "") or ""
+                                        ).strip(),
+                                    }
+                                    for row in group_rows
+                                ],
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        "REASON": "All Stripe refund allocations completed",
+                    }
+                )
 
         after = dict(before)
         after.update(updates)

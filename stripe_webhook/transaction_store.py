@@ -129,6 +129,10 @@ SHEETS: dict[str, list[str]] = {
         "REFUND_TYPE",
         "ORIGINAL_ENTRY_FEE",
         "TARGET_ENTRY_FEE",
+        "REFUND_GROUP_ID",
+        "REFUND_SEQUENCE",
+        "REFUND_GROUP_TOTAL",
+        "SOURCE_PAYMENT_PURPOSE",
         "STATUS",
         "REQUESTED_BY_USER_ID",
         "REQUESTED_BY_EMAIL",
@@ -597,6 +601,58 @@ class TransactionSheetStore:
                         f"Entry {entry_id} already has an open refund request."
                     )
         return self.append_if_missing("REFUNDS", row)
+
+    def create_refund_group(self, rows: list[dict[str, Any]]) -> int:
+        """Record a multi-payment refund group using idempotent child rows.
+
+        Google Sheets does not provide a cross-row transaction. This method first
+        validates that the entry has no other open refund, then appends each child
+        allocation idempotently. Retrying with the same REFUND_ID values fills in
+        only missing child rows.
+        """
+        if not rows:
+            raise TransactionStoreError("Refund group contains no allocations.")
+
+        entry_ids = {
+            _clean(row.get("ENTRY_ID"))
+            for row in rows
+            if _clean(row.get("ENTRY_ID"))
+        }
+        if len(entry_ids) != 1:
+            raise TransactionStoreError(
+                "All refund-group allocations must belong to one EVENT_ENTRY."
+            )
+        entry_id = next(iter(entry_ids), "")
+
+        group_ids = {
+            _clean(row.get("REFUND_GROUP_ID"))
+            for row in rows
+            if _clean(row.get("REFUND_GROUP_ID"))
+        }
+        if len(group_ids) != 1:
+            raise TransactionStoreError(
+                "All refund-group allocations must share one REFUND_GROUP_ID."
+            )
+
+        existing = self.list_rows("REFUNDS")
+        open_statuses = {
+            "REFUND_REQUESTED",
+            "REFUND_STARTED",
+            "REFUND_FAILED",
+        }
+        incoming_ids = {_clean(row.get("REFUND_ID")) for row in rows}
+        for existing_row in existing:
+            if (
+                _clean(existing_row.get("ENTRY_ID")) == entry_id
+                and _normalise(existing_row.get("STATUS")) in open_statuses
+                and _clean(existing_row.get("REFUND_ID")) not in incoming_ids
+            ):
+                raise TransactionStoreError(
+                    f"Entry {entry_id} already has an open refund request."
+                )
+
+        return self.append_many_if_missing("REFUNDS", rows)
+
 
     def persist_order_bundle(
         self,

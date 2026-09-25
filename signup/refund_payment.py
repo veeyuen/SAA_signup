@@ -46,6 +46,10 @@ def create_stripe_refund(
     refund_type: str = "WITHDRAWAL",
     original_entry_fee: str | Decimal = "",
     target_entry_fee: str | Decimal = "",
+    refund_group_id: str = "",
+    refund_sequence: str | int = "",
+    refund_group_total: str | Decimal = "",
+    source_payment_purpose: str = "",
 ) -> dict:
     """Create one Stripe refund idempotently for an approved SAA refund.
 
@@ -90,6 +94,10 @@ def create_stripe_refund(
                 "refund_type": str(refund_type or "WITHDRAWAL").strip().upper(),
                 "original_entry_fee": str(original_entry_fee or "").strip(),
                 "target_entry_fee": str(target_entry_fee or "").strip(),
+                "refund_group_id": str(refund_group_id or "").strip(),
+                "refund_sequence": str(refund_sequence or "").strip(),
+                "refund_group_total": str(refund_group_total or "").strip(),
+                "source_payment_purpose": str(source_payment_purpose or "").strip(),
             },
             idempotency_key=f"saa-refund-{refund_id}",
         )

@@ -85,7 +85,7 @@ try:
     # Include the transaction schema generation in the cache key. This forces a
     # one-time resource refresh after schema-bearing deployments while retaining
     # the quota savings of cache_resource during normal widget reruns.
-    google_client, store = _admin_resources("phase3d-b-fee-increase")
+    google_client, store = _admin_resources("phase3d-c-multi-payment-refunds")
 except Exception as exc:
     st.error(f"Could not initialise admin storage: {type(exc).__name__}: {exc}")
     st.stop()
@@ -109,6 +109,129 @@ def _to_decimal(value, default: str = "0") -> Decimal:
         return Decimal(_clean(value) or default)
     except (InvalidOperation, ValueError):
         return Decimal(default)
+
+
+def _withdrawal_funding_sources(
+    *,
+    entry: dict,
+    original_payment: dict,
+    additional_payments: list[dict],
+    refunds: list[dict],
+) -> list[dict]:
+    """Return refundable funding sources for one entry, oldest source first.
+
+    The original payment funds the current entry fee less completed top-ups.
+    Completed fee-increase payments fund the rest. Fee-decrease refunds are
+    already reflected in the current ENTRY_FEE and in each source payment's
+    remaining Stripe-refundable balance, so they are not subtracted twice.
+    """
+    entry_id = _clean(entry.get("ENTRY_ID"))
+    current_fee = _to_decimal(entry.get("ENTRY_FEE"))
+
+    completed_topups = [
+        p for p in additional_payments
+        if _clean(p.get("ENTRY_ID")) == entry_id
+        and _clean(p.get("DISPLAY_STATUS")).upper() == "PAYMENT_COMPLETE"
+        and _clean(p.get("STRIPE_PAYMENT_INTENT_ID"))
+    ]
+    completed_topups.sort(
+        key=lambda p: (
+            _clean(p.get("PAID_AT")) or _clean(p.get("CREATED_AT")),
+            _clean(p.get("PAYMENT_ID")),
+        )
+    )
+    topup_total = sum(
+        (_to_decimal(p.get("AMOUNT")) for p in completed_topups),
+        Decimal("0"),
+    )
+    original_contribution = max(Decimal("0"), current_fee - topup_total)
+
+    raw_sources: list[tuple[dict, Decimal, str]] = [
+        (original_payment, original_contribution, "ORIGINAL")
+    ]
+    raw_sources.extend(
+        (p, _to_decimal(p.get("AMOUNT")), "FEE_INCREASE")
+        for p in completed_topups
+    )
+
+    committed_statuses = {"REFUND_STARTED", "REFUND_COMPLETE"}
+    withdrawal_types = {"WITHDRAWAL", "WITHDRAWAL_SPLIT"}
+
+    sources: list[dict] = []
+    for source_payment, base_contribution, purpose in raw_sources:
+        payment_id = _clean(source_payment.get("PAYMENT_ID"))
+        payment_intent_id = _clean(source_payment.get("STRIPE_PAYMENT_INTENT_ID"))
+        if not payment_id or not payment_intent_id or base_contribution <= 0:
+            continue
+
+        source_payment_amount = _to_decimal(source_payment.get("AMOUNT"))
+        payment_committed = sum(
+            (
+                _to_decimal(r.get("APPROVED_AMOUNT"))
+                for r in refunds
+                if _clean(r.get("PAYMENT_ID")) == payment_id
+                and _clean(r.get("STATUS")).upper() in committed_statuses
+            ),
+            Decimal("0"),
+        )
+        entry_withdrawal_committed = sum(
+            (
+                _to_decimal(r.get("APPROVED_AMOUNT"))
+                for r in refunds
+                if _clean(r.get("PAYMENT_ID")) == payment_id
+                and _clean(r.get("ENTRY_ID")) == entry_id
+                and _clean(r.get("STATUS")).upper() in committed_statuses
+                and (_clean(r.get("REFUND_TYPE")).upper() or "WITHDRAWAL")
+                in withdrawal_types
+            ),
+            Decimal("0"),
+        )
+
+        payment_remaining = max(
+            Decimal("0"),
+            source_payment_amount - payment_committed,
+        )
+        contribution_remaining = max(
+            Decimal("0"),
+            base_contribution - entry_withdrawal_committed,
+        )
+        available = min(payment_remaining, contribution_remaining)
+        if available <= 0:
+            continue
+
+        sources.append(
+            {
+                "PAYMENT_ID": payment_id,
+                "STRIPE_PAYMENT_INTENT_ID": payment_intent_id,
+                "SOURCE_PAYMENT_PURPOSE": purpose,
+                "AVAILABLE_AMOUNT": available,
+            }
+        )
+    return sources
+
+
+def _allocate_refund_across_sources(
+    sources: list[dict],
+    requested_amount: Decimal,
+) -> list[dict]:
+    remaining = requested_amount
+    allocations: list[dict] = []
+    for source in sources:
+        if remaining <= 0:
+            break
+        available = _to_decimal(source.get("AVAILABLE_AMOUNT"))
+        amount = min(available, remaining)
+        if amount <= 0:
+            continue
+        allocation = dict(source)
+        allocation["ALLOCATION_AMOUNT"] = amount
+        allocations.append(allocation)
+        remaining -= amount
+    if remaining > 0:
+        raise TransactionStoreError(
+            f"Refund allocation is short by SGD {remaining:.2f}."
+        )
+    return allocations
 
 
 def _audit(*, action: str, entity_type: str, entity_id: str, order_id: str, before: dict, after: dict, reason: str) -> None:
@@ -1333,12 +1456,29 @@ entry_refunds = [
     r for r in order_refunds
     if _clean(r.get("ENTRY_ID")) == selected_entry_id
 ]
-open_refund = next(
-    (
-        r for r in entry_refunds
-        if _clean(r.get("STATUS")).upper() in {"REFUND_REQUESTED", "REFUND_STARTED"}
-    ),
-    None,
+open_refund_rows = [
+    r for r in entry_refunds
+    if _clean(r.get("STATUS")).upper() in {"REFUND_REQUESTED", "REFUND_STARTED"}
+    or (
+        _clean(r.get("STATUS")).upper() == "REFUND_FAILED"
+        and _clean(r.get("REFUND_GROUP_ID"))
+    )
+]
+open_refund = open_refund_rows[0] if open_refund_rows else None
+open_refund_group_id = _clean(open_refund.get("REFUND_GROUP_ID")) if open_refund else ""
+open_refund_group = (
+    sorted(
+        [
+            r for r in entry_refunds
+            if _clean(r.get("REFUND_GROUP_ID")) == open_refund_group_id
+        ],
+        key=lambda r: (
+            int(_to_decimal(r.get("REFUND_SEQUENCE"))) if _clean(r.get("REFUND_SEQUENCE")) else 0,
+            _clean(r.get("REFUND_ID")),
+        ),
+    )
+    if open_refund_group_id
+    else []
 )
 
 payment_amount = _to_decimal(payment.get("AMOUNT"))
@@ -1388,10 +1528,20 @@ entry_remaining = (
 max_new_refund = min(payment_remaining, entry_remaining)
 
 if open_refund:
-    st.warning(
-        f"Open refund: {_clean(open_refund.get('REFUND_ID'))} "
-        f"({_clean(open_refund.get('STATUS'))})."
-    )
+    if open_refund_group_id:
+        group_total = sum(
+            (_to_decimal(r.get("REQUESTED_AMOUNT")) for r in open_refund_group),
+            Decimal("0"),
+        )
+        st.warning(
+            f"Open multi-payment refund group: {open_refund_group_id} "
+            f"(SGD {group_total:.2f} across {len(open_refund_group)} Stripe payments)."
+        )
+    else:
+        st.warning(
+            f"Open refund: {_clean(open_refund.get('REFUND_ID'))} "
+            f"({_clean(open_refund.get('STATUS'))})."
+        )
 
 # ---------------------------------------------------------------------------
 # 1. Record a new refund request
@@ -1406,6 +1556,16 @@ _completed_fee_increase_payments = [
     if _clean(p.get("ENTRY_ID")) == selected_entry_id
     and _clean(p.get("DISPLAY_STATUS")).upper() == "PAYMENT_COMPLETE"
 ]
+_withdrawal_sources = _withdrawal_funding_sources(
+    entry=entry,
+    original_payment=payment,
+    additional_payments=additional_payments,
+    refunds=refunds,
+)
+_multi_source_refundable = sum(
+    (_to_decimal(source.get("AVAILABLE_AMOUNT")) for source in _withdrawal_sources),
+    Decimal("0"),
+)
 
 if not is_stripe:
     st.caption("This order is not a Stripe-paid order; Stripe refunds do not apply.")
@@ -1419,12 +1579,151 @@ elif open_refund is not None:
 elif not entry_withdrawn:
     st.caption("Withdraw the event entry before recording a withdrawal refund request.")
 elif _completed_fee_increase_payments:
-    st.warning(
-        "This withdrawn entry was funded by the original Stripe payment plus one or more "
-        "additional fee-increase payments. A withdrawal refund must therefore be split "
-        "across the contributing Stripe payments. Phase 3D-C will perform that allocation; "
-        "no potentially incomplete refund request is created here."
-    )
+    if _multi_source_refundable <= 0:
+        st.success("This entry has no remaining refundable entry fee.")
+    else:
+        st.info(
+            "This entry was funded by more than one Stripe payment. Phase 3D-C will create "
+            "one controlled refund allocation per contributing PaymentIntent and keep them "
+            "under a single refund group."
+        )
+        source_preview = pd.DataFrame(
+            [
+                {
+                    "Source": source.get("SOURCE_PAYMENT_PURPOSE"),
+                    "Payment ID": source.get("PAYMENT_ID"),
+                    "Refundable (SGD)": f"{_to_decimal(source.get('AVAILABLE_AMOUNT')):.2f}",
+                }
+                for source in _withdrawal_sources
+            ]
+        )
+        st.dataframe(source_preview, use_container_width=True, hide_index=True)
+
+        with st.form("multi_payment_refund_request"):
+            requested_amount_text = st.text_input(
+                "Requested refund amount (SGD)",
+                value=f"{_multi_source_refundable:.2f}",
+            )
+            refund_reason = st.text_area("Refund reason", placeholder="Required")
+            request_clicked = st.form_submit_button(
+                "Record multi-payment refund request",
+                type="primary",
+            )
+
+        if request_clicked:
+            amount = _to_decimal(requested_amount_text, "-1")
+            if amount <= 0:
+                st.error("Requested refund amount must be greater than zero.")
+            elif amount > _multi_source_refundable:
+                st.error(
+                    "Requested refund amount exceeds the total refundable amount across "
+                    f"the contributing Stripe payments (SGD {_multi_source_refundable:.2f})."
+                )
+            elif not refund_reason.strip():
+                st.error("A refund reason is required.")
+            else:
+                try:
+                    allocations = _allocate_refund_across_sources(
+                        _withdrawal_sources,
+                        amount,
+                    )
+                except TransactionStoreError as exc:
+                    st.error(str(exc))
+                else:
+                    timestamp = _now()
+                    group_id = _new_id("RFG")
+                    currency = (pilot_config.system_value("CURRENCY", "SGD") or "SGD").upper()
+                    refund_rows = []
+                    for sequence, allocation in enumerate(allocations, start=1):
+                        child_refund_id = _new_id("RFD")
+                        refund_rows.append(
+                            {
+                                "REFUND_ID": child_refund_id,
+                                "PAYMENT_ID": _clean(allocation.get("PAYMENT_ID")),
+                                "ORDER_ID": selected_order_id,
+                                "ENTRY_ID": selected_entry_id,
+                                "REGISTRATION_ID": _clean(entry.get("REGISTRATION_ID")),
+                                "REQUESTED_AMOUNT": f"{_to_decimal(allocation.get('ALLOCATION_AMOUNT')):.2f}",
+                                "APPROVED_AMOUNT": "",
+                                "CURRENCY": currency,
+                                "REASON": refund_reason.strip(),
+                                "REFUND_TYPE": "WITHDRAWAL_SPLIT",
+                                "ORIGINAL_ENTRY_FEE": "",
+                                "TARGET_ENTRY_FEE": "",
+                                "REFUND_GROUP_ID": group_id,
+                                "REFUND_SEQUENCE": str(sequence),
+                                "REFUND_GROUP_TOTAL": f"{amount:.2f}",
+                                "SOURCE_PAYMENT_PURPOSE": _clean(
+                                    allocation.get("SOURCE_PAYMENT_PURPOSE")
+                                ),
+                                "STATUS": "REFUND_REQUESTED",
+                                "REQUESTED_BY_USER_ID": user.user_id,
+                                "REQUESTED_BY_EMAIL": user_email,
+                                "REQUESTED_AT": timestamp,
+                                "APPROVED_BY_USER_ID": "",
+                                "APPROVED_AT": "",
+                                "DECIDED_BY_USER_ID": "",
+                                "DECIDED_AT": "",
+                                "DECISION_REASON": "",
+                                "STRIPE_REFUND_ID": "",
+                                "STRIPE_STATUS": "",
+                                "COMPLETED_AT": "",
+                                "FAILURE_REASON": "",
+                                "UPDATED_AT": timestamp,
+                            }
+                        )
+
+                    try:
+                        store.create_refund_group(refund_rows)
+                        store.update_by_id(
+                            "EVENT_ENTRIES",
+                            selected_entry_id,
+                            {
+                                "PAYMENT_STATUS": "REFUND_REQUESTED",
+                                "PAYMENT_STATUS_CHANGED_AT": timestamp,
+                                "UPDATED_AT": timestamp,
+                            },
+                        )
+                        sync_output_entry(
+                            gc=google_client,
+                            output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                            output_worksheet=OUTPUT_WORKSHEET,
+                            entry=entry,
+                            payment_status="REFUND_REQUESTED",
+                        )
+                        _audit(
+                            action="MULTI_PAYMENT_REFUND_REQUESTED",
+                            entity_type="REFUND_GROUP",
+                            entity_id=group_id,
+                            order_id=selected_order_id,
+                            before={},
+                            after={
+                                "REFUND_GROUP_ID": group_id,
+                                "REQUESTED_AMOUNT": f"{amount:.2f}",
+                                "ALLOCATIONS": [
+                                    {
+                                        "REFUND_ID": row["REFUND_ID"],
+                                        "PAYMENT_ID": row["PAYMENT_ID"],
+                                        "AMOUNT": row["REQUESTED_AMOUNT"],
+                                        "SOURCE_PAYMENT_PURPOSE": row["SOURCE_PAYMENT_PURPOSE"],
+                                    }
+                                    for row in refund_rows
+                                ],
+                            },
+                            reason=refund_reason.strip(),
+                        )
+                    except Exception as exc:
+                        st.error(
+                            "Could not record the multi-payment refund group: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    else:
+                        _load_admin_rows.clear()
+                        st.success(
+                            f"Refund group {group_id} recorded for SGD {amount:.2f} across "
+                            f"{len(refund_rows)} Stripe payments. No funds have moved yet."
+                        )
+                        st.rerun()
 elif max_new_refund <= 0:
     st.success("This entry has no remaining refundable entry fee.")
 else:
@@ -1513,7 +1812,314 @@ else:
 # ---------------------------------------------------------------------------
 # 2. Decide a pending refund request
 # ---------------------------------------------------------------------------
-if open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_REQUESTED":
+if open_refund_group_id:
+    group_total = sum(
+        (_to_decimal(r.get("REQUESTED_AMOUNT")) for r in open_refund_group),
+        Decimal("0"),
+    )
+    group_statuses = {
+        _clean(r.get("STATUS")).upper()
+        for r in open_refund_group
+    }
+    group_has_moved_funds = bool(
+        group_statuses & {"REFUND_STARTED", "REFUND_COMPLETE"}
+    )
+    group_pending_rows = [
+        r for r in open_refund_group
+        if _clean(r.get("STATUS")).upper()
+        in {"REFUND_REQUESTED", "REFUND_FAILED"}
+    ]
+
+    st.markdown("#### Multi-payment refund decision")
+    st.write(
+        f"Refund group: **{open_refund_group_id}**  |  "
+        f"Total: **SGD {group_total:.2f}**  |  "
+        f"Allocations: **{len(open_refund_group)}**"
+    )
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Sequence": _clean(row.get("REFUND_SEQUENCE")),
+                    "Refund ID": _clean(row.get("REFUND_ID")),
+                    "Source": _clean(row.get("SOURCE_PAYMENT_PURPOSE")),
+                    "Payment ID": _clean(row.get("PAYMENT_ID")),
+                    "Amount (SGD)": f"{_to_decimal(row.get('REQUESTED_AMOUNT')):.2f}",
+                    "Status": _clean(row.get("STATUS")),
+                    "Stripe Refund": _clean(row.get("STRIPE_REFUND_ID")),
+                }
+                for row in open_refund_group
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        "Approval sends one idempotent Stripe refund per funding PaymentIntent. "
+        "The entry becomes REFUND_COMPLETE only after every allocation succeeds."
+    )
+
+    with st.form("multi_payment_refund_decision"):
+        group_decision_reason = st.text_area(
+            "Decision note",
+            placeholder="Required for rejection; optional for approval",
+        )
+        confirm_group_send = st.checkbox(
+            "I confirm that approval will send every remaining allocation to Stripe."
+        )
+        approve_group_clicked = st.form_submit_button(
+            "Retry remaining allocations"
+            if group_has_moved_funds
+            else "Approve and send group to Stripe",
+            type="primary",
+        )
+        reject_group_clicked = st.form_submit_button(
+            "Reject refund group",
+            disabled=group_has_moved_funds,
+        )
+
+    if reject_group_clicked:
+        if not group_decision_reason.strip():
+            st.error("A rejection reason is required.")
+        else:
+            timestamp = _now()
+            for child in open_refund_group:
+                if _clean(child.get("STATUS")).upper() not in {
+                    "REFUND_REQUESTED",
+                    "REFUND_FAILED",
+                }:
+                    continue
+                store.update_by_id(
+                    "REFUNDS",
+                    _clean(child.get("REFUND_ID")),
+                    {
+                        "STATUS": "REFUND_REJECTED",
+                        "DECIDED_BY_USER_ID": user.user_id,
+                        "DECIDED_AT": timestamp,
+                        "DECISION_REASON": group_decision_reason.strip(),
+                        "UPDATED_AT": timestamp,
+                    },
+                )
+            store.update_by_id(
+                "EVENT_ENTRIES",
+                selected_entry_id,
+                {
+                    "PAYMENT_STATUS": "PAYMENT_COMPLETE",
+                    "PAYMENT_STATUS_CHANGED_AT": timestamp,
+                    "UPDATED_AT": timestamp,
+                },
+            )
+            sync_output_entry(
+                gc=google_client,
+                output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                output_worksheet=OUTPUT_WORKSHEET,
+                entry=entry,
+                payment_status="PAYMENT_COMPLETE",
+            )
+            _audit(
+                action="MULTI_PAYMENT_REFUND_REJECTED",
+                entity_type="REFUND_GROUP",
+                entity_id=open_refund_group_id,
+                order_id=selected_order_id,
+                before={
+                    "ALLOCATIONS": [
+                        {
+                            "REFUND_ID": _clean(r.get("REFUND_ID")),
+                            "STATUS": _clean(r.get("STATUS")),
+                        }
+                        for r in open_refund_group
+                    ]
+                },
+                after={"STATUS": "REFUND_REJECTED"},
+                reason=group_decision_reason.strip(),
+            )
+            _load_admin_rows.clear()
+            st.success("Refund group rejected. No funds were moved.")
+            st.rerun()
+
+    if approve_group_clicked:
+        if not confirm_group_send:
+            st.error("Please confirm that the refund group should be sent to Stripe.")
+        elif not group_pending_rows:
+            st.info("There are no remaining allocations to send.")
+        else:
+            timestamp = _now()
+            stripe_secret_key = str(
+                st.secrets.get("STRIPE_SECRET_KEY", "") or ""
+            ).strip()
+            payment_by_id = {
+                _clean(p.get("PAYMENT_ID")): p
+                for p in order_payments
+                if _clean(p.get("PAYMENT_ID"))
+            }
+            status_by_refund_id = {
+                _clean(r.get("REFUND_ID")): _clean(r.get("STATUS")).upper()
+                for r in open_refund_group
+            }
+            errors: list[str] = []
+            created_refunds: list[str] = []
+
+            for child in group_pending_rows:
+                refund_id = _clean(child.get("REFUND_ID"))
+                source_payment_id = _clean(child.get("PAYMENT_ID"))
+                source_payment = payment_by_id.get(source_payment_id, {})
+                payment_intent_id = _clean(
+                    source_payment.get("STRIPE_PAYMENT_INTENT_ID")
+                )
+                if not payment_intent_id:
+                    errors.append(
+                        f"{refund_id}: source payment {source_payment_id} "
+                        "has no Stripe PaymentIntent ID"
+                    )
+                    continue
+
+                child_amount = _to_decimal(child.get("REQUESTED_AMOUNT"))
+                try:
+                    stripe_result = create_stripe_refund(
+                        secret_key=stripe_secret_key,
+                        refund_id=refund_id,
+                        payment_intent_id=payment_intent_id,
+                        amount=child_amount,
+                        currency=_clean(child.get("CURRENCY")) or "SGD",
+                        entry_id=selected_entry_id,
+                        registration_id=_clean(entry.get("REGISTRATION_ID")),
+                        order_id=selected_order_id,
+                        payment_id=source_payment_id,
+                        approved_by_user_id=user.user_id,
+                        approved_at=timestamp,
+                        refund_type="WITHDRAWAL_SPLIT",
+                        refund_group_id=open_refund_group_id,
+                        refund_sequence=_clean(child.get("REFUND_SEQUENCE")),
+                        refund_group_total=f"{group_total:.2f}",
+                        source_payment_purpose=_clean(
+                            child.get("SOURCE_PAYMENT_PURPOSE")
+                        ),
+                    )
+                except StripeRefundError as exc:
+                    try:
+                        store.update_by_id(
+                            "REFUNDS",
+                            refund_id,
+                            {
+                                "FAILURE_REASON": str(exc),
+                                "UPDATED_AT": timestamp,
+                            },
+                        )
+                    except Exception:
+                        pass
+                    errors.append(f"{refund_id}: {exc}")
+                    continue
+
+                stripe_status = _clean(stripe_result.get("status")).lower()
+                technical_failure = stripe_status in {"failed", "canceled"}
+                immediate_success = stripe_status == "succeeded"
+                child_status = (
+                    "REFUND_FAILED"
+                    if technical_failure
+                    else "REFUND_COMPLETE"
+                    if immediate_success
+                    else "REFUND_STARTED"
+                )
+                child_updates = {
+                    "APPROVED_AMOUNT": f"{child_amount:.2f}",
+                    "APPROVED_BY_USER_ID": user.user_id,
+                    "APPROVED_AT": timestamp,
+                    "DECIDED_BY_USER_ID": user.user_id,
+                    "DECIDED_AT": timestamp,
+                    "DECISION_REASON": group_decision_reason.strip(),
+                    "STATUS": child_status,
+                    "STRIPE_REFUND_ID": _clean(
+                        stripe_result.get("refund_id")
+                    ),
+                    "STRIPE_STATUS": stripe_status,
+                    "FAILURE_REASON": _clean(
+                        stripe_result.get("failure_reason")
+                    ),
+                    "COMPLETED_AT": timestamp if immediate_success else "",
+                    "UPDATED_AT": timestamp,
+                }
+                store.update_by_id(
+                    "REFUNDS",
+                    refund_id,
+                    child_updates,
+                )
+                status_by_refund_id[refund_id] = child_status
+                if _clean(stripe_result.get("refund_id")):
+                    created_refunds.append(
+                        _clean(stripe_result.get("refund_id"))
+                    )
+
+            all_complete = all(
+                status_by_refund_id.get(_clean(r.get("REFUND_ID")))
+                == "REFUND_COMPLETE"
+                for r in open_refund_group
+            )
+            entry_payment_status = (
+                "REFUND_COMPLETE" if all_complete else "REFUND_STARTED"
+            )
+            store.update_by_id(
+                "EVENT_ENTRIES",
+                selected_entry_id,
+                {
+                    "PAYMENT_STATUS": entry_payment_status,
+                    "PAYMENT_STATUS_CHANGED_AT": timestamp,
+                    "UPDATED_AT": timestamp,
+                },
+            )
+            sync_output_entry(
+                gc=google_client,
+                output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                output_worksheet=OUTPUT_WORKSHEET,
+                entry=entry,
+                payment_status=entry_payment_status,
+            )
+            _audit(
+                action=(
+                    "MULTI_PAYMENT_REFUND_APPROVED_AND_COMPLETED"
+                    if all_complete
+                    else "MULTI_PAYMENT_REFUND_APPROVED_AND_STARTED"
+                ),
+                entity_type="REFUND_GROUP",
+                entity_id=open_refund_group_id,
+                order_id=selected_order_id,
+                before={
+                    "ALLOCATIONS": [
+                        {
+                            "REFUND_ID": _clean(r.get("REFUND_ID")),
+                            "STATUS": _clean(r.get("STATUS")),
+                        }
+                        for r in open_refund_group
+                    ]
+                },
+                after={
+                    "ENTRY_PAYMENT_STATUS": entry_payment_status,
+                    "STRIPE_REFUNDS": created_refunds,
+                    "ERRORS": errors,
+                },
+                reason=(
+                    group_decision_reason.strip()
+                    or _clean(open_refund.get("REASON"))
+                ),
+            )
+            _load_admin_rows.clear()
+            if all_complete:
+                st.success(
+                    f"Refund group {open_refund_group_id} completed across "
+                    f"{len(open_refund_group)} Stripe payments."
+                )
+            elif errors:
+                st.warning(
+                    "Some allocations were not completed. No successful allocation "
+                    "will be repeated; use Retry remaining allocations after reviewing: "
+                    + " | ".join(errors)
+                )
+            else:
+                st.info(
+                    "Refund group was sent to Stripe and is awaiting webhook completion."
+                )
+            st.rerun()
+
+if open_refund and not open_refund_group_id and _clean(open_refund.get("STATUS")).upper() == "REFUND_REQUESTED":
     st.markdown("#### Refund decision")
     requested_amount = _to_decimal(open_refund.get("REQUESTED_AMOUNT"))
     max_approvable = min(requested_amount, max_new_refund)
@@ -1763,7 +2369,7 @@ if open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_REQUESTE
                     )
                 st.rerun()
 
-elif open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_STARTED":
+elif open_refund and not open_refund_group_id and _clean(open_refund.get("STATUS")).upper() == "REFUND_STARTED":
     st.info(
         f"Stripe refund {_clean(open_refund.get('STRIPE_REFUND_ID')) or '-'} is in progress. "
         f"Stripe status: {_clean(open_refund.get('STRIPE_STATUS')) or 'pending'}."
