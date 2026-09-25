@@ -62,6 +62,7 @@ from signup.session import apply_pending_text_updates, init_sheet_session
 from signup.pilot_config import (
     PilotConfigError,
     PilotConfigRepository,
+    clear_config_cache,
     require_configured_user,
 )
 from signup.cart import (
@@ -126,7 +127,14 @@ TRANSACTION_SHEET_URL = str(
     or CONFIG_SHEET_URL
 ).strip()
 
-pilot_config = PilotConfigRepository(CONFIG_SHEET_URL)
+@st.cache_resource(show_spinner=False)
+def _get_pilot_config_repository(sheet_url: str) -> PilotConfigRepository:
+    # Keep the repository object alive across Streamlit widget reruns. Master
+    # worksheet data itself is cached in signup.pilot_config.
+    return PilotConfigRepository(sheet_url)
+
+
+pilot_config = _get_pilot_config_repository(CONFIG_SHEET_URL)
 
 if not LOGIN_REQUIRED_FOR_THIS_ROLLOUT:
     st.error("The Google Sheets pilot configuration requires login to be enabled.")
@@ -137,6 +145,16 @@ current_user_email, current_user, current_organization = require_configured_user
     app_title=APP_TITLE,
     provider="auth0",
 )
+
+# Configuration changes are rare, so master tables are cached for quota safety.
+# SAA admins can explicitly invalidate that cache after changing a master sheet.
+if current_user.role == "SAA_ADMIN":
+    with st.sidebar:
+        if st.button("Refresh configuration", key="refresh_master_configuration"):
+            clear_config_cache()
+            st.toast("Configuration cache cleared. Reloading master data...")
+            st.rerun()
+
 st.title(APP_TITLE)
 
 

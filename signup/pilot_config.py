@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import datetime as dt
 from decimal import Decimal, InvalidOperation
+import time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -19,6 +20,8 @@ from google_sheets_reader import read_sheet_as_df
 
 
 SINGAPORE_TZ = ZoneInfo("Asia/Singapore")
+CONFIG_CACHE_TTL_SECONDS = 600
+_CONFIG_RETRY_DELAYS_SECONDS = (0, 1, 2, 4, 8)
 
 
 class PilotConfigError(RuntimeError):
@@ -105,12 +108,47 @@ def _sg_timestamp(value):
     return ts.tz_convert(SINGAPORE_TZ)
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+def _is_sheets_quota_error(exc: Exception) -> bool:
+    """Return True for Google Sheets 429 / quota-exceeded failures."""
+    text = f"{type(exc).__name__}: {exc}".casefold()
+    return (
+        "429" in text
+        or "quota exceeded" in text
+        or "rate limit" in text
+        or "resource_exhausted" in text
+    )
+
+
+@st.cache_data(ttl=CONFIG_CACHE_TTL_SECONDS, show_spinner=False)
 def _read_config_sheet(sheet_url: str, worksheet: str) -> pd.DataFrame:
-    df = read_sheet_as_df(sheet_url, worksheet=worksheet)
-    if df is None:
-        return pd.DataFrame()
-    return _normalise_columns(pd.DataFrame(df))
+    """Read one small master/config worksheet with shared caching and 429 backoff.
+
+    Streamlit reruns can otherwise create bursts of Google Sheets reads. The
+    10-minute shared cache keeps stable master data off the API during normal
+    user interaction, while the bounded retry handles a transient quota window
+    during cold starts/deployments.
+    """
+    last_exc: Exception | None = None
+    for delay in _CONFIG_RETRY_DELAYS_SECONDS:
+        if delay:
+            time.sleep(delay)
+        try:
+            df = read_sheet_as_df(sheet_url, worksheet=worksheet)
+            if df is None:
+                return pd.DataFrame()
+            return _normalise_columns(pd.DataFrame(df))
+        except Exception as exc:
+            last_exc = exc
+            if not _is_sheets_quota_error(exc):
+                raise
+
+    assert last_exc is not None
+    raise last_exc
+
+
+def clear_config_cache() -> None:
+    """Explicitly invalidate cached master/configuration worksheets."""
+    _read_config_sheet.clear()
 
 
 @dataclass(frozen=True)
