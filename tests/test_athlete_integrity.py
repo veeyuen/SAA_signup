@@ -101,3 +101,27 @@ def test_one_duplicate_among_multiple_candidate_events_blocks():
     )
     assert result.blocked
     assert result.codes == {"DUPLICATE_EVENT"}
+
+
+def test_multiple_existing_events_same_other_team_yield_one_team_conflict():
+    existing_rows = [
+        existing(ENTRY_ID="ENT1", EVENT_NAME="100m", EVENT_CODE="100"),
+        existing(
+            ENTRY_ID="ENT2",
+            REGISTRATION_ID="REG2",
+            ORDER_ID="ORD2",
+            EVENT_NAME="Long Jump",
+            EVENT_CODE="LJ",
+        ),
+    ]
+    result = check_candidate_against_existing(
+        candidate(
+            organization_id="ORG2",
+            team_code="BBB",
+            events=[{"event_name": "200m", "event_code": "200"}],
+        ),
+        existing_rows,
+    )
+    assert result.blocked
+    assert result.codes == {"TEAM_CONFLICT"}
+    assert len(result.conflicts) == 1

@@ -133,6 +133,52 @@ current_user_email, current_user, current_organization = require_configured_user
 )
 st.title(APP_TITLE)
 
+
+def _queue_clear_athlete_fields() -> None:
+    """Queue athlete-specific widgets to reset safely on the next rerun."""
+    values = {
+        "last_name": "",
+        "first_name": "",
+        "other_name": "",
+        "gender": "",
+        "name_passport": "",
+        "full_name": "",
+        "db_name_override": "",
+        "full_name_signature": "",
+        "athlete_roster_match": "(keep typed)",
+        "unique_id_override": "",
+        "nationality": "",
+        "nationality_override": "",
+        "singapore_pr": False,
+        "birth_date": None,
+        "ic_last4": "",
+        "contact_number": "",
+        "email": "",
+        "events_selected": [],
+        "emergency_contact_name": "",
+        "emergency_contact_number": "",
+        "coach_full_name": "",
+        "parq": "Y",
+    }
+    for key, value in values.items():
+        st.session_state[f"{key}__pending"] = value
+
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("season_best_event__"):
+            st.session_state[f"{key}__pending"] = ""
+
+
+def _start_another_registration() -> None:
+    """Reset order/athlete state while keeping the user logged in and competition selected."""
+    clear_cart()
+    st.session_state.pop("pending_checkout", None)
+    st.session_state.pop("order_waiver_ok", None)
+    st.session_state.pop("draft_order_id", None)
+    _queue_clear_athlete_fields()
+    st.query_params.clear()
+    st.rerun()
+
+
 def show_stripe_return_status():
     """Show a safe return screen after Stripe redirects back to Streamlit.
 
@@ -176,6 +222,17 @@ def show_stripe_return_status():
             st.write(f"Order reference: `{order_id}`")
         if session_id:
             st.caption(f"Stripe Checkout session: {session_id}")
+
+        st.caption(
+            "You can return to the registration screen and enter another athlete "
+            "for the same competition."
+        )
+        if st.button(
+            "← Back to registration",
+            type="primary",
+            key="back_to_registration_after_stripe",
+        ):
+            _start_another_registration()
 
         st.stop()
 
@@ -1294,38 +1351,7 @@ def _build_transaction_bundle(
 
 def _queue_clear_athlete_form() -> None:
     """Clear athlete widgets safely on the next rerun."""
-    values = {
-        "last_name": "",
-        "first_name": "",
-        "other_name": "",
-        "gender": "",
-        "name_passport": "",
-        "full_name": "",
-        "db_name_override": "",
-        "full_name_signature": "",
-        "athlete_roster_match": "(keep typed)",
-        "unique_id_override": "",
-        "nationality": "",
-        "nationality_override": "",
-        "singapore_pr": False,
-        "birth_date": None,
-        "ic_last4": "",
-        "contact_number": "",
-        "email": "",
-        "events_selected": [],
-        "emergency_contact_name": "",
-        "emergency_contact_number": "",
-        "coach_full_name": "",
-        "parq": "Y",
-    }
-    for key, value in values.items():
-        st.session_state[f"{key}__pending"] = value
-
-    # Season Best inputs are dynamic because each selected event has its own
-    # field. Queue all current event-specific fields for clearing as well.
-    for key in list(st.session_state.keys()):
-        if str(key).startswith("season_best_event__"):
-            st.session_state[f"{key}__pending"] = ""
+    _queue_clear_athlete_fields()
 
 
 def _build_current_athlete_cart_item() -> dict:
@@ -1698,6 +1724,16 @@ else:
                     f"Order {order_id} submitted successfully with "
                     f"{total_entries} event entries."
                 )
+                st.caption(
+                    "You can return to the registration screen and enter another "
+                    "athlete for the same competition."
+                )
+                if st.button(
+                    "← Back to registration",
+                    type="primary",
+                    key=f"back_to_registration_after_{payment_type.lower()}",
+                ):
+                    _start_another_registration()
                 st.stop()
 
     # ---------------- Paid Affiliate / Associate transactional Stripe checkout ----------------

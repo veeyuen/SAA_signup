@@ -235,10 +235,14 @@ def check_candidate_against_existing(
 
         existing_team = _normalise_team(existing)
         if candidate_team and existing_team and candidate_team != existing_team:
+            # One conflicting team/organisation should produce one conflict,
+            # even when that athlete already has several active event entries
+            # for the same team. This keeps the user-facing warning and audit
+            # trail concise while still blocking the registration.
             key = (
                 "TEAM_CONFLICT",
-                _clean(existing.get("ENTRY_ID")),
                 existing_team,
+                "",
             )
             if key not in seen_conflict_keys:
                 seen_conflict_keys.add(key)
