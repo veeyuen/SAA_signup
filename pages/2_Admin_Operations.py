@@ -41,10 +41,23 @@ if user.role != "SAA_ADMIN":
     st.error("SAA_ADMIN access is required for this page.")
     st.stop()
 
+@st.cache_resource(show_spinner=False)
+def _admin_resources():
+    """Create the Google client/store once per Streamlit worker.
+
+    The original Phase 3A page rebuilt the store and re-ran schema discovery on
+    every Streamlit rerun. That is safe but very expensive in Google Sheets read
+    quota. Keeping the resource alive lets TransactionSheetStore reuse its
+    worksheet/header cache across widget reruns.
+    """
+    gc = create_google_client(dict(st.secrets["gcp_service_account"]))
+    transaction_store = TransactionSheetStore(gc, TRANSACTION_SHEET_URL)
+    transaction_store.ensure_schema()
+    return gc, transaction_store
+
+
 try:
-    google_client = create_google_client(dict(st.secrets["gcp_service_account"]))
-    store = TransactionSheetStore(google_client, TRANSACTION_SHEET_URL)
-    store.ensure_schema()
+    google_client, store = _admin_resources()
 except Exception as exc:
     st.error(f"Could not initialise admin storage: {type(exc).__name__}: {exc}")
     st.stop()
@@ -88,28 +101,64 @@ def _audit(*, action: str, entity_type: str, entity_id: str, order_id: str, befo
     )
 
 
-def _rows(name: str) -> list[dict[str, str]]:
-    return store.list_rows(name)
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_admin_rows() -> dict[str, list[dict[str, str]]]:
+    """Cache the admin read model briefly to avoid quota-heavy widget reruns."""
+    return {
+        name: store.list_rows(name)
+        for name in (
+            "ORDERS",
+            "REGISTRATIONS",
+            "EVENT_ENTRIES",
+            "PAYMENTS",
+            "REFUNDS",
+            "AUDIT_LOG",
+        )
+    }
 
 
-def _recompute_registration_status(registration_id: str, order_id: str, reason: str) -> None:
-    entries = [
-        r for r in _rows("EVENT_ENTRIES")
-        if _clean(r.get("REGISTRATION_ID")) == registration_id
-    ]
-    if not entries:
+def _recompute_registration_status(
+    registration_id: str,
+    order_id: str,
+    reason: str,
+    *,
+    withdrawn_entry_id: str,
+    entries_snapshot: list[dict[str, str]],
+    registrations_snapshot: list[dict[str, str]],
+) -> None:
+    # Use the already-loaded page snapshot instead of re-reading EVENT_ENTRIES
+    # and REGISTRATIONS immediately after the withdrawal write.
+    registration_entries = []
+    for row in entries_snapshot:
+        if _clean(row.get("REGISTRATION_ID")) != registration_id:
+            continue
+        effective = dict(row)
+        if _clean(effective.get("ENTRY_ID")) == withdrawn_entry_id:
+            effective["STATUS"] = "WITHDRAWN"
+            effective["IS_DELETED"] = "TRUE"
+        registration_entries.append(effective)
+
+    if not registration_entries:
         return
+
     withdrawn = [
-        r for r in entries
-        if _clean(r.get("STATUS")).upper() == "WITHDRAWN"
-        or _clean(r.get("IS_DELETED")).upper() == "TRUE"
+        row for row in registration_entries
+        if _clean(row.get("STATUS")).upper() == "WITHDRAWN"
+        or _clean(row.get("IS_DELETED")).upper() == "TRUE"
     ]
     new_status = (
-        "WITHDRAWN" if len(withdrawn) == len(entries)
+        "WITHDRAWN" if len(withdrawn) == len(registration_entries)
         else "PARTIALLY_WITHDRAWN" if withdrawn
         else "CONFIRMED"
     )
-    registration = store.find_first("REGISTRATIONS", "REGISTRATION_ID", registration_id) or {}
+
+    registration = next(
+        (
+            row for row in registrations_snapshot
+            if _clean(row.get("REGISTRATION_ID")) == registration_id
+        ),
+        {},
+    )
     old_status = _clean(registration.get("STATUS"))
     if old_status != new_status:
         store.update_by_id(
@@ -129,13 +178,19 @@ def _recompute_registration_status(registration_id: str, order_id: str, reason: 
 
 
 try:
-    orders = _rows("ORDERS")
-    registrations = _rows("REGISTRATIONS")
-    entries = _rows("EVENT_ENTRIES")
-    payments = _rows("PAYMENTS")
-    refunds = _rows("REFUNDS")
+    admin_rows = _load_admin_rows()
+    orders = admin_rows["ORDERS"]
+    registrations = admin_rows["REGISTRATIONS"]
+    entries = admin_rows["EVENT_ENTRIES"]
+    payments = admin_rows["PAYMENTS"]
+    refunds = admin_rows["REFUNDS"]
+    audit_rows = admin_rows["AUDIT_LOG"]
 except TransactionStoreError as exc:
     st.error(str(exc))
+    st.info(
+        "If this is a Google Sheets 429 quota error, wait about a minute and "
+        "refresh. The page now caches reads to prevent repeated quota bursts."
+    )
     st.stop()
 
 if not orders:
@@ -244,6 +299,7 @@ if amend_clicked:
             after=after,
             reason=amendment_reason.strip(),
         )
+        _load_admin_rows.clear()
         st.success(f"Season Best updated. Compatibility OUTPUT rows updated: {output_rows}.")
         st.rerun()
 
@@ -252,6 +308,67 @@ entry_withdrawn = (
     _clean(entry.get("STATUS")).upper() == "WITHDRAWN"
     or _clean(entry.get("IS_DELETED")).upper() == "TRUE"
 )
+
+# A previous withdrawal may have completed the entry/output writes but failed
+# while recomputing the parent registration if Google Sheets quota was reached.
+# Detect that state from the already-loaded snapshot and offer a safe repair.
+_current_registration_id = _clean(entry.get("REGISTRATION_ID"))
+_current_registration = next(
+    (
+        row for row in registrations
+        if _clean(row.get("REGISTRATION_ID")) == _current_registration_id
+    ),
+    {},
+)
+_current_registration_entries = [
+    row for row in entries
+    if _clean(row.get("REGISTRATION_ID")) == _current_registration_id
+]
+_current_withdrawn = [
+    row for row in _current_registration_entries
+    if _clean(row.get("STATUS")).upper() == "WITHDRAWN"
+    or _clean(row.get("IS_DELETED")).upper() == "TRUE"
+]
+_expected_registration_status = (
+    "WITHDRAWN"
+    if _current_registration_entries
+    and len(_current_withdrawn) == len(_current_registration_entries)
+    else "PARTIALLY_WITHDRAWN"
+    if _current_withdrawn
+    else "CONFIRMED"
+)
+_actual_registration_status = _clean(_current_registration.get("STATUS"))
+
+if (
+    _current_registration_id
+    and _actual_registration_status
+    and _actual_registration_status != _expected_registration_status
+):
+    st.warning(
+        "Registration status is out of sync with its event entries: "
+        f"{_actual_registration_status} → {_expected_registration_status}. "
+        "This can happen if a Google Sheets quota error interrupts a withdrawal."
+    )
+    if st.button("Repair registration status", type="secondary"):
+        timestamp = _now()
+        store.update_by_id(
+            "REGISTRATIONS",
+            _current_registration_id,
+            {"STATUS": _expected_registration_status, "UPDATED_AT": timestamp},
+        )
+        _audit(
+            action="REGISTRATION_STATUS_REPAIRED",
+            entity_type="REGISTRATION",
+            entity_id=_current_registration_id,
+            order_id=selected_order_id,
+            before={"STATUS": _actual_registration_status},
+            after={"STATUS": _expected_registration_status},
+            reason="Repair after interrupted admin operation",
+        )
+        _load_admin_rows.clear()
+        st.success("Registration status repaired.")
+        st.rerun()
+
 with st.form("withdraw_entry"):
     withdraw_reason = st.text_area("Withdrawal reason", placeholder="Required")
     confirm_withdraw = st.checkbox("I confirm that this event entry should be withdrawn.")
@@ -300,7 +417,11 @@ if withdraw_clicked:
             _clean(entry.get("REGISTRATION_ID")),
             selected_order_id,
             withdraw_reason.strip(),
+            withdrawn_entry_id=selected_entry_id,
+            entries_snapshot=entries,
+            registrations_snapshot=registrations,
         )
+        _load_admin_rows.clear()
         st.success(f"Entry withdrawn. Compatibility OUTPUT rows updated: {output_rows}.")
         st.rerun()
 
@@ -406,6 +527,7 @@ else:
                 after=refund_row,
                 reason=refund_reason.strip(),
             )
+            _load_admin_rows.clear()
             st.success(f"Refund request {refund_id} recorded. No funds have been moved.")
             st.rerun()
 
@@ -416,7 +538,10 @@ with st.expander("Refund history", expanded=False):
         st.caption("No refund requests for this order.")
 
 with st.expander("Audit log for this order", expanded=False):
-    audits = [r for r in _rows("AUDIT_LOG") if _clean(r.get("ORDER_ID")) == selected_order_id]
+    audits = [
+        row for row in audit_rows
+        if _clean(row.get("ORDER_ID")) == selected_order_id
+    ]
     if audits:
         st.dataframe(pd.DataFrame(audits), use_container_width=True, hide_index=True)
     else:
