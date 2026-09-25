@@ -118,6 +118,9 @@ SHEETS: dict[str, list[str]] = {
         "REQUESTED_AT",
         "APPROVED_BY_USER_ID",
         "APPROVED_AT",
+        "DECIDED_BY_USER_ID",
+        "DECIDED_AT",
+        "DECISION_REASON",
         "STRIPE_REFUND_ID",
         "STRIPE_STATUS",
         "COMPLETED_AT",
@@ -430,6 +433,14 @@ class TransactionSheetStore:
         for column_name, value in updates.items():
             column_index = info.header_map.get(_normalise(column_name))
             if not column_index:
+                # The store may be a cached Streamlit resource created before a
+                # schema upgrade. Refresh this worksheet's header map once so
+                # newly-required columns can be added and discovered without
+                # forcing a full schema scan on every page rerun.
+                self._info_cache.pop(sheet_name, None)
+                info = self._worksheet_info(sheet_name)
+                column_index = info.header_map.get(_normalise(column_name))
+            if not column_index:
                 raise TransactionStoreError(
                     f"Column '{column_name}' is missing from '{sheet_name}'."
                 )
@@ -471,6 +482,10 @@ class TransactionSheetStore:
         for row_number in row_numbers:
             for column_name, value in updates.items():
                 column_index = info.header_map.get(_normalise(column_name))
+                if not column_index:
+                    self._info_cache.pop(sheet_name, None)
+                    info = self._worksheet_info(sheet_name)
+                    column_index = info.header_map.get(_normalise(column_name))
                 if not column_index:
                     raise TransactionStoreError(
                         f"Column '{column_name}' is missing from '{sheet_name}'."
