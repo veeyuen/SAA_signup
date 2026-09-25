@@ -86,6 +86,48 @@ def _matching_rows(worksheet, header_map: dict[str, int], entry: dict[str, Any])
     return out
 
 
+# Canonical transaction fields -> existing legacy OUTPUT column names.
+# The admin workflow updates only columns already present for these fields; it
+# does not widen the legacy export merely to hold duplicate administrative data.
+_OUTPUT_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "ATHLETE_NAME": ("full_name", "name"),
+    "DOB": ("birth_date", "dob", "date_of_birth"),
+    "TEAM_NAME": ("team_name",),
+    "TEAM_CODE": ("team_code",),
+    "EVENT_NAME": ("event", "event_name"),
+    "EVENT_CODE": ("event_code",),
+    "DIVISION": ("event_division", "division"),
+    "SEASON_BEST": ("season_best",),
+    "PAYMENT_STATUS": ("payment_status",),
+    "STATUS": ("entry_status",),
+    "IS_DELETED": ("is_deleted",),
+}
+
+
+def _apply_existing_field_updates(
+    *,
+    worksheet,
+    row_number: int,
+    header_map: dict[str, int],
+    field_updates: dict[str, Any],
+) -> None:
+    """Apply transaction-field changes to matching legacy OUTPUT columns.
+
+    For ATHLETE_NAME we deliberately update both `name` and `full_name` when
+    those columns exist. Passport/NRIC name components are not touched.
+    """
+    for canonical, value in field_updates.items():
+        aliases = _OUTPUT_FIELD_ALIASES.get(str(canonical or "").upper(), ())
+        for alias in aliases:
+            column_index = header_map.get(_normalise_header(alias))
+            if column_index:
+                if str(canonical).upper() == "IS_DELETED":
+                    rendered = "TRUE" if str(value).strip().upper() in {"TRUE", "1", "YES"} or value is True else "FALSE"
+                else:
+                    rendered = _clean(value)
+                worksheet.update_cell(row_number, column_index, rendered)
+
+
 def sync_output_entry(
     *,
     gc,
@@ -96,8 +138,15 @@ def sync_output_entry(
     status: str | None = None,
     is_deleted: bool | None = None,
     payment_status: str | None = None,
+    field_updates: dict[str, Any] | None = None,
 ) -> int:
-    """Update the compatibility OUTPUT projection for one event entry."""
+    """Update the compatibility OUTPUT projection for one event entry.
+
+    `field_updates` accepts canonical transaction fields such as ATHLETE_NAME,
+    DOB, TEAM_NAME, TEAM_CODE, EVENT_NAME, EVENT_CODE and DIVISION. Those
+    updates are applied only where a compatible legacy OUTPUT column already
+    exists. Operational metadata columns are still created when needed.
+    """
     spreadsheet = _open_spreadsheet(gc, output_sheet_url_or_id)
     worksheet = (
         spreadsheet.worksheet(output_worksheet)
@@ -110,21 +159,24 @@ def sync_output_entry(
         ["entry_id", "entry_status", "is_deleted", "payment_status"],
     )
     rows = _matching_rows(worksheet, header_map, entry)
+
+    canonical_updates = dict(field_updates or {})
+    if season_best is not None:
+        canonical_updates["SEASON_BEST"] = season_best
+    if status is not None:
+        canonical_updates["STATUS"] = status
+    if is_deleted is not None:
+        canonical_updates["IS_DELETED"] = is_deleted
+    if payment_status is not None:
+        canonical_updates["PAYMENT_STATUS"] = payment_status
+
     for row_number in rows:
         if _clean(entry.get("ENTRY_ID")):
             worksheet.update_cell(row_number, header_map["entry_id"], _clean(entry.get("ENTRY_ID")))
-        if season_best is not None:
-            season_col = header_map.get("season_best")
-            if season_col:
-                worksheet.update_cell(row_number, season_col, _clean(season_best))
-        if status is not None:
-            worksheet.update_cell(row_number, header_map["entry_status"], _clean(status))
-        if is_deleted is not None:
-            worksheet.update_cell(row_number, header_map["is_deleted"], "TRUE" if is_deleted else "FALSE")
-        if payment_status is not None:
-            worksheet.update_cell(
-                row_number,
-                header_map["payment_status"],
-                _clean(payment_status),
-            )
+        _apply_existing_field_updates(
+            worksheet=worksheet,
+            row_number=row_number,
+            header_map=header_map,
+            field_updates=canonical_updates,
+        )
     return len(rows)

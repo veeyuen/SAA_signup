@@ -10,6 +10,7 @@ import streamlit as st
 
 from payment_store import create_google_client
 from signup.output_admin import OutputAdminError, sync_output_entry
+from signup.admin_notification import AdminNotificationError, send_admin_amendment_email
 from signup.refund_payment import StripeRefundError, create_stripe_refund
 from signup.pilot_config import PilotConfigError, PilotConfigRepository, require_configured_user
 from signup.transaction_store import TransactionSheetStore, TransactionStoreError
@@ -265,47 +266,278 @@ entry = next(e for e in order_entries if _clean(e.get("ENTRY_ID")) == selected_e
 
 st.dataframe(pd.DataFrame([entry]), use_container_width=True, hide_index=True)
 
-st.subheader("Amend season best")
-with st.form("amend_season_best"):
-    amended_sb = st.text_input("Season Best", value=_clean(entry.get("SEASON_BEST")))
-    amendment_reason = st.text_area("Reason for amendment", placeholder="Required for audit trail")
-    amend_clicked = st.form_submit_button("Save amendment", type="primary")
+st.subheader("Amend registration details")
+st.caption(
+    "SAA_ADMIN amendments are recorded with before/after audit history. Athlete-level "
+    "changes (name, DOB and team) are applied to every event entry in this registration. "
+    "Event, division and Season Best changes apply only to the selected event entry."
+)
+
+registration_id = _clean(entry.get("REGISTRATION_ID"))
+registration = next(
+    (
+        row for row in registrations
+        if _clean(row.get("REGISTRATION_ID")) == registration_id
+    ),
+    {},
+)
+registration_entries = [
+    row for row in entries
+    if _clean(row.get("REGISTRATION_ID")) == registration_id
+]
+
+with st.form("amend_registration_details"):
+    a1, a2 = st.columns(2)
+    amended_name = a1.text_input(
+        "Athlete name",
+        value=_clean(entry.get("ATHLETE_NAME")) or _clean(registration.get("ATHLETE_NAME")),
+    )
+    amended_dob = a2.text_input(
+        "Date of birth (YYYY-MM-DD)",
+        value=_clean(entry.get("DOB")) or _clean(registration.get("DOB")),
+    )
+
+    a3, a4 = st.columns(2)
+    amended_team_name = a3.text_input(
+        "Team name",
+        value=_clean(entry.get("TEAM_NAME")) or _clean(registration.get("TEAM_NAME")),
+    )
+    amended_team_code = a4.text_input(
+        "Team code",
+        value=_clean(entry.get("TEAM_CODE")) or _clean(registration.get("TEAM_CODE")),
+    )
+
+    a5, a6 = st.columns(2)
+    amended_event_name = a5.text_input("Event name", value=_clean(entry.get("EVENT_NAME")))
+    amended_event_code = a6.text_input("Event code", value=_clean(entry.get("EVENT_CODE")))
+
+    a7, a8 = st.columns(2)
+    amended_division = a7.text_input("Division", value=_clean(entry.get("DIVISION")))
+    amended_sb = a8.text_input("Season Best", value=_clean(entry.get("SEASON_BEST")))
+
+    amendment_reason = st.text_area(
+        "Reason for amendment",
+        placeholder="Required for audit trail and participant notification",
+    )
+    st.caption(
+        "After saving, the participant will be notified automatically by email when an email "
+        "address is available. Email failure does not roll back the amendment; it is audited."
+    )
+    amend_clicked = st.form_submit_button("Save registration amendment", type="primary")
 
 if amend_clicked:
-    if not amendment_reason.strip():
+    reason = amendment_reason.strip()
+    if not reason:
         st.error("A reason is required.")
-    elif _clean(entry.get("STATUS")).upper() == "WITHDRAWN":
-        st.error("Withdrawn entries cannot be amended.")
+    elif not amended_name.strip():
+        st.error("Athlete name cannot be blank.")
+    elif not amended_event_name.strip():
+        st.error("Event name cannot be blank.")
+    elif not amended_division.strip():
+        st.error("Division cannot be blank.")
     else:
-        before = dict(entry)
-        timestamp = _now()
-        store.update_by_id(
-            "EVENT_ENTRIES",
-            selected_entry_id,
-            {"SEASON_BEST": amended_sb.strip(), "UPDATED_AT": timestamp},
+        try:
+            dt.date.fromisoformat(amended_dob.strip())
+        except ValueError:
+            st.error("Date of birth must use YYYY-MM-DD format.")
+        else:
+            before_registration = dict(registration)
+            before_entry = dict(entry)
+            timestamp = _now()
+
+            common_updates = {
+                "ATHLETE_NAME": amended_name.strip(),
+                "DOB": amended_dob.strip(),
+                "TEAM_NAME": amended_team_name.strip(),
+                "TEAM_CODE": amended_team_code.strip(),
+                "UPDATED_AT": timestamp,
+            }
+            selected_updates = {
+                "EVENT_NAME": amended_event_name.strip(),
+                "EVENT_CODE": amended_event_code.strip(),
+                "DIVISION": amended_division.strip(),
+                "SEASON_BEST": amended_sb.strip(),
+                "UPDATED_AT": timestamp,
+            }
+
+            # Work out what actually changed before writing anything.
+            changes: list[tuple[str, str, str]] = []
+            labels = {
+                "ATHLETE_NAME": "Athlete name",
+                "DOB": "Date of birth",
+                "TEAM_NAME": "Team name",
+                "TEAM_CODE": "Team code",
+                "EVENT_NAME": "Event",
+                "EVENT_CODE": "Event code",
+                "DIVISION": "Division",
+                "SEASON_BEST": "Season Best",
+            }
+            for field, value in {**common_updates, **selected_updates}.items():
+                if field == "UPDATED_AT":
+                    continue
+                old = _clean(entry.get(field))
+                if field in {"ATHLETE_NAME", "DOB", "TEAM_NAME", "TEAM_CODE"}:
+                    old = _clean(registration.get(field)) or old
+                new_value = _clean(value)
+                if old != new_value:
+                    changes.append((labels[field], old, new_value))
+
+            if not changes:
+                st.info("No registration fields were changed.")
+            else:
+                # Athlete-level values belong to the registration, so apply them
+                # consistently to all event entries for that athlete/registration.
+                store.update_where(
+                    "EVENT_ENTRIES",
+                    "REGISTRATION_ID",
+                    registration_id,
+                    common_updates,
+                )
+                store.update_by_id(
+                    "EVENT_ENTRIES",
+                    selected_entry_id,
+                    selected_updates,
+                )
+
+                # Derive a sensible registration-level division from the effective
+                # active entry snapshot. If entries span divisions, retain the
+                # existing registration summary rather than inventing a value.
+                effective_divisions = set()
+                for row in registration_entries:
+                    if (
+                        _clean(row.get("STATUS")).upper() == "WITHDRAWN"
+                        or _clean(row.get("IS_DELETED")).upper() == "TRUE"
+                    ):
+                        continue
+                    div = (
+                        amended_division.strip()
+                        if _clean(row.get("ENTRY_ID")) == selected_entry_id
+                        else _clean(row.get("DIVISION"))
+                    )
+                    if div:
+                        effective_divisions.add(div)
+
+                registration_updates = dict(common_updates)
+                if len(effective_divisions) == 1:
+                    registration_updates["DIVISION"] = next(iter(effective_divisions))
+                store.update_by_id(
+                    "REGISTRATIONS",
+                    registration_id,
+                    registration_updates,
+                )
+
+                # Keep the legacy OUTPUT projection in sync. Common identity/team
+                # updates are propagated to every event row in this registration;
+                # the selected row also receives the event-specific changes.
+                output_rows = 0
+                for snapshot_entry in registration_entries:
+                    is_selected = _clean(snapshot_entry.get("ENTRY_ID")) == selected_entry_id
+                    projection_updates = dict(common_updates)
+                    if is_selected:
+                        projection_updates.update(selected_updates)
+                    output_rows += sync_output_entry(
+                        gc=google_client,
+                        output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                        output_worksheet=OUTPUT_WORKSHEET,
+                        entry=snapshot_entry,
+                        field_updates=projection_updates,
+                        status=_clean(snapshot_entry.get("STATUS")) or "CONFIRMED",
+                        is_deleted=(
+                            _clean(snapshot_entry.get("IS_DELETED")).upper() == "TRUE"
+                        ),
+                        payment_status=_clean(snapshot_entry.get("PAYMENT_STATUS")),
+                    )
+
+                after_registration = dict(before_registration)
+                after_registration.update(registration_updates)
+                after_entry = dict(before_entry)
+                after_entry.update(common_updates)
+                after_entry.update(selected_updates)
+                _audit(
+                    action="ADMIN_REGISTRATION_AMENDED",
+                    entity_type="EVENT_ENTRY",
+                    entity_id=selected_entry_id,
+                    order_id=selected_order_id,
+                    before={
+                        "REGISTRATION": before_registration,
+                        "ENTRY": before_entry,
+                    },
+                    after={
+                        "REGISTRATION": after_registration,
+                        "ENTRY": after_entry,
+                    },
+                    reason=reason,
+                )
+
+                # Requirement: notify the user by email. Notification failure is
+                # intentionally non-transactional: the amendment remains valid and
+                # a separate audit record captures the failed delivery attempt.
+                notify_email = (
+                    _clean(registration.get("EMAIL"))
+                    or _clean(entry.get("EMAIL"))
+                )
+                try:
+                    send_admin_amendment_email(
+                        smtp_host=str(st.secrets.get("SMTP_HOST", "") or ""),
+                        smtp_port=int(st.secrets.get("SMTP_PORT", 587) or 587),
+                        smtp_user=str(st.secrets.get("SMTP_USER", "") or ""),
+                        smtp_password=str(st.secrets.get("SMTP_PASS", "") or ""),
+                        smtp_from=str(st.secrets.get("SMTP_FROM", "") or ""),
+                        to_email=notify_email,
+                        athlete_name=amended_name.strip(),
+                        order_id=selected_order_id,
+                        registration_id=registration_id,
+                        entry_id=selected_entry_id,
+                        changes=changes,
+                        reason=reason,
+                    )
+                except AdminNotificationError as exc:
+                    _audit(
+                        action="ADMIN_AMENDMENT_EMAIL_FAILED",
+                        entity_type="EVENT_ENTRY",
+                        entity_id=selected_entry_id,
+                        order_id=selected_order_id,
+                        before={"EMAIL": notify_email},
+                        after={"ERROR": str(exc)},
+                        reason=reason,
+                    )
+                    notification_message = f" Amendment saved, but notification email failed: {exc}"
+                else:
+                    _audit(
+                        action="ADMIN_AMENDMENT_EMAIL_SENT",
+                        entity_type="EVENT_ENTRY",
+                        entity_id=selected_entry_id,
+                        order_id=selected_order_id,
+                        before={},
+                        after={"EMAIL": notify_email, "CHANGE_COUNT": len(changes)},
+                        reason=reason,
+                    )
+                    notification_message = " Participant notification email sent."
+
+                _load_admin_rows.clear()
+                st.success(
+                    f"Registration amendment saved. Compatibility OUTPUT rows updated: {output_rows}."
+                    + notification_message
+                )
+                st.rerun()
+
+st.markdown("#### Payment amount amendments")
+if is_stripe := (_clean(order.get("PAYMENT_TYPE")).upper() == "STRIPE"):
+    if _clean(payment.get("DISPLAY_STATUS")).upper() == "PAYMENT_COMPLETE":
+        st.info(
+            "This order is already settled in Stripe. Entry-fee/payment-amount changes are not "
+            "written here because changing accounting totals without moving the corresponding "
+            "funds would make the ledger disagree with Stripe. Decreases should use a controlled "
+            "refund; increases require an additional-collection workflow."
         )
-        output_rows = sync_output_entry(
-            gc=google_client,
-            output_sheet_url_or_id=OUTPUT_SHEET_URL,
-            output_worksheet=OUTPUT_WORKSHEET,
-            entry=entry,
-            season_best=amended_sb.strip(),
+    else:
+        st.caption(
+            "Stripe amount amendment is deferred until the additional-collection workflow is implemented."
         )
-        after = dict(before)
-        after["SEASON_BEST"] = amended_sb.strip()
-        after["UPDATED_AT"] = timestamp
-        _audit(
-            action="SEASON_BEST_AMENDED",
-            entity_type="EVENT_ENTRY",
-            entity_id=selected_entry_id,
-            order_id=selected_order_id,
-            before=before,
-            after=after,
-            reason=amendment_reason.strip(),
-        )
-        _load_admin_rows.clear()
-        st.success(f"Season Best updated. Compatibility OUTPUT rows updated: {output_rows}.")
-        st.rerun()
+else:
+    st.caption(
+        "Payment-amount amendment for invoice/no-cost orders will be added with the billing workflow."
+    )
 
 st.subheader("Withdraw event entry")
 entry_withdrawn = (
