@@ -84,6 +84,12 @@ from signup.athlete_integrity import (
     check_candidate_against_existing,
     normalise_person_name,
 )
+from signup.waiver_compliance import (
+    WaiverComplianceError,
+    build_waiver_record,
+    normalise_signer_name,
+    validate_waiver_acknowledgement,
+)
 from signup.validation import (
     is_valid_email,
     is_valid_ic_last4,
@@ -173,6 +179,7 @@ def _start_another_registration() -> None:
     clear_cart()
     st.session_state.pop("pending_checkout", None)
     st.session_state.pop("order_waiver_ok", None)
+    st.session_state.pop("order_waiver_signer_name", None)
     st.session_state.pop("draft_order_id", None)
     _queue_clear_athlete_fields()
     st.query_params.clear()
@@ -1209,6 +1216,8 @@ def _build_transaction_bundle(
     technical_payment_status: str,
     total_amount: Decimal,
     cart: list[dict],
+    waiver_signer_name: str,
+    waiver_version: str,
 ) -> dict:
     now_iso = _iso_now()
 
@@ -1302,22 +1311,16 @@ def _build_transaction_bundle(
                 }
             )
 
-    waiver_version = pilot_config.system_value(
-        "DEFAULT_WAIVER_VERSION",
-        "TEST_WAIVER_V1",
+    waiver = build_waiver_record(
+        order_id=order_id,
+        competition_id=selected_competition_id,
+        organization_id=current_organization.organization_id,
+        signed_by_user_id=current_user.user_id,
+        signed_by_name=waiver_signer_name,
+        waiver_version=waiver_version,
+        signed_at=now_iso,
+        accepted=True,
     )
-    waiver = {
-        "WAIVER_ID": "WVR-" + order_id.removeprefix("ORD-"),
-        "ORDER_ID": order_id,
-        "COMPETITION_ID": selected_competition_id,
-        "ORGANIZATION_ID": current_organization.organization_id,
-        "SIGNED_BY_USER_ID": current_user.user_id,
-        "SIGNED_BY_NAME": (
-            current_user.display_name or current_user_email
-        ),
-        "WAIVER_VERSION": waiver_version,
-        "SIGNED_AT": now_iso,
-    }
 
     payment = {
         "PAYMENT_ID": payment_id,
@@ -1592,14 +1595,61 @@ else:
     if st.button("Clear cart", key="clear_registration_cart"):
         clear_cart()
         st.session_state.pop("order_waiver_ok", None)
+        st.session_state.pop("order_waiver_signer_name", None)
         st.rerun()
 
+    st.markdown("#### Competition waiver")
+    waiver_version = str(
+        pilot_config.system_value(
+            "DEFAULT_WAIVER_VERSION",
+            "TEST_WAIVER_V1",
+        )
+        or ""
+    ).strip()
+    waiver_text = str(
+        pilot_config.system_value("WAIVER_TEXT", "") or ""
+    ).strip()
+
+    if waiver_version:
+        st.caption(f"Waiver version: {waiver_version}")
+    else:
+        st.error(
+            "The waiver version is not configured. Contact SA Events before submitting."
+        )
+
+    if waiver_text:
+        st.info(waiver_text)
+    else:
+        st.caption(
+            "The final SAA liability-waiver wording has not yet been supplied in the "
+            "clarified requirements. During testing, this screen records the "
+            "acknowledgement against the configured waiver version without inventing "
+            "additional legal wording."
+        )
+
+    default_waiver_signer = str(current_user.display_name or "").strip()
+    if "order_waiver_signer_name" not in st.session_state:
+        st.session_state["order_waiver_signer_name"] = default_waiver_signer
+
+    waiver_signer_name = st.text_input(
+        "Representative name for waiver acknowledgement",
+        key="order_waiver_signer_name",
+        help=(
+            "The logged-in representative acknowledges the waiver for all athletes "
+            "and entries in this order."
+        ),
+    )
+
     order_waiver_ok = st.checkbox(
-        "I acknowledge the competition waiver for all entries in this order.",
+        "I acknowledge the competition waiver for all athletes and entries in this order.",
         value=False,
         key="order_waiver_ok",
     )
 
+    st.caption(
+        "This acknowledgement applies to this order and this competition only. "
+        "A new order requires a new acknowledgement."
+    )
     st.caption(
         "The cart is held in this browser session until you submit the order."
     )
@@ -1627,7 +1677,21 @@ else:
     else:
         st.info("Paid order: one Stripe payment will cover the entire cart.")
 
-    submit_disabled = not order_waiver_ok
+    try:
+        normalised_waiver_signer, normalised_waiver_version = (
+            validate_waiver_acknowledgement(
+                accepted=bool(order_waiver_ok),
+                signer_name=waiver_signer_name,
+                waiver_version=waiver_version,
+            )
+        )
+        waiver_ready = True
+    except WaiverComplianceError:
+        normalised_waiver_signer = normalise_signer_name(waiver_signer_name)
+        normalised_waiver_version = str(waiver_version or "").strip()
+        waiver_ready = False
+
+    submit_disabled = not waiver_ready
 
     # ---------------- No-cost / school transactional submission ----------------
     if is_school_order or is_no_cost_order:
@@ -1668,6 +1732,8 @@ else:
                 technical_payment_status=technical_payment_status,
                 total_amount=total_amount,
                 cart=cart,
+                waiver_signer_name=normalised_waiver_signer,
+                waiver_version=normalised_waiver_version,
             )
 
             # Keep the existing OUTPUT sheet as a compatibility projection for
@@ -1720,6 +1786,7 @@ else:
             else:
                 clear_cart()
                 st.session_state.pop("order_waiver_ok", None)
+                st.session_state.pop("order_waiver_signer_name", None)
                 st.success(
                     f"Order {order_id} submitted successfully with "
                     f"{total_entries} event entries."
@@ -1807,6 +1874,8 @@ else:
                 technical_payment_status="not_started",
                 total_amount=total_amount,
                 cart=cart,
+                waiver_signer_name=normalised_waiver_signer,
+                waiver_version=normalised_waiver_version,
             )
 
             entry_rows = []
