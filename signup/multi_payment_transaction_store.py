@@ -349,6 +349,29 @@ class TransactionSheetStore:
         }
         missing = [h for h in required if _normalise(h) not in header_map]
         if missing:
+            # Existing pilot worksheets may have been created with a fixed
+            # 30-column grid.  Phase 4 adds reporting/reconciliation fields
+            # beyond column AD, so grow the physical sheet grid before writing
+            # new header cells (for example AE1).
+            required_cols = len(headers) + len(missing)
+            current_cols = int(getattr(worksheet, "col_count", 0) or 0)
+            if current_cols < required_cols:
+                target_cols = max(required_cols, current_cols + 5, 30)
+                try:
+                    worksheet.resize(cols=target_cols)
+                except TypeError:
+                    # Compatibility fallback for older gspread versions.
+                    worksheet.resize(
+                        rows=int(getattr(worksheet, "row_count", 1000) or 1000),
+                        cols=target_cols,
+                    )
+                except Exception as exc:
+                    raise TransactionStoreError(
+                        f"Could not expand worksheet '{sheet_name}' from "
+                        f"{current_cols} to {target_cols} columns: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+
             start_col = len(headers) + 1
             for offset, header in enumerate(missing):
                 worksheet.update_cell(header_row, start_col + offset, header)
