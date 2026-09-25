@@ -23,7 +23,7 @@ from signup.fee_increase_payment import (
 )
 from signup.refund_payment import StripeRefundError, create_stripe_refund
 from signup.pilot_config import PilotConfigError, PilotConfigRepository, require_configured_user
-from signup.transaction_store import TransactionSheetStore, TransactionStoreError
+from signup.multi_payment_transaction_store import TransactionSheetStore, TransactionStoreError
 
 
 st.set_page_config(page_title="SAA Admin Operations", layout="wide")
