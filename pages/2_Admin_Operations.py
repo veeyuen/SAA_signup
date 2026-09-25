@@ -85,7 +85,7 @@ try:
     # Include the transaction schema generation in the cache key. This forces a
     # one-time resource refresh after schema-bearing deployments while retaining
     # the quota savings of cache_resource during normal widget reruns.
-    google_client, store = _admin_resources("phase3d-c-multi-payment-refunds")
+    google_client, store = _admin_resources("phase3d-c2-multi-payment-store-cache-refresh")
 except Exception as exc:
     st.error(f"Could not initialise admin storage: {type(exc).__name__}: {exc}")
     st.stop()
