@@ -43,6 +43,9 @@ def create_stripe_refund(
     payment_id: str,
     approved_by_user_id: str,
     approved_at: str,
+    refund_type: str = "WITHDRAWAL",
+    original_entry_fee: str | Decimal = "",
+    target_entry_fee: str | Decimal = "",
 ) -> dict:
     """Create one Stripe refund idempotently for an approved SAA refund.
 
@@ -84,6 +87,9 @@ def create_stripe_refund(
                 "payment_id": str(payment_id or "").strip(),
                 "approved_by_user_id": str(approved_by_user_id or "").strip(),
                 "approved_at": str(approved_at or "").strip(),
+                "refund_type": str(refund_type or "WITHDRAWAL").strip().upper(),
+                "original_entry_fee": str(original_entry_fee or "").strip(),
+                "target_entry_fee": str(target_entry_fee or "").strip(),
             },
             idempotency_key=f"saa-refund-{refund_id}",
         )

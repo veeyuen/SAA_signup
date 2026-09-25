@@ -237,6 +237,22 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
     refund_id = str(refund_row.get("REFUND_ID", "") or refund_id).strip()
     entry_id = str(refund_row.get("ENTRY_ID", "") or metadata.get("entry_id", "") or "").strip()
     order_id = str(refund_row.get("ORDER_ID", "") or metadata.get("order_id", "") or "").strip()
+    refund_type = str(
+        refund_row.get("REFUND_TYPE", "")
+        or metadata.get("refund_type", "")
+        or "WITHDRAWAL"
+    ).strip().upper()
+    original_entry_fee = str(
+        refund_row.get("ORIGINAL_ENTRY_FEE", "")
+        or metadata.get("original_entry_fee", "")
+        or ""
+    ).strip()
+    target_entry_fee = str(
+        refund_row.get("TARGET_ENTRY_FEE", "")
+        or metadata.get("target_entry_fee", "")
+        or ""
+    ).strip()
+    is_fee_decrease_refund = refund_type == "FEE_DECREASE"
 
     stripe_status = str(refund_obj.get("status", "") or "").strip().lower()
     failure_reason = str(refund_obj.get("failure_reason", "") or "").strip()
@@ -247,7 +263,11 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
         entry_payment_status = "PAYMENT_COMPLETE"
     elif stripe_status == "succeeded":
         internal_status = "REFUND_COMPLETE"
-        entry_payment_status = "REFUND_COMPLETE"
+        # A fee decrease leaves the registration active and fully settled at
+        # its revised amount. Withdrawal refunds keep REFUND_COMPLETE.
+        entry_payment_status = (
+            "PAYMENT_COMPLETE" if is_fee_decrease_refund else "REFUND_COMPLETE"
+        )
     else:
         internal_status = "REFUND_STARTED"
         entry_payment_status = "REFUND_STARTED"
@@ -259,6 +279,9 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
     before = dict(refund_row)
     updates = {
         "STATUS": internal_status,
+        "REFUND_TYPE": refund_type,
+        "ORIGINAL_ENTRY_FEE": original_entry_fee,
+        "TARGET_ENTRY_FEE": target_entry_fee,
         "STRIPE_REFUND_ID": stripe_refund_id,
         "STRIPE_STATUS": stripe_status,
         "FAILURE_REASON": failure_reason,
@@ -278,14 +301,50 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
     try:
         store.update_by_id("REFUNDS", refund_id, updates)
         if entry_id:
+            entry_updates = {
+                "PAYMENT_STATUS": entry_payment_status,
+                "PAYMENT_STATUS_CHANGED_AT": now,
+                "UPDATED_AT": now,
+            }
+            if internal_status == "REFUND_COMPLETE" and is_fee_decrease_refund:
+                if not target_entry_fee:
+                    raise TransactionStoreError(
+                        f"Fee-decrease refund {refund_id} has no TARGET_ENTRY_FEE."
+                    )
+                entry_updates["ENTRY_FEE"] = target_entry_fee
             store.update_by_id(
                 "EVENT_ENTRIES",
                 entry_id,
+                entry_updates,
+            )
+
+        if internal_status == "REFUND_COMPLETE" and is_fee_decrease_refund and entry_id:
+            # Deterministic audit ID makes refund.created/refund.updated retries
+            # idempotent. The original fee comes from REFUNDS rather than the
+            # current entry row, so the history remains correct even if another
+            # successful Stripe event is delivered later.
+            store.append_audit_log(
                 {
-                    "PAYMENT_STATUS": entry_payment_status,
-                    "PAYMENT_STATUS_CHANGED_AT": now,
-                    "UPDATED_AT": now,
-                },
+                    "AUDIT_ID": f"AUD-FEE-{refund_id}",
+                    "TIMESTAMP": now,
+                    "USER_ID": "SYSTEM_STRIPE",
+                    "USER_EMAIL": "",
+                    "ACTION": "ENTRY_FEE_DECREASE_APPLIED",
+                    "ENTITY_TYPE": "EVENT_ENTRY",
+                    "ENTITY_ID": entry_id,
+                    "ORDER_ID": order_id,
+                    "BEFORE_JSON": json.dumps(
+                        {"ENTRY_FEE": original_entry_fee},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    "AFTER_JSON": json.dumps(
+                        {"ENTRY_FEE": target_entry_fee},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    "REASON": f"Stripe refund {stripe_refund_id} completed",
+                }
             )
 
         after = dict(before)

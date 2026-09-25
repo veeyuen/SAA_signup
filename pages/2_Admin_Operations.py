@@ -80,7 +80,7 @@ try:
     # Include the transaction schema generation in the cache key. This forces a
     # one-time resource refresh after schema-bearing deployments while retaining
     # the quota savings of cache_resource during normal widget reruns.
-    google_client, store = _admin_resources("phase3c1-amendment-recovery")
+    google_client, store = _admin_resources("phase3d-a-fee-decrease")
 except Exception as exc:
     st.error(f"Could not initialise admin storage: {type(exc).__name__}: {exc}")
     st.stop()
@@ -664,22 +664,164 @@ if amend_clicked:
                 st.rerun()
 
 st.markdown("#### Payment amount amendments")
-if is_stripe := (_clean(order.get("PAYMENT_TYPE")).upper() == "STRIPE"):
-    if _clean(payment.get("DISPLAY_STATUS")).upper() == "PAYMENT_COMPLETE":
-        st.info(
-            "This order is already settled in Stripe. Entry-fee/payment-amount changes are not "
-            "written here because changing accounting totals without moving the corresponding "
-            "funds would make the ledger disagree with Stripe. Decreases should use a controlled "
-            "refund; increases require an additional-collection workflow."
-        )
-    else:
-        st.caption(
-            "Stripe amount amendment is deferred until the additional-collection workflow is implemented."
-        )
-else:
+_is_stripe_payment = _clean(order.get("PAYMENT_TYPE")).upper() == "STRIPE"
+_payment_complete = _clean(payment.get("DISPLAY_STATUS")).upper() == "PAYMENT_COMPLETE"
+_entry_withdrawn_for_fee = (
+    _clean(entry.get("STATUS")).upper() == "WITHDRAWN"
+    or _clean(entry.get("IS_DELETED")).upper() == "TRUE"
+)
+_entry_fee_for_amendment = _to_decimal(entry.get("ENTRY_FEE"))
+_open_financial_refund = next(
+    (
+        r for r in order_refunds
+        if _clean(r.get("ENTRY_ID")) == selected_entry_id
+        and _clean(r.get("STATUS")).upper() in {"REFUND_REQUESTED", "REFUND_STARTED"}
+    ),
+    None,
+)
+_payment_committed_for_amendment = sum(
+    (
+        _to_decimal(r.get("APPROVED_AMOUNT"))
+        for r in refunds
+        if _clean(r.get("PAYMENT_ID")) == _clean(payment.get("PAYMENT_ID"))
+        and _clean(r.get("STATUS")).upper() in {"REFUND_STARTED", "REFUND_COMPLETE"}
+    ),
+    Decimal("0"),
+)
+_payment_remaining_for_amendment = max(
+    Decimal("0"),
+    _to_decimal(payment.get("AMOUNT")) - _payment_committed_for_amendment,
+)
+
+if not _is_stripe_payment:
     st.caption(
         "Payment-amount amendment for invoice/no-cost orders will be added with the billing workflow."
     )
+elif not _payment_complete:
+    st.caption("The Stripe payment must be complete before the paid entry fee can be amended.")
+elif _entry_withdrawn_for_fee:
+    st.caption(
+        "This entry is withdrawn. Use the withdrawal refund workflow below rather than changing its fee."
+    )
+elif _open_financial_refund:
+    st.warning(
+        "This entry already has an open refund request: "
+        f"{_clean(_open_financial_refund.get('REFUND_ID'))}. Resolve it before changing the fee."
+    )
+else:
+    st.caption(
+        "Phase 3D-A supports fee decreases on active Stripe-paid entries. The original Stripe "
+        "payment remains immutable; the difference is refunded and the revised ENTRY_FEE is "
+        "applied only after Stripe confirms that refund. Fee increases are handled in Phase 3D-B."
+    )
+    with st.form("fee_decrease_amendment"):
+        fee1, fee2 = st.columns(2)
+        fee1.text_input(
+            "Current entry fee (SGD)",
+            value=f"{_entry_fee_for_amendment:.2f}",
+            disabled=True,
+        )
+        new_fee_text = fee2.text_input(
+            "New entry fee (SGD)",
+            value=f"{_entry_fee_for_amendment:.2f}",
+        )
+        fee_reason = st.text_area(
+            "Financial amendment reason",
+            placeholder="Required for audit trail",
+        )
+        confirm_fee_decrease = st.checkbox(
+            "I confirm that a lower fee will create a Stripe refund request for the difference."
+        )
+        create_fee_decrease = st.form_submit_button("Create fee-decrease refund request")
+
+    if create_fee_decrease:
+        new_fee = _to_decimal(new_fee_text, "-1")
+        refund_delta = _entry_fee_for_amendment - new_fee
+        if new_fee < 0:
+            st.error("New entry fee cannot be negative.")
+        elif new_fee == _entry_fee_for_amendment:
+            st.info("The new fee is unchanged.")
+        elif new_fee > _entry_fee_for_amendment:
+            st.info(
+                "This is a fee increase. Phase 3D-B will create an additional Stripe payment "
+                "for the difference; the existing payment will not be overwritten."
+            )
+        elif not fee_reason.strip():
+            st.error("A financial amendment reason is required.")
+        elif not confirm_fee_decrease:
+            st.error("Please confirm the fee-decrease refund request.")
+        elif refund_delta > _payment_remaining_for_amendment:
+            st.error(
+                "The requested decrease exceeds the remaining amount available on the original "
+                f"Stripe payment (SGD {_payment_remaining_for_amendment:.2f})."
+            )
+        else:
+            timestamp = _now()
+            refund_id = _new_id("RFD")
+            currency = pilot_config.system_value("CURRENCY", "SGD") or "SGD"
+            refund_row = {
+                "REFUND_ID": refund_id,
+                "PAYMENT_ID": _clean(payment.get("PAYMENT_ID")),
+                "ORDER_ID": selected_order_id,
+                "ENTRY_ID": selected_entry_id,
+                "REGISTRATION_ID": registration_id,
+                "REQUESTED_AMOUNT": f"{refund_delta:.2f}",
+                "APPROVED_AMOUNT": "",
+                "CURRENCY": currency.upper(),
+                "REASON": fee_reason.strip(),
+                "REFUND_TYPE": "FEE_DECREASE",
+                "ORIGINAL_ENTRY_FEE": f"{_entry_fee_for_amendment:.2f}",
+                "TARGET_ENTRY_FEE": f"{new_fee:.2f}",
+                "STATUS": "REFUND_REQUESTED",
+                "REQUESTED_BY_USER_ID": user.user_id,
+                "REQUESTED_BY_EMAIL": user_email,
+                "REQUESTED_AT": timestamp,
+                "APPROVED_BY_USER_ID": "",
+                "APPROVED_AT": "",
+                "DECIDED_BY_USER_ID": "",
+                "DECIDED_AT": "",
+                "DECISION_REASON": "",
+                "STRIPE_REFUND_ID": "",
+                "STRIPE_STATUS": "",
+                "COMPLETED_AT": "",
+                "FAILURE_REASON": "",
+                "UPDATED_AT": timestamp,
+            }
+            store.create_refund_request(refund_row)
+            store.update_by_id(
+                "EVENT_ENTRIES",
+                selected_entry_id,
+                {
+                    "PAYMENT_STATUS": "REFUND_REQUESTED",
+                    "PAYMENT_STATUS_CHANGED_AT": timestamp,
+                    "UPDATED_AT": timestamp,
+                },
+            )
+            sync_output_entry(
+                gc=google_client,
+                output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                output_worksheet=OUTPUT_WORKSHEET,
+                entry=entry,
+                payment_status="REFUND_REQUESTED",
+            )
+            _audit(
+                action="FEE_DECREASE_REFUND_REQUESTED",
+                entity_type="REFUND",
+                entity_id=refund_id,
+                order_id=selected_order_id,
+                before={
+                    "ENTRY_FEE": f"{_entry_fee_for_amendment:.2f}",
+                },
+                after=refund_row,
+                reason=fee_reason.strip(),
+            )
+            _load_admin_rows.clear()
+            st.success(
+                f"Fee decrease requested: SGD {_entry_fee_for_amendment:.2f} → "
+                f"SGD {new_fee:.2f}. Refund request {refund_id} is awaiting approval; "
+                "ENTRY_FEE has not changed yet."
+            )
+            st.rerun()
 
 st.subheader("Withdraw event entry")
 entry_withdrawn = (
@@ -805,9 +947,10 @@ if withdraw_clicked:
 
 st.subheader("Refunds")
 st.info(
-    "Refunds are controlled by SAA Admin. A withdrawn paid entry first gets a refund "
-    "request. An admin can then reject it or approve an amount and send the refund to "
-    "Stripe. Stripe webhook events remain authoritative for final completion."
+    "Refunds are controlled by SAA Admin. Withdrawal refunds require the entry to be "
+    "withdrawn first. Fee-decrease refunds may remain on an active entry and carry a target "
+    "ENTRY_FEE. An admin can reject or approve the request; Stripe webhook events remain "
+    "authoritative for final completion."
 )
 
 payment_complete = _clean(payment.get("DISPLAY_STATUS")).upper() == "PAYMENT_COMPLETE"
@@ -851,11 +994,26 @@ entry_committed = sum(
     ),
     Decimal("0"),
 )
+fee_decrease_committed = sum(
+    (
+        _to_decimal(r.get("APPROVED_AMOUNT"))
+        for r in entry_refunds
+        if _clean(r.get("STATUS")).upper() in committed_statuses
+        and _clean(r.get("REFUND_TYPE")).upper() == "FEE_DECREASE"
+    ),
+    Decimal("0"),
+)
 
 payment_remaining = max(Decimal("0"), payment_amount - payment_committed)
+# Once a fee-decrease refund completes, ENTRY_FEE becomes the revised fee. Add
+# completed fee-decrease refunds back to reconstruct this entry's original paid
+# allocation, then subtract all committed refunds. This keeps a later withdrawal
+# refundable up to the currently paid/revised entry fee rather than double-counting
+# the earlier fee adjustment.
+entry_paid_basis = entry_fee + fee_decrease_committed
 entry_remaining = (
-    max(Decimal("0"), entry_fee - entry_committed)
-    if entry_fee > 0
+    max(Decimal("0"), entry_paid_basis - entry_committed)
+    if entry_paid_basis > 0
     else payment_remaining
 )
 max_new_refund = min(payment_remaining, entry_remaining)
@@ -873,11 +1031,16 @@ if not is_stripe:
     st.caption("This order is not a Stripe-paid order; Stripe refunds do not apply.")
 elif not payment_complete:
     st.caption("The original Stripe payment is not complete, so a refund cannot be requested.")
+elif open_refund is not None:
+    if _clean(open_refund.get("REFUND_TYPE")).upper() == "FEE_DECREASE":
+        st.caption("This active entry has a fee-decrease refund request. Decide it below.")
+    elif not entry_withdrawn:
+        st.caption("This entry has an open refund request. Resolve it before creating another.")
 elif not entry_withdrawn:
-    st.caption("Withdraw the event entry before recording a refund request.")
-elif open_refund is None and max_new_refund <= 0:
+    st.caption("Withdraw the event entry before recording a withdrawal refund request.")
+elif max_new_refund <= 0:
     st.success("This entry has no remaining refundable entry fee.")
-elif open_refund is None:
+else:
     default_amount = max_new_refund
     with st.form("refund_request"):
         requested_amount_text = st.text_input(
@@ -912,6 +1075,9 @@ elif open_refund is None:
                 "APPROVED_AMOUNT": "",
                 "CURRENCY": currency.upper(),
                 "REASON": refund_reason.strip(),
+                "REFUND_TYPE": "WITHDRAWAL",
+                "ORIGINAL_ENTRY_FEE": "",
+                "TARGET_ENTRY_FEE": "",
                 "STATUS": "REFUND_REQUESTED",
                 "REQUESTED_BY_USER_ID": user.user_id,
                 "REQUESTED_BY_EMAIL": user_email,
@@ -965,11 +1131,19 @@ if open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_REQUESTE
     requested_amount = _to_decimal(open_refund.get("REQUESTED_AMOUNT"))
     max_approvable = min(requested_amount, max_new_refund)
     payment_intent_id = _clean(payment.get("STRIPE_PAYMENT_INTENT_ID"))
+    refund_type = _clean(open_refund.get("REFUND_TYPE")).upper() or "WITHDRAWAL"
+    is_fee_decrease_refund = refund_type == "FEE_DECREASE"
 
     st.write(
-        f"Requested: **SGD {requested_amount:.2f}**  |  "
+        f"Type: **{refund_type}**  |  Requested: **SGD {requested_amount:.2f}**  |  "
         f"Maximum currently approvable: **SGD {max_approvable:.2f}**"
     )
+    if is_fee_decrease_refund:
+        st.write(
+            "Entry fee: "
+            f"**SGD {_to_decimal(open_refund.get('ORIGINAL_ENTRY_FEE')):.2f} → "
+            f"SGD {_to_decimal(open_refund.get('TARGET_ENTRY_FEE')):.2f}**"
+        )
     st.caption(
         "Only the competition entry amount is refundable here. Stripe's original processing "
         "fees are not added to the refund."
@@ -978,7 +1152,8 @@ if open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_REQUESTE
     with st.form("refund_decision"):
         approved_amount_text = st.text_input(
             "Approved refund amount (SGD)",
-            value=f"{max_approvable:.2f}",
+            value=f"{requested_amount if is_fee_decrease_refund else max_approvable:.2f}",
+            disabled=is_fee_decrease_refund,
         )
         decision_reason = st.text_area(
             "Decision note",
@@ -1044,6 +1219,11 @@ if open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_REQUESTE
             st.error("Approved refund amount must be greater than zero.")
         elif approved_amount > requested_amount:
             st.error("Approved amount cannot exceed the requested amount.")
+        elif is_fee_decrease_refund and approved_amount != requested_amount:
+            st.error(
+                "A fee-decrease refund must be approved for the exact requested difference. "
+                "Reject it and create a new fee amendment if the target fee should change."
+            )
         elif approved_amount > max_approvable:
             st.error(
                 "Approved amount exceeds the remaining refundable amount "
@@ -1070,6 +1250,9 @@ if open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_REQUESTE
                     payment_id=_clean(payment.get("PAYMENT_ID")),
                     approved_by_user_id=user.user_id,
                     approved_at=timestamp,
+                    refund_type=refund_type,
+                    original_entry_fee=_clean(open_refund.get("ORIGINAL_ENTRY_FEE")),
+                    target_entry_fee=_clean(open_refund.get("TARGET_ENTRY_FEE")),
                 )
             except StripeRefundError as exc:
                 # Leave the request pending so an admin can safely retry. The
@@ -1100,6 +1283,8 @@ if open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_REQUESTE
                 entry_payment_status = (
                     "PAYMENT_COMPLETE"
                     if technical_failure
+                    else "PAYMENT_COMPLETE"
+                    if immediate_success and is_fee_decrease_refund
                     else "REFUND_COMPLETE"
                     if immediate_success
                     else "REFUND_STARTED"
@@ -1123,14 +1308,17 @@ if open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_REQUESTE
                 }
                 try:
                     store.update_by_id("REFUNDS", refund_id, updates)
+                    entry_updates = {
+                        "PAYMENT_STATUS": entry_payment_status,
+                        "PAYMENT_STATUS_CHANGED_AT": timestamp,
+                        "UPDATED_AT": timestamp,
+                    }
+                    if immediate_success and is_fee_decrease_refund:
+                        entry_updates["ENTRY_FEE"] = f"{_to_decimal(open_refund.get('TARGET_ENTRY_FEE')):.2f}"
                     store.update_by_id(
                         "EVENT_ENTRIES",
                         selected_entry_id,
-                        {
-                            "PAYMENT_STATUS": entry_payment_status,
-                            "PAYMENT_STATUS_CHANGED_AT": timestamp,
-                            "UPDATED_AT": timestamp,
-                        },
+                        entry_updates,
                     )
                     sync_output_entry(
                         gc=google_client,
@@ -1143,7 +1331,13 @@ if open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_REQUESTE
                     after.update(updates)
                     _audit(
                         action=(
-                            "REFUND_EXECUTION_FAILED"
+                            "FEE_DECREASE_REFUND_FAILED"
+                            if technical_failure and is_fee_decrease_refund
+                            else "FEE_DECREASE_REFUND_COMPLETED"
+                            if immediate_success and is_fee_decrease_refund
+                            else "FEE_DECREASE_REFUND_STARTED"
+                            if is_fee_decrease_refund
+                            else "REFUND_EXECUTION_FAILED"
                             if technical_failure
                             else "REFUND_APPROVED_AND_COMPLETED"
                             if immediate_success
