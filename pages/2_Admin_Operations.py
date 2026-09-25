@@ -16,6 +16,11 @@ from signup.admin_output_projection import (
     sync_output_entry,
 )
 from signup.admin_notification import AdminNotificationError, send_admin_amendment_email
+from signup.fee_increase_payment import (
+    FeeIncreasePaymentError,
+    get_or_create_fee_increase_checkout,
+    send_fee_increase_payment_email,
+)
 from signup.refund_payment import StripeRefundError, create_stripe_refund
 from signup.pilot_config import PilotConfigError, PilotConfigRepository, require_configured_user
 from signup.transaction_store import TransactionSheetStore, TransactionStoreError
@@ -80,7 +85,7 @@ try:
     # Include the transaction schema generation in the cache key. This forces a
     # one-time resource refresh after schema-bearing deployments while retaining
     # the quota savings of cache_resource during normal widget reruns.
-    google_client, store = _admin_resources("phase3d-a-fee-decrease")
+    google_client, store = _admin_resources("phase3d-b-fee-increase")
 except Exception as exc:
     st.error(f"Could not initialise admin storage: {type(exc).__name__}: {exc}")
     st.stop()
@@ -252,7 +257,21 @@ selected_order_id = st.selectbox("Order", order_ids)
 order = next(o for o in orders if _clean(o.get("ORDER_ID")) == selected_order_id)
 order_registrations = [r for r in registrations if _clean(r.get("ORDER_ID")) == selected_order_id]
 order_entries = [e for e in entries if _clean(e.get("ORDER_ID")) == selected_order_id]
-payment = next((p for p in payments if _clean(p.get("ORDER_ID")) == selected_order_id), {})
+order_payments = [p for p in payments if _clean(p.get("ORDER_ID")) == selected_order_id]
+# The original registration payment remains the parent/authoritative source for
+# withdrawal and fee-decrease refunds. Additional fee-increase payments are
+# separate PAYMENTS rows and must never replace this selection.
+payment = next(
+    (
+        p for p in order_payments
+        if _clean(p.get("PAYMENT_PURPOSE")).upper() not in {"FEE_INCREASE"}
+    ),
+    order_payments[0] if order_payments else {},
+)
+additional_payments = [
+    p for p in order_payments
+    if _clean(p.get("PAYMENT_PURPOSE")).upper() == "FEE_INCREASE"
+]
 order_refunds = [r for r in refunds if _clean(r.get("ORDER_ID")) == selected_order_id]
 
 c1, c2, c3, c4 = st.columns(4)
@@ -679,6 +698,17 @@ _open_financial_refund = next(
     ),
     None,
 )
+_entry_additional_payments = [
+    p for p in additional_payments
+    if _clean(p.get("ENTRY_ID")) == selected_entry_id
+]
+_open_fee_increase_payment = next(
+    (
+        p for p in reversed(_entry_additional_payments)
+        if _clean(p.get("DISPLAY_STATUS")).upper() in {"REQUIRED", "PAYMENT_STARTED"}
+    ),
+    None,
+)
 _payment_committed_for_amendment = sum(
     (
         _to_decimal(r.get("APPROVED_AMOUNT"))
@@ -698,7 +728,7 @@ if not _is_stripe_payment:
         "Payment-amount amendment for invoice/no-cost orders will be added with the billing workflow."
     )
 elif not _payment_complete:
-    st.caption("The Stripe payment must be complete before the paid entry fee can be amended.")
+    st.caption("The original Stripe payment must be complete before the paid entry fee can be amended.")
 elif _entry_withdrawn_for_fee:
     st.caption(
         "This entry is withdrawn. Use the withdrawal refund workflow below rather than changing its fee."
@@ -708,13 +738,158 @@ elif _open_financial_refund:
         "This entry already has an open refund request: "
         f"{_clean(_open_financial_refund.get('REFUND_ID'))}. Resolve it before changing the fee."
     )
+elif _open_fee_increase_payment:
+    pending_payment_id = _clean(_open_fee_increase_payment.get("PAYMENT_ID"))
+    pending_status = _clean(_open_fee_increase_payment.get("DISPLAY_STATUS")).upper()
+    pending_amount = _to_decimal(_open_fee_increase_payment.get("AMOUNT"))
+    pending_target = _to_decimal(_open_fee_increase_payment.get("TARGET_ENTRY_FEE"))
+    pending_url = _clean(_open_fee_increase_payment.get("STRIPE_CHECKOUT_URL"))
+    st.warning(
+        f"Additional payment {pending_payment_id} is {pending_status}. "
+        f"SGD {pending_amount:.2f} is required before the entry fee changes to SGD {pending_target:.2f}."
+    )
+    if pending_url:
+        st.markdown(f"[Open Stripe Checkout for this additional payment]({pending_url})")
+        pending_email = _clean(_open_fee_increase_payment.get("NOTIFICATION_EMAIL")) or _clean(entry.get("EMAIL"))
+        already_sent = bool(_clean(_open_fee_increase_payment.get("NOTIFICATION_SENT_AT")))
+        email_button_label = (
+            "Resend additional-payment email"
+            if already_sent
+            else "Send additional-payment email"
+        )
+        if pending_email and st.button(
+            email_button_label,
+            key=f"fee_increase_email_{pending_payment_id}",
+            type="secondary",
+        ):
+            try:
+                send_fee_increase_payment_email(
+                    smtp_host=str(st.secrets.get("SMTP_HOST", "") or ""),
+                    smtp_port=int(st.secrets.get("SMTP_PORT", 587) or 587),
+                    smtp_user=str(st.secrets.get("SMTP_USER", "") or ""),
+                    smtp_password=str(st.secrets.get("SMTP_PASS", "") or ""),
+                    smtp_from=str(st.secrets.get("SMTP_FROM", "") or ""),
+                    to_email=pending_email,
+                    athlete_name=_clean(entry.get("ATHLETE_NAME")),
+                    event_name=_clean(entry.get("EVENT_NAME")),
+                    order_id=selected_order_id,
+                    entry_id=selected_entry_id,
+                    original_entry_fee=f"{_to_decimal(_open_fee_increase_payment.get('ORIGINAL_ENTRY_FEE')):.2f}",
+                    target_entry_fee=f"{pending_target:.2f}",
+                    amount_due=f"{pending_amount:.2f}",
+                    currency=_clean(_open_fee_increase_payment.get("CURRENCY")) or "SGD",
+                    payment_url=pending_url,
+                    reason=_clean(_open_fee_increase_payment.get("REASON")),
+                )
+            except FeeIncreasePaymentError as exc:
+                _audit(
+                    action="FEE_INCREASE_PAYMENT_EMAIL_FAILED",
+                    entity_type="PAYMENT",
+                    entity_id=pending_payment_id,
+                    order_id=selected_order_id,
+                    before={"EMAIL": pending_email},
+                    after={"ERROR": str(exc)},
+                    reason=_clean(_open_fee_increase_payment.get("REASON")),
+                )
+                st.error(str(exc))
+            else:
+                sent_at = _now()
+                store.update_by_id(
+                    "PAYMENTS",
+                    pending_payment_id,
+                    {
+                        "NOTIFICATION_EMAIL": pending_email,
+                        "NOTIFICATION_SENT_AT": sent_at,
+                    },
+                )
+                _audit(
+                    action="FEE_INCREASE_PAYMENT_EMAIL_SENT",
+                    entity_type="PAYMENT",
+                    entity_id=pending_payment_id,
+                    order_id=selected_order_id,
+                    before={},
+                    after={"EMAIL": pending_email, "AMOUNT": f"{pending_amount:.2f}"},
+                    reason=_clean(_open_fee_increase_payment.get("REASON")),
+                )
+                _load_admin_rows.clear()
+                st.success(f"Payment-request email sent to {pending_email}.")
+
+    if pending_status == "REQUIRED":
+        if st.button("Create / retry additional-payment Checkout", type="secondary"):
+            try:
+                checkout = get_or_create_fee_increase_checkout(
+                    secret_key=str(st.secrets.get("STRIPE_SECRET_KEY", "") or ""),
+                    payment_id=pending_payment_id,
+                    order_id=selected_order_id,
+                    entry_id=selected_entry_id,
+                    registration_id=_clean(entry.get("REGISTRATION_ID")),
+                    amount=pending_amount,
+                    currency=_clean(_open_fee_increase_payment.get("CURRENCY")) or "SGD",
+                    customer_email=_clean(entry.get("EMAIL")),
+                    athlete_name=_clean(entry.get("ATHLETE_NAME")),
+                    event_name=_clean(entry.get("EVENT_NAME")),
+                    original_entry_fee=_clean(_open_fee_increase_payment.get("ORIGINAL_ENTRY_FEE")),
+                    target_entry_fee=_clean(_open_fee_increase_payment.get("TARGET_ENTRY_FEE")),
+                    public_app_url=str(st.secrets.get("PUBLIC_APP_URL", "https://saapublicaccess.streamlit.app") or ""),
+                    existing_session_id=_clean(_open_fee_increase_payment.get("STRIPE_CHECKOUT_SESSION_ID")),
+                )
+            except FeeIncreasePaymentError as exc:
+                st.error(str(exc))
+            else:
+                timestamp = _now()
+                checkout_url = _clean(checkout.get("payment_url"))
+                store.update_by_id(
+                    "PAYMENTS",
+                    pending_payment_id,
+                    {
+                        "STRIPE_CHECKOUT_SESSION_ID": _clean(checkout.get("session_id")),
+                        "STRIPE_CHECKOUT_URL": checkout_url,
+                        "DISPLAY_STATUS": "PAYMENT_STARTED",
+                        "STRIPE_STATUS": "checkout_created",
+                        "LAST_ATTEMPT_AT": timestamp,
+                        "FAILURE_REASON": "",
+                    },
+                )
+                store.update_by_id(
+                    "EVENT_ENTRIES",
+                    selected_entry_id,
+                    {
+                        "PAYMENT_STATUS": "PAYMENT_STARTED",
+                        "PAYMENT_STATUS_CHANGED_AT": timestamp,
+                        "UPDATED_AT": timestamp,
+                    },
+                )
+                sync_output_entry(
+                    gc=google_client,
+                    output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                    output_worksheet=OUTPUT_WORKSHEET,
+                    entry=entry,
+                    payment_status="PAYMENT_STARTED",
+                )
+                _audit(
+                    action="FEE_INCREASE_CHECKOUT_CREATED",
+                    entity_type="PAYMENT",
+                    entity_id=pending_payment_id,
+                    order_id=selected_order_id,
+                    before={"DISPLAY_STATUS": pending_status},
+                    after={
+                        "DISPLAY_STATUS": "PAYMENT_STARTED",
+                        "STRIPE_CHECKOUT_SESSION_ID": _clean(checkout.get("session_id")),
+                    },
+                    reason=_clean(_open_fee_increase_payment.get("REASON")),
+                )
+                _load_admin_rows.clear()
+                st.success("Additional-payment Checkout is ready.")
+                if checkout_url:
+                    st.markdown(f"[Open Stripe Checkout]({checkout_url})")
 else:
     st.caption(
-        "Phase 3D-A supports fee decreases on active Stripe-paid entries. The original Stripe "
-        "payment remains immutable; the difference is refunded and the revised ENTRY_FEE is "
-        "applied only after Stripe confirms that refund. Fee increases are handled in Phase 3D-B."
+        "A lower fee creates a controlled partial refund. A higher fee creates a separate "
+        "Stripe payment for only the difference. The original PAYMENTS row and original order "
+        "totals are never overwritten; the revised ENTRY_FEE takes effect only after Stripe "
+        "confirms the corresponding refund or additional payment."
     )
-    with st.form("fee_decrease_amendment"):
+    with st.form("financial_amendment"):
         fee1, fee2 = st.columns(2)
         fee1.text_input(
             "Current entry fee (SGD)",
@@ -727,72 +902,137 @@ else:
         )
         fee_reason = st.text_area(
             "Financial amendment reason",
-            placeholder="Required for audit trail",
+            placeholder="Required for audit trail and participant notification",
         )
-        confirm_fee_decrease = st.checkbox(
-            "I confirm that a lower fee will create a Stripe refund request for the difference."
+        confirm_financial_amendment = st.checkbox(
+            "I confirm that the fee difference will be refunded or collected through Stripe before the revised fee takes effect."
         )
-        create_fee_decrease = st.form_submit_button("Create fee-decrease refund request")
+        create_financial_amendment = st.form_submit_button("Create financial amendment")
 
-    if create_fee_decrease:
+    if create_financial_amendment:
         new_fee = _to_decimal(new_fee_text, "-1")
-        refund_delta = _entry_fee_for_amendment - new_fee
+        delta = new_fee - _entry_fee_for_amendment
         if new_fee < 0:
             st.error("New entry fee cannot be negative.")
         elif new_fee == _entry_fee_for_amendment:
             st.info("The new fee is unchanged.")
-        elif new_fee > _entry_fee_for_amendment:
-            st.info(
-                "This is a fee increase. Phase 3D-B will create an additional Stripe payment "
-                "for the difference; the existing payment will not be overwritten."
-            )
         elif not fee_reason.strip():
             st.error("A financial amendment reason is required.")
-        elif not confirm_fee_decrease:
-            st.error("Please confirm the fee-decrease refund request.")
-        elif refund_delta > _payment_remaining_for_amendment:
-            st.error(
-                "The requested decrease exceeds the remaining amount available on the original "
-                f"Stripe payment (SGD {_payment_remaining_for_amendment:.2f})."
-            )
+        elif not confirm_financial_amendment:
+            st.error("Please confirm the financial amendment.")
+        elif delta < 0:
+            refund_delta = -delta
+            if refund_delta > _payment_remaining_for_amendment:
+                st.error(
+                    "The requested decrease exceeds the remaining amount available on the original "
+                    f"Stripe payment (SGD {_payment_remaining_for_amendment:.2f})."
+                )
+            else:
+                timestamp = _now()
+                refund_id = _new_id("RFD")
+                currency = pilot_config.system_value("CURRENCY", "SGD") or "SGD"
+                refund_row = {
+                    "REFUND_ID": refund_id,
+                    "PAYMENT_ID": _clean(payment.get("PAYMENT_ID")),
+                    "ORDER_ID": selected_order_id,
+                    "ENTRY_ID": selected_entry_id,
+                    "REGISTRATION_ID": registration_id,
+                    "REQUESTED_AMOUNT": f"{refund_delta:.2f}",
+                    "APPROVED_AMOUNT": "",
+                    "CURRENCY": currency.upper(),
+                    "REASON": fee_reason.strip(),
+                    "REFUND_TYPE": "FEE_DECREASE",
+                    "ORIGINAL_ENTRY_FEE": f"{_entry_fee_for_amendment:.2f}",
+                    "TARGET_ENTRY_FEE": f"{new_fee:.2f}",
+                    "STATUS": "REFUND_REQUESTED",
+                    "REQUESTED_BY_USER_ID": user.user_id,
+                    "REQUESTED_BY_EMAIL": user_email,
+                    "REQUESTED_AT": timestamp,
+                    "APPROVED_BY_USER_ID": "",
+                    "APPROVED_AT": "",
+                    "DECIDED_BY_USER_ID": "",
+                    "DECIDED_AT": "",
+                    "DECISION_REASON": "",
+                    "STRIPE_REFUND_ID": "",
+                    "STRIPE_STATUS": "",
+                    "COMPLETED_AT": "",
+                    "FAILURE_REASON": "",
+                    "UPDATED_AT": timestamp,
+                }
+                store.create_refund_request(refund_row)
+                store.update_by_id(
+                    "EVENT_ENTRIES",
+                    selected_entry_id,
+                    {
+                        "PAYMENT_STATUS": "REFUND_REQUESTED",
+                        "PAYMENT_STATUS_CHANGED_AT": timestamp,
+                        "UPDATED_AT": timestamp,
+                    },
+                )
+                sync_output_entry(
+                    gc=google_client,
+                    output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                    output_worksheet=OUTPUT_WORKSHEET,
+                    entry=entry,
+                    payment_status="REFUND_REQUESTED",
+                )
+                _audit(
+                    action="FEE_DECREASE_REFUND_REQUESTED",
+                    entity_type="REFUND",
+                    entity_id=refund_id,
+                    order_id=selected_order_id,
+                    before={"ENTRY_FEE": f"{_entry_fee_for_amendment:.2f}"},
+                    after=refund_row,
+                    reason=fee_reason.strip(),
+                )
+                _load_admin_rows.clear()
+                st.success(
+                    f"Fee decrease requested: SGD {_entry_fee_for_amendment:.2f} → SGD {new_fee:.2f}. "
+                    f"Refund request {refund_id} is awaiting approval; ENTRY_FEE has not changed yet."
+                )
+                st.rerun()
         else:
+            currency = (pilot_config.system_value("CURRENCY", "SGD") or "SGD").upper()
+            additional_amount = delta
             timestamp = _now()
-            refund_id = _new_id("RFD")
-            currency = pilot_config.system_value("CURRENCY", "SGD") or "SGD"
-            refund_row = {
-                "REFUND_ID": refund_id,
-                "PAYMENT_ID": _clean(payment.get("PAYMENT_ID")),
+            additional_payment_id = _new_id("PAY")
+            participant_email = _clean(entry.get("EMAIL"))
+            payment_row = {
+                "PAYMENT_ID": additional_payment_id,
                 "ORDER_ID": selected_order_id,
+                "PROVIDER": "STRIPE",
+                "STRIPE_CHECKOUT_SESSION_ID": "",
+                "STRIPE_PAYMENT_INTENT_ID": "",
+                "PAYMENT_METHOD": "",
+                "AMOUNT": f"{additional_amount:.2f}",
+                "PROCESSING_FEE": "",
+                "DISPLAY_STATUS": "REQUIRED",
+                "STRIPE_STATUS": "",
+                "CREATED_AT": timestamp,
+                "PAID_AT": "",
+                "LAST_ATTEMPT_AT": timestamp,
+                "FAILURE_REASON": "",
+                "PAYMENT_PURPOSE": "FEE_INCREASE",
                 "ENTRY_ID": selected_entry_id,
                 "REGISTRATION_ID": registration_id,
-                "REQUESTED_AMOUNT": f"{refund_delta:.2f}",
-                "APPROVED_AMOUNT": "",
-                "CURRENCY": currency.upper(),
-                "REASON": fee_reason.strip(),
-                "REFUND_TYPE": "FEE_DECREASE",
+                "PARENT_PAYMENT_ID": _clean(payment.get("PAYMENT_ID")),
+                "CURRENCY": currency,
                 "ORIGINAL_ENTRY_FEE": f"{_entry_fee_for_amendment:.2f}",
                 "TARGET_ENTRY_FEE": f"{new_fee:.2f}",
-                "STATUS": "REFUND_REQUESTED",
+                "REASON": fee_reason.strip(),
                 "REQUESTED_BY_USER_ID": user.user_id,
                 "REQUESTED_BY_EMAIL": user_email,
                 "REQUESTED_AT": timestamp,
-                "APPROVED_BY_USER_ID": "",
-                "APPROVED_AT": "",
-                "DECIDED_BY_USER_ID": "",
-                "DECIDED_AT": "",
-                "DECISION_REASON": "",
-                "STRIPE_REFUND_ID": "",
-                "STRIPE_STATUS": "",
-                "COMPLETED_AT": "",
-                "FAILURE_REASON": "",
-                "UPDATED_AT": timestamp,
+                "STRIPE_CHECKOUT_URL": "",
+                "NOTIFICATION_EMAIL": participant_email,
+                "NOTIFICATION_SENT_AT": "",
             }
-            store.create_refund_request(refund_row)
+            store.append_if_missing("PAYMENTS", payment_row)
             store.update_by_id(
                 "EVENT_ENTRIES",
                 selected_entry_id,
                 {
-                    "PAYMENT_STATUS": "REFUND_REQUESTED",
+                    "PAYMENT_STATUS": "REQUIRED",
                     "PAYMENT_STATUS_CHANGED_AT": timestamp,
                     "UPDATED_AT": timestamp,
                 },
@@ -802,26 +1042,155 @@ else:
                 output_sheet_url_or_id=OUTPUT_SHEET_URL,
                 output_worksheet=OUTPUT_WORKSHEET,
                 entry=entry,
-                payment_status="REFUND_REQUESTED",
+                payment_status="REQUIRED",
             )
             _audit(
-                action="FEE_DECREASE_REFUND_REQUESTED",
-                entity_type="REFUND",
-                entity_id=refund_id,
+                action="FEE_INCREASE_PAYMENT_REQUESTED",
+                entity_type="PAYMENT",
+                entity_id=additional_payment_id,
                 order_id=selected_order_id,
-                before={
-                    "ENTRY_FEE": f"{_entry_fee_for_amendment:.2f}",
-                },
-                after=refund_row,
+                before={"ENTRY_FEE": f"{_entry_fee_for_amendment:.2f}"},
+                after=payment_row,
                 reason=fee_reason.strip(),
             )
-            _load_admin_rows.clear()
-            st.success(
-                f"Fee decrease requested: SGD {_entry_fee_for_amendment:.2f} → "
-                f"SGD {new_fee:.2f}. Refund request {refund_id} is awaiting approval; "
-                "ENTRY_FEE has not changed yet."
-            )
-            st.rerun()
+
+            try:
+                checkout = get_or_create_fee_increase_checkout(
+                    secret_key=str(st.secrets.get("STRIPE_SECRET_KEY", "") or ""),
+                    payment_id=additional_payment_id,
+                    order_id=selected_order_id,
+                    entry_id=selected_entry_id,
+                    registration_id=registration_id,
+                    amount=additional_amount,
+                    currency=currency,
+                    customer_email=participant_email,
+                    athlete_name=_clean(entry.get("ATHLETE_NAME")),
+                    event_name=_clean(entry.get("EVENT_NAME")),
+                    original_entry_fee=_entry_fee_for_amendment,
+                    target_entry_fee=new_fee,
+                    public_app_url=str(st.secrets.get("PUBLIC_APP_URL", "https://saapublicaccess.streamlit.app") or ""),
+                )
+            except FeeIncreasePaymentError as exc:
+                store.update_by_id(
+                    "PAYMENTS",
+                    additional_payment_id,
+                    {
+                        "FAILURE_REASON": str(exc),
+                        "LAST_ATTEMPT_AT": _now(),
+                    },
+                )
+                _load_admin_rows.clear()
+                st.error(
+                    f"The fee-increase request was recorded as {additional_payment_id}, but Stripe Checkout "
+                    f"was not created: {exc}. Use Create / retry additional-payment Checkout on the next rerun."
+                )
+            else:
+                checkout_url = _clean(checkout.get("payment_url"))
+                session_id = _clean(checkout.get("session_id"))
+                started_at = _now()
+                store.update_by_id(
+                    "PAYMENTS",
+                    additional_payment_id,
+                    {
+                        "STRIPE_CHECKOUT_SESSION_ID": session_id,
+                        "STRIPE_CHECKOUT_URL": checkout_url,
+                        "DISPLAY_STATUS": "PAYMENT_STARTED",
+                        "STRIPE_STATUS": "checkout_created",
+                        "LAST_ATTEMPT_AT": started_at,
+                        "FAILURE_REASON": "",
+                    },
+                )
+                store.update_by_id(
+                    "EVENT_ENTRIES",
+                    selected_entry_id,
+                    {
+                        "PAYMENT_STATUS": "PAYMENT_STARTED",
+                        "PAYMENT_STATUS_CHANGED_AT": started_at,
+                        "UPDATED_AT": started_at,
+                    },
+                )
+                sync_output_entry(
+                    gc=google_client,
+                    output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                    output_worksheet=OUTPUT_WORKSHEET,
+                    entry=entry,
+                    payment_status="PAYMENT_STARTED",
+                )
+                _audit(
+                    action="FEE_INCREASE_CHECKOUT_CREATED",
+                    entity_type="PAYMENT",
+                    entity_id=additional_payment_id,
+                    order_id=selected_order_id,
+                    before={"DISPLAY_STATUS": "REQUIRED"},
+                    after={
+                        "DISPLAY_STATUS": "PAYMENT_STARTED",
+                        "STRIPE_CHECKOUT_SESSION_ID": session_id,
+                        "AMOUNT": f"{additional_amount:.2f}",
+                    },
+                    reason=fee_reason.strip(),
+                )
+
+                notification_message = ""
+                if participant_email and checkout_url:
+                    try:
+                        send_fee_increase_payment_email(
+                            smtp_host=str(st.secrets.get("SMTP_HOST", "") or ""),
+                            smtp_port=int(st.secrets.get("SMTP_PORT", 587) or 587),
+                            smtp_user=str(st.secrets.get("SMTP_USER", "") or ""),
+                            smtp_password=str(st.secrets.get("SMTP_PASS", "") or ""),
+                            smtp_from=str(st.secrets.get("SMTP_FROM", "") or ""),
+                            to_email=participant_email,
+                            athlete_name=_clean(entry.get("ATHLETE_NAME")),
+                            event_name=_clean(entry.get("EVENT_NAME")),
+                            order_id=selected_order_id,
+                            entry_id=selected_entry_id,
+                            original_entry_fee=f"{_entry_fee_for_amendment:.2f}",
+                            target_entry_fee=f"{new_fee:.2f}",
+                            amount_due=f"{additional_amount:.2f}",
+                            currency=currency,
+                            payment_url=checkout_url,
+                            reason=fee_reason.strip(),
+                        )
+                    except FeeIncreasePaymentError as exc:
+                        _audit(
+                            action="FEE_INCREASE_PAYMENT_EMAIL_FAILED",
+                            entity_type="PAYMENT",
+                            entity_id=additional_payment_id,
+                            order_id=selected_order_id,
+                            before={"EMAIL": participant_email},
+                            after={"ERROR": str(exc)},
+                            reason=fee_reason.strip(),
+                        )
+                        notification_message = f" Participant email failed: {exc}"
+                    else:
+                        sent_at = _now()
+                        store.update_by_id(
+                            "PAYMENTS",
+                            additional_payment_id,
+                            {
+                                "NOTIFICATION_EMAIL": participant_email,
+                                "NOTIFICATION_SENT_AT": sent_at,
+                            },
+                        )
+                        _audit(
+                            action="FEE_INCREASE_PAYMENT_EMAIL_SENT",
+                            entity_type="PAYMENT",
+                            entity_id=additional_payment_id,
+                            order_id=selected_order_id,
+                            before={},
+                            after={"EMAIL": participant_email, "AMOUNT": f"{additional_amount:.2f}"},
+                            reason=fee_reason.strip(),
+                        )
+                        notification_message = " Participant payment-request email sent."
+
+                _load_admin_rows.clear()
+                st.success(
+                    f"Additional payment {additional_payment_id} created for SGD {additional_amount:.2f}. "
+                    f"ENTRY_FEE remains SGD {_entry_fee_for_amendment:.2f} until Stripe confirms payment."
+                    + notification_message
+                )
+                if checkout_url:
+                    st.markdown(f"[Open Stripe Checkout]({checkout_url})")
 
 st.subheader("Withdraw event entry")
 entry_withdrawn = (
@@ -1027,6 +1396,17 @@ if open_refund:
 # ---------------------------------------------------------------------------
 # 1. Record a new refund request
 # ---------------------------------------------------------------------------
+# After a fee increase, one entry can be funded by more than one Stripe
+# PaymentIntent. The current withdrawal-refund flow intentionally refuses to
+# under-refund such an entry; Phase 3D-C will allocate a withdrawal across all
+# contributing payments. Fee-decrease refunds remain safe because they are
+# capped by the original payment's remaining refundable balance.
+_completed_fee_increase_payments = [
+    p for p in additional_payments
+    if _clean(p.get("ENTRY_ID")) == selected_entry_id
+    and _clean(p.get("DISPLAY_STATUS")).upper() == "PAYMENT_COMPLETE"
+]
+
 if not is_stripe:
     st.caption("This order is not a Stripe-paid order; Stripe refunds do not apply.")
 elif not payment_complete:
@@ -1038,6 +1418,13 @@ elif open_refund is not None:
         st.caption("This entry has an open refund request. Resolve it before creating another.")
 elif not entry_withdrawn:
     st.caption("Withdraw the event entry before recording a withdrawal refund request.")
+elif _completed_fee_increase_payments:
+    st.warning(
+        "This withdrawn entry was funded by the original Stripe payment plus one or more "
+        "additional fee-increase payments. A withdrawal refund must therefore be split "
+        "across the contributing Stripe payments. Phase 3D-C will perform that allocation; "
+        "no potentially incomplete refund request is created here."
+    )
 elif max_new_refund <= 0:
     st.success("This entry has no remaining refundable entry fee.")
 else:

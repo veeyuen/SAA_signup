@@ -21,6 +21,7 @@ from webhook_email import send_paid_confirmation_email
 from webhook_output_writer import (
     append_confirmed_entries_if_missing,
     update_entry_payment_status,
+    update_entry_fee_and_payment_status,
 )
 
 
@@ -410,13 +411,27 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
     output_url = str(os.environ.get("OUTPUT_SHEET_URL", "") or "").strip()
     if output_url and entry_id:
         try:
-            update_entry_payment_status(
-                gc=google_client,
-                output_sheet_url_or_id=output_url,
-                output_worksheet=os.environ.get("OUTPUT_WORKSHEET", ""),
-                entry_id=entry_id,
-                payment_status=entry_payment_status,
-            )
+            if (
+                internal_status == "REFUND_COMPLETE"
+                and is_fee_decrease_refund
+                and target_entry_fee
+            ):
+                update_entry_fee_and_payment_status(
+                    gc=google_client,
+                    output_sheet_url_or_id=output_url,
+                    output_worksheet=os.environ.get("OUTPUT_WORKSHEET", ""),
+                    entry_id=entry_id,
+                    entry_fee=target_entry_fee,
+                    payment_status=entry_payment_status,
+                )
+            else:
+                update_entry_payment_status(
+                    gc=google_client,
+                    output_sheet_url_or_id=output_url,
+                    output_worksheet=os.environ.get("OUTPUT_WORKSHEET", ""),
+                    entry_id=entry_id,
+                    payment_status=entry_payment_status,
+                )
         except Exception as exc:
             return jsonify(
                 {"error": f"Refund OUTPUT reconciliation failed: {type(exc).__name__}: {exc}"}
@@ -430,6 +445,327 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
             "status": internal_status,
         }
     ), 200
+
+
+def _handle_fee_increase_checkout_event(*, event: dict, event_type: str, session: dict):
+    """Reconcile one additional Stripe payment for an admin fee increase.
+
+    This path deliberately bypasses PendingPayments and the normal order-level
+    completion helper. A top-up must never reconfirm withdrawn sibling entries
+    or overwrite the original payment. Only the new PAYMENTS row and its target
+    EVENT_ENTRY are changed.
+    """
+    google_client = create_google_client(_json_env("GCP_SERVICE_ACCOUNT_JSON"))
+    transaction_sheet_url = _transaction_sheet_url()
+    if not transaction_sheet_url:
+        return jsonify({"error": "TRANSACTION_SHEET_URL/OUTPUT_SHEET_URL is missing"}), 500
+
+    try:
+        store = TransactionSheetStore(
+            google_client=google_client,
+            sheet_url=transaction_sheet_url,
+        )
+    except TransactionStoreError as exc:
+        return jsonify({"error": f"Transaction store unavailable: {exc}"}), 500
+
+    metadata = session.get("metadata") or {}
+    payment_id = str(metadata.get("payment_id", "") or "").strip()
+    actual_session_id = str(session.get("id", "") or "").strip()
+
+    try:
+        payment = (
+            store.find_first("PAYMENTS", "PAYMENT_ID", payment_id)
+            if payment_id
+            else None
+        )
+        if payment is None and actual_session_id:
+            payment = store.find_first(
+                "PAYMENTS",
+                "STRIPE_CHECKOUT_SESSION_ID",
+                actual_session_id,
+            )
+    except TransactionStoreError as exc:
+        return jsonify({"error": f"Fee-increase payment lookup failed: {exc}"}), 500
+
+    if not payment:
+        return jsonify(
+            {
+                "error": "Tracked fee-increase payment was not found",
+                "stripe_session_id": actual_session_id,
+            }
+        ), 404
+
+    purpose = str(payment.get("PAYMENT_PURPOSE", "") or metadata.get("payment_purpose", "") or "").strip().upper()
+    if purpose != "FEE_INCREASE":
+        return jsonify({"error": "PAYMENTS row is not a FEE_INCREASE payment"}), 400
+
+    payment_id = str(payment.get("PAYMENT_ID", "") or payment_id).strip()
+    order_id = str(payment.get("ORDER_ID", "") or metadata.get("order_id", "") or "").strip()
+    entry_id = str(payment.get("ENTRY_ID", "") or metadata.get("entry_id", "") or "").strip()
+    expected_session_id = str(payment.get("STRIPE_CHECKOUT_SESSION_ID", "") or "").strip()
+    expected_currency = str(payment.get("CURRENCY", "") or session.get("currency", "") or "SGD").strip().lower()
+    target_entry_fee = str(payment.get("TARGET_ENTRY_FEE", "") or metadata.get("target_entry_fee", "") or "").strip()
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    failure_events = {
+        "checkout.session.async_payment_failed",
+        "checkout.session.expired",
+    }
+
+    if event_type in failure_events:
+        if expected_session_id and actual_session_id and expected_session_id != actual_session_id:
+            return jsonify(
+                {
+                    "received": True,
+                    "ignored": "stale_fee_increase_checkout_failure",
+                    "session_id": actual_session_id,
+                }
+            ), 200
+
+        failure_status = "expired" if event_type == "checkout.session.expired" else "failed"
+        try:
+            store.update_by_id(
+                "PAYMENTS",
+                payment_id,
+                {
+                    "DISPLAY_STATUS": "REQUIRED",
+                    "STRIPE_STATUS": failure_status,
+                    "LAST_ATTEMPT_AT": now,
+                    "FAILURE_REASON": event_type,
+                    "STRIPE_CHECKOUT_URL": "",
+                },
+            )
+            if entry_id:
+                store.update_by_id(
+                    "EVENT_ENTRIES",
+                    entry_id,
+                    {
+                        "PAYMENT_STATUS": "REQUIRED",
+                        "PAYMENT_STATUS_CHANGED_AT": now,
+                        "UPDATED_AT": now,
+                    },
+                )
+            event_id = str(event.get("id", "") or "").strip()
+            store.append_audit_log(
+                {
+                    "AUDIT_ID": f"AUD-{event_id}" if event_id else f"AUD-FEEINC-FAIL-{payment_id}-{failure_status}",
+                    "TIMESTAMP": now,
+                    "USER_ID": "SYSTEM_STRIPE",
+                    "USER_EMAIL": "",
+                    "ACTION": "STRIPE_FEE_INCREASE_RECONCILED",
+                    "ENTITY_TYPE": "PAYMENT",
+                    "ENTITY_ID": payment_id,
+                    "ORDER_ID": order_id,
+                    "BEFORE_JSON": json.dumps(payment, ensure_ascii=False, sort_keys=True),
+                    "AFTER_JSON": json.dumps(
+                        {
+                            **payment,
+                            "DISPLAY_STATUS": "REQUIRED",
+                            "STRIPE_STATUS": failure_status,
+                            "FAILURE_REASON": event_type,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    "REASON": event_type,
+                }
+            )
+        except TransactionStoreError as exc:
+            return jsonify({"error": f"Fee-increase failure reconciliation failed: {exc}"}), 500
+
+        output_url = str(os.environ.get("OUTPUT_SHEET_URL", "") or "").strip()
+        if output_url and entry_id:
+            try:
+                update_entry_payment_status(
+                    gc=google_client,
+                    output_sheet_url_or_id=output_url,
+                    output_worksheet=os.environ.get("OUTPUT_WORKSHEET", ""),
+                    entry_id=entry_id,
+                    payment_status="REQUIRED",
+                )
+            except Exception as exc:
+                return jsonify(
+                    {"error": f"Fee-increase failure OUTPUT reconciliation failed: {type(exc).__name__}: {exc}"}
+                ), 500
+        return jsonify({"received": True, "status": "REQUIRED", "payment_id": payment_id}), 200
+
+    # Card is normally paid on checkout.session.completed. PayNow can complete
+    # Checkout before funds settle; in that case wait for async_payment_succeeded.
+    if str(session.get("payment_status", "") or "").lower() != "paid":
+        return jsonify({"received": True, "paid": False, "payment_id": payment_id}), 200
+
+    if expected_session_id and actual_session_id != expected_session_id:
+        return jsonify(
+            {
+                "error": "Fee-increase Stripe session mismatch",
+                "expected": expected_session_id,
+                "received": actual_session_id,
+            }
+        ), 400
+
+    try:
+        expected_amount = Decimal(str(payment.get("AMOUNT", "0") or "0"))
+        actual_amount = Decimal(str(session.get("amount_total", 0) or 0)) / Decimal("100")
+    except Exception as exc:
+        return jsonify({"error": f"Could not validate additional payment amount: {exc}"}), 500
+
+    actual_currency = str(session.get("currency", "") or "").strip().lower()
+    if actual_amount != expected_amount or actual_currency != expected_currency:
+        mismatch = (
+            f"Fee-increase payment mismatch: expected {expected_currency.upper()} {expected_amount:.2f}, "
+            f"received {actual_currency.upper()} {actual_amount:.2f}"
+        )
+        try:
+            store.update_by_id(
+                "PAYMENTS",
+                payment_id,
+                {
+                    "DISPLAY_STATUS": "REQUIRED",
+                    "STRIPE_STATUS": "validation_mismatch",
+                    "LAST_ATTEMPT_AT": now,
+                    "FAILURE_REASON": mismatch,
+                },
+            )
+            if entry_id:
+                store.update_by_id(
+                    "EVENT_ENTRIES",
+                    entry_id,
+                    {
+                        "PAYMENT_STATUS": "REQUIRED",
+                        "PAYMENT_STATUS_CHANGED_AT": now,
+                        "UPDATED_AT": now,
+                    },
+                )
+        except TransactionStoreError as exc:
+            return jsonify({"error": f"Additional-payment mismatch update failed: {exc}"}), 500
+        output_url = str(os.environ.get("OUTPUT_SHEET_URL", "") or "").strip()
+        if output_url and entry_id:
+            try:
+                update_entry_payment_status(
+                    gc=google_client,
+                    output_sheet_url_or_id=output_url,
+                    output_worksheet=os.environ.get("OUTPUT_WORKSHEET", ""),
+                    entry_id=entry_id,
+                    payment_status="REQUIRED",
+                )
+            except Exception as exc:
+                return jsonify({"error": f"Additional-payment mismatch OUTPUT update failed: {type(exc).__name__}: {exc}"}), 500
+        return jsonify({"error": mismatch}), 400
+
+    if not entry_id or not target_entry_fee:
+        return jsonify({"error": "Fee-increase payment is missing ENTRY_ID or TARGET_ENTRY_FEE"}), 500
+
+    try:
+        entry_before = store.find_first("EVENT_ENTRIES", "ENTRY_ID", entry_id)
+        if entry_before is None:
+            raise TransactionStoreError(f"Could not find EVENT_ENTRIES row for {entry_id}.")
+
+        entry_fee_before = str(entry_before.get("ENTRY_FEE", "") or "").strip()
+        try:
+            fee_changed = Decimal(entry_fee_before or "0") != Decimal(target_entry_fee)
+        except Exception:
+            fee_changed = entry_fee_before != target_entry_fee
+
+        payment_intent_id = str(session.get("payment_intent", "") or "").strip()
+        actual_payment_method = _actual_payment_method(session)
+        store.update_by_id(
+            "PAYMENTS",
+            payment_id,
+            {
+                "STRIPE_PAYMENT_INTENT_ID": payment_intent_id,
+                "PAYMENT_METHOD": actual_payment_method,
+                "DISPLAY_STATUS": "PAYMENT_COMPLETE",
+                "STRIPE_STATUS": "paid",
+                "PAID_AT": now,
+                "LAST_ATTEMPT_AT": now,
+                "FAILURE_REASON": "",
+            },
+        )
+
+        store.update_by_id(
+            "EVENT_ENTRIES",
+            entry_id,
+            {
+                "ENTRY_FEE": target_entry_fee,
+                "PAYMENT_STATUS": "PAYMENT_COMPLETE",
+                "PAYMENT_STATUS_CHANGED_AT": now,
+                "UPDATED_AT": now,
+            },
+        )
+
+        if fee_changed:
+            store.append_audit_log(
+                {
+                    "AUDIT_ID": f"AUD-FEEINC-{payment_id}",
+                    "TIMESTAMP": now,
+                    "USER_ID": "SYSTEM_STRIPE",
+                    "USER_EMAIL": "",
+                    "ACTION": "ENTRY_FEE_INCREASE_APPLIED",
+                    "ENTITY_TYPE": "EVENT_ENTRY",
+                    "ENTITY_ID": entry_id,
+                    "ORDER_ID": order_id,
+                    "BEFORE_JSON": json.dumps({"ENTRY_FEE": entry_fee_before}, ensure_ascii=False, sort_keys=True),
+                    "AFTER_JSON": json.dumps({"ENTRY_FEE": target_entry_fee}, ensure_ascii=False, sort_keys=True),
+                    "REASON": f"Additional Stripe payment {payment_id} completed",
+                }
+            )
+
+        event_id = str(event.get("id", "") or "").strip()
+        payment_after = dict(payment)
+        payment_after.update(
+            {
+                "STRIPE_PAYMENT_INTENT_ID": payment_intent_id,
+                "PAYMENT_METHOD": actual_payment_method,
+                "DISPLAY_STATUS": "PAYMENT_COMPLETE",
+                "STRIPE_STATUS": "paid",
+                "PAID_AT": now,
+                "LAST_ATTEMPT_AT": now,
+                "FAILURE_REASON": "",
+            }
+        )
+        store.append_audit_log(
+            {
+                "AUDIT_ID": f"AUD-{event_id}" if event_id else f"AUD-FEEINC-PAID-{payment_id}",
+                "TIMESTAMP": now,
+                "USER_ID": "SYSTEM_STRIPE",
+                "USER_EMAIL": "",
+                "ACTION": "STRIPE_FEE_INCREASE_RECONCILED",
+                "ENTITY_TYPE": "PAYMENT",
+                "ENTITY_ID": payment_id,
+                "ORDER_ID": order_id,
+                "BEFORE_JSON": json.dumps(payment, ensure_ascii=False, sort_keys=True),
+                "AFTER_JSON": json.dumps(payment_after, ensure_ascii=False, sort_keys=True),
+                "REASON": event_type,
+            }
+        )
+    except TransactionStoreError as exc:
+        return jsonify({"error": f"Fee-increase payment reconciliation failed: {exc}"}), 500
+
+    output_url = str(os.environ.get("OUTPUT_SHEET_URL", "") or "").strip()
+    if output_url:
+        try:
+            update_entry_fee_and_payment_status(
+                gc=google_client,
+                output_sheet_url_or_id=output_url,
+                output_worksheet=os.environ.get("OUTPUT_WORKSHEET", ""),
+                entry_id=entry_id,
+                entry_fee=target_entry_fee,
+                payment_status="PAYMENT_COMPLETE",
+            )
+        except Exception as exc:
+            return jsonify(
+                {"error": f"Fee-increase OUTPUT reconciliation failed: {type(exc).__name__}: {exc}"}
+            ), 500
+
+    return jsonify(
+        {
+            "received": True,
+            "payment_id": payment_id,
+            "entry_id": entry_id,
+            "status": "PAYMENT_COMPLETE",
+        }
+    ), 200
+
 
 def stripe_webhook(request: Request):
     raw_body = request.get_data()
@@ -471,6 +807,23 @@ def stripe_webhook(request: Request):
             session = session.to_dict_recursive()
         elif hasattr(session, "to_dict"):
             session = session.to_dict()
+
+    checkout_events = {
+        "checkout.session.completed",
+        "checkout.session.async_payment_succeeded",
+        "checkout.session.async_payment_failed",
+        "checkout.session.expired",
+    }
+    session_metadata = session.get("metadata") or {}
+    if (
+        event_type in checkout_events
+        and str(session_metadata.get("payment_purpose", "") or "").strip().upper() == "FEE_INCREASE"
+    ):
+        return _handle_fee_increase_checkout_event(
+            event=event,
+            event_type=event_type,
+            session=session,
+        )
 
     refund_events = {"refund.created", "refund.updated", "refund.failed"}
     if event_type in refund_events:
