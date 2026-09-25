@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 import json
 import secrets
 from decimal import Decimal, InvalidOperation
@@ -9,7 +10,11 @@ import pandas as pd
 import streamlit as st
 
 from payment_store import create_google_client
-from signup.output_admin import OutputAdminError, sync_output_entry
+from signup.output_admin import (
+    OutputAdminError,
+    get_output_entry_snapshot,
+    sync_output_entry,
+)
 from signup.admin_notification import AdminNotificationError, send_admin_amendment_email
 from signup.refund_payment import StripeRefundError, create_stripe_refund
 from signup.pilot_config import PilotConfigError, PilotConfigRepository, require_configured_user
@@ -43,6 +48,19 @@ if user.role != "SAA_ADMIN":
     st.error("SAA_ADMIN access is required for this page.")
     st.stop()
 
+# Fail closed before any transaction write if the deployed admin page and
+# OUTPUT projection module are from different releases. This prevents the
+# partial-write failure encountered when the page expected `field_updates` but
+# Streamlit Cloud was still running an older signup.output_admin module.
+_output_sync_parameters = inspect.signature(sync_output_entry).parameters
+if "field_updates" not in _output_sync_parameters:
+    st.error(
+        "Admin deployment mismatch: signup.output_admin is older than this "
+        "Admin Operations page. No amendment has been written. Redeploy the "
+        "matching output_admin.py module before continuing."
+    )
+    st.stop()
+
 @st.cache_resource(show_spinner=False)
 def _admin_resources(schema_version: str):
     """Create the Google client/store once per Streamlit worker.
@@ -62,7 +80,7 @@ try:
     # Include the transaction schema generation in the cache key. This forces a
     # one-time resource refresh after schema-bearing deployments while retaining
     # the quota savings of cache_resource during normal widget reruns.
-    google_client, store = _admin_resources("phase3b2-merged-hardening")
+    google_client, store = _admin_resources("phase3c1-amendment-recovery")
 except Exception as exc:
     st.error(f"Could not initialise admin storage: {type(exc).__name__}: {exc}")
     st.stop()
@@ -383,7 +401,131 @@ if amend_clicked:
                     changes.append((labels[field], old, new_value))
 
             if not changes:
-                st.info("No registration fields were changed.")
+                # A previous deployment mismatch may have allowed the transaction
+                # rows to update before OUTPUT/audit/email reconciliation. Compare
+                # the current transaction state with the selected OUTPUT row and,
+                # only when they differ, repair the projection idempotently.
+                output_before = get_output_entry_snapshot(
+                    gc=google_client,
+                    output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                    output_worksheet=OUTPUT_WORKSHEET,
+                    entry=entry,
+                )
+                recovery_fields = [
+                    ("Athlete name", "ATHLETE_NAME", ("full_name", "name")),
+                    ("Date of birth", "DOB", ("birth_date", "dob", "date_of_birth")),
+                    ("Team name", "TEAM_NAME", ("team_name",)),
+                    ("Team code", "TEAM_CODE", ("team_code",)),
+                    ("Event", "EVENT_NAME", ("event", "event_name")),
+                    ("Event code", "EVENT_CODE", ("event_code",)),
+                    ("Division", "DIVISION", ("event_division", "division")),
+                    ("Season Best", "SEASON_BEST", ("season_best",)),
+                ]
+                recovery_changes: list[tuple[str, str, str]] = []
+                for label, canonical, aliases in recovery_fields:
+                    if canonical in {"ATHLETE_NAME", "DOB", "TEAM_NAME", "TEAM_CODE"}:
+                        current_value = _clean(registration.get(canonical)) or _clean(entry.get(canonical))
+                    else:
+                        current_value = _clean(entry.get(canonical))
+                    projected_value = ""
+                    for alias in aliases:
+                        candidate = _clean(output_before.get(alias))
+                        if candidate:
+                            projected_value = candidate
+                            break
+                    if projected_value != current_value:
+                        recovery_changes.append((label, projected_value, current_value))
+
+                if not recovery_changes:
+                    st.info("No registration fields were changed.")
+                else:
+                    output_rows = 0
+                    for snapshot_entry in registration_entries:
+                        projection_updates = {
+                            "ATHLETE_NAME": _clean(registration.get("ATHLETE_NAME")) or _clean(snapshot_entry.get("ATHLETE_NAME")),
+                            "DOB": _clean(registration.get("DOB")) or _clean(snapshot_entry.get("DOB")),
+                            "TEAM_NAME": _clean(registration.get("TEAM_NAME")) or _clean(snapshot_entry.get("TEAM_NAME")),
+                            "TEAM_CODE": _clean(registration.get("TEAM_CODE")) or _clean(snapshot_entry.get("TEAM_CODE")),
+                            "EVENT_NAME": _clean(snapshot_entry.get("EVENT_NAME")),
+                            "EVENT_CODE": _clean(snapshot_entry.get("EVENT_CODE")),
+                            "DIVISION": _clean(snapshot_entry.get("DIVISION")),
+                            "SEASON_BEST": _clean(snapshot_entry.get("SEASON_BEST")),
+                        }
+                        output_rows += sync_output_entry(
+                            gc=google_client,
+                            output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                            output_worksheet=OUTPUT_WORKSHEET,
+                            entry=snapshot_entry,
+                            field_updates=projection_updates,
+                            status=_clean(snapshot_entry.get("STATUS")) or "CONFIRMED",
+                            is_deleted=(
+                                _clean(snapshot_entry.get("IS_DELETED")).upper() == "TRUE"
+                            ),
+                            payment_status=_clean(snapshot_entry.get("PAYMENT_STATUS")),
+                        )
+
+                    repair_reason = reason or "Recovered interrupted admin amendment projection"
+                    _audit(
+                        action="ADMIN_AMENDMENT_RECOVERED",
+                        entity_type="EVENT_ENTRY",
+                        entity_id=selected_entry_id,
+                        order_id=selected_order_id,
+                        before={"OUTPUT": output_before},
+                        after={
+                            "OUTPUT_ROWS_UPDATED": output_rows,
+                            "RECOVERED_CHANGES": recovery_changes,
+                        },
+                        reason=repair_reason,
+                    )
+
+                    notify_email = (
+                        _clean(registration.get("EMAIL"))
+                        or _clean(entry.get("EMAIL"))
+                    )
+                    try:
+                        send_admin_amendment_email(
+                            smtp_host=str(st.secrets.get("SMTP_HOST", "") or ""),
+                            smtp_port=int(st.secrets.get("SMTP_PORT", 587) or 587),
+                            smtp_user=str(st.secrets.get("SMTP_USER", "") or ""),
+                            smtp_password=str(st.secrets.get("SMTP_PASS", "") or ""),
+                            smtp_from=str(st.secrets.get("SMTP_FROM", "") or ""),
+                            to_email=notify_email,
+                            athlete_name=_clean(registration.get("ATHLETE_NAME")) or _clean(entry.get("ATHLETE_NAME")),
+                            order_id=selected_order_id,
+                            registration_id=registration_id,
+                            entry_id=selected_entry_id,
+                            changes=recovery_changes,
+                            reason=repair_reason,
+                        )
+                    except AdminNotificationError as exc:
+                        _audit(
+                            action="ADMIN_AMENDMENT_RECOVERY_EMAIL_FAILED",
+                            entity_type="EVENT_ENTRY",
+                            entity_id=selected_entry_id,
+                            order_id=selected_order_id,
+                            before={"EMAIL": notify_email},
+                            after={"ERROR": str(exc)},
+                            reason=repair_reason,
+                        )
+                        notification_message = f" Recovery completed, but notification email failed: {exc}"
+                    else:
+                        _audit(
+                            action="ADMIN_AMENDMENT_RECOVERY_EMAIL_SENT",
+                            entity_type="EVENT_ENTRY",
+                            entity_id=selected_entry_id,
+                            order_id=selected_order_id,
+                            before={},
+                            after={"EMAIL": notify_email, "CHANGE_COUNT": len(recovery_changes)},
+                            reason=repair_reason,
+                        )
+                        notification_message = " Participant notification email sent."
+
+                    _load_admin_rows.clear()
+                    st.success(
+                        f"Interrupted amendment recovered. Compatibility OUTPUT rows updated: {output_rows}."
+                        + notification_message
+                    )
+                    st.rerun()
             else:
                 # Athlete-level values belong to the registration, so apply them
                 # consistently to all event entries for that athlete/registration.

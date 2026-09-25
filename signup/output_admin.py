@@ -128,6 +128,40 @@ def _apply_existing_field_updates(
                 worksheet.update_cell(row_number, column_index, rendered)
 
 
+def get_output_entry_snapshot(
+    *,
+    gc,
+    output_sheet_url_or_id: str,
+    output_worksheet: str,
+    entry: dict[str, Any],
+) -> dict[str, str]:
+    """Return the first matching OUTPUT row keyed by normalised header.
+
+    This is used only for recovery/audit after an interrupted admin amendment.
+    It intentionally performs a point-in-time read rather than participating in
+    the normal cached admin read model.
+    """
+    spreadsheet = _open_spreadsheet(gc, output_sheet_url_or_id)
+    worksheet = (
+        spreadsheet.worksheet(output_worksheet)
+        if _clean(output_worksheet)
+        else spreadsheet.sheet1
+    )
+    headers, header_map = _ensure_headers(
+        worksheet,
+        ["entry_id", "entry_status", "is_deleted", "payment_status"],
+    )
+    rows = _matching_rows(worksheet, header_map, entry)
+    if not rows:
+        return {}
+    values = worksheet.row_values(rows[0])
+    result: dict[str, str] = {}
+    for idx, header in enumerate(headers):
+        key = _normalise_header(header)
+        result[key] = _clean(values[idx] if idx < len(values) else "")
+    return result
+
+
 def sync_output_entry(
     *,
     gc,
