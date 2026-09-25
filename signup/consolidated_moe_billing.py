@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import datetime as dt
 import io
 import zipfile
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo
 from xml.sax.saxutils import escape as xml_escape
 
 
@@ -29,6 +31,27 @@ def _d(value: Any, default: str = "0") -> Decimal:
 
 def _truthy(value: Any) -> bool:
     return _upper(value) in {"TRUE", "1", "YES", "Y"}
+
+
+_SGT = ZoneInfo("Asia/Singapore")
+
+def format_singapore_timestamp(value: Any) -> str:
+    """Render an ISO timestamp for finance-facing documents without changing storage.
+
+    Transaction sheets continue to retain their original UTC/offset-aware ISO value.
+    Blank or unparseable legacy values are returned unchanged.
+    """
+    raw = _clean(value)
+    if not raw:
+        return ""
+    try:
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        local = parsed.astimezone(_SGT)
+        return local.strftime("%d %b %Y, %H:%M SGT")
+    except (TypeError, ValueError):
+        return raw
 
 
 def active_invoice_lines(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -68,6 +91,10 @@ def consolidated_invoice_entries(
         if _upper(entry.get("STATUS")) in {"WITHDRAWN", "CANCELLED"}:
             continue
         if _truthy(entry.get("IS_DELETED")):
+            continue
+        # A zero-value school entry is NO_COST, not an MOE receivable. This
+        # also keeps legacy pilot zero-value INVOICE rows out of new invoices.
+        if _d(entry.get("ENTRY_FEE")) <= 0:
             continue
         out.append(entry)
     out.sort(
@@ -244,7 +271,7 @@ def invoice_xlsx_bytes(
         [("Competition", 2), (competition_name, 0)],
         [("Organisation", 2), (summary["ORGANIZATION_NAME"], 0)],
         [("Team Code", 2), (summary["TEAM_CODE"], 0)],
-        [("Issued At", 2), (summary["ISSUED_AT"], 0)],
+        [("Issued At", 2), (format_singapore_timestamp(summary["ISSUED_AT"]), 0)],
         [("Invoice Total (SGD)", 2), (summary["AMOUNT"], 3)],
         [],
         [(header, 2) for header in table_headers],
@@ -412,7 +439,7 @@ def invoice_pdf_bytes(
                 ("Orders", f"{summary.get('ORDER_COUNT', 0)} order(s)"),
                 ("Competition", competition_name),
                 ("Organisation", summary["ORGANIZATION_NAME"]),
-                ("Issued", summary["ISSUED_AT"]),
+                ("Issued", format_singapore_timestamp(summary["ISSUED_AT"])),
                 ("Total", f"SGD {summary['AMOUNT']:.2f}"),
             ]
             for label, value in detail_lines:

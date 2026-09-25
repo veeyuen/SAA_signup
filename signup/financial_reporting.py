@@ -286,7 +286,7 @@ def build_entry_financial_report(
             {
                 "TEAM": _clean(entry.get("TEAM_NAME")),
                 "ATHLETE_NAME": _clean(entry.get("ATHLETE_NAME")),
-                "COUNTRY": _clean(entry.get("NATIONALITY")),
+                "COUNTRY": _clean(entry.get("NATIONALITY")) or "Not provided",
                 "GENDER": _clean(entry.get("GENDER")),
                 "AGE": _age_from_dob(entry.get("DOB"), comp_year),
                 "DIVISION": _clean(entry.get("DIVISION")),

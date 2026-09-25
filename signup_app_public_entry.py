@@ -636,6 +636,9 @@ with c6:
     if _nat_extra and _nat_extra not in nationality_options:
         nationality_options = ["", _nat_extra] + [x for x in nationality_options if x != ""]
     nationality = st.selectbox("Nationality", nationality_options, index=0, key="nationality")
+    nationality_ok = bool(str(nationality or "").strip())
+    if not nationality_ok:
+        st.warning("Nationality is required.")
     is_singapore = (str(nationality or '').strip().upper() in ('SGP','SIN','SG','SINGAPORE'))
     # Singapore PR status (separate from nationality code)
     singapore_pr = st.checkbox('Singapore PR?', key='singapore_pr')
@@ -849,6 +852,7 @@ ready_to_add = (
     and bool(contact_ok)
     and bool(name_ok)
     and bool(gender_ok)
+    and bool(nationality_ok)
     and bool(event_ok)
     and bool(season_best_ok)
 )
@@ -1237,6 +1241,7 @@ if add_to_cart_clicked:
     missing_checks = [
         ("Name as per NRIC/Passport", (st.session_state.get("name_passport", "") or "").strip()),
         ("Birth Date", birth_date),
+        ("Nationality", nationality),
         ("Email", email),
         ("Contact Number", contact_number),
     ]
@@ -1379,22 +1384,26 @@ else:
         "The cart is held in this browser session until you submit the order."
     )
 
+    is_no_cost_order = total_amount == Decimal("0.00")
     is_school_order = (
         current_organization.organization_type == "SCHOOL"
+        and not is_no_cost_order
     )
-    is_no_cost_order = total_amount == Decimal("0.00")
     is_online_paid_order = (
         current_organization.organization_type in {"AFFILIATE", "ASSOCIATE"}
         and total_amount > Decimal("0.00")
     )
 
-    if is_school_order:
+    if is_no_cost_order:
+        st.info(
+            "No-cost order: no Stripe payment or MOE invoice is required. "
+            "The registration will be confirmed with NO_COST payment status."
+        )
+    elif is_school_order:
         st.info(
             "School order: entries will be confirmed now and billed through the "
             "post-event MOE invoice process."
         )
-    elif is_no_cost_order:
-        st.info("No-cost order: no Stripe payment is required.")
     else:
         st.info("Paid order: one Stripe payment will cover the entire cart.")
 

@@ -12,9 +12,9 @@ DIVISIONS = {
 
 SPRINT_60M_ONLY_MODE = True
 
-DEFAULT_APP_TITLE = "SAA Competitions Signup"
-SPRINT_60M_APP_TITLE = "SAA Competitions Signup"
-APP_TITLE = "SAA Competitions Signup"
+DEFAULT_APP_TITLE = "Competition Athlete Registrations"
+SPRINT_60M_APP_TITLE = "Competition Athlete Registrations"
+APP_TITLE = "Competition Athlete Registrations"
 
 DIVISIONS_60M = {
     "U7": "U7",

@@ -17,6 +17,7 @@ from signup.consolidated_moe_billing import (
     build_consolidated_invoice_line_rows,
     consolidated_invoice_entries,
     group_invoice_lines,
+    format_singapore_timestamp,
     invoice_amount_by_order,
     invoice_email_body,
     invoice_pdf_bytes,
@@ -66,7 +67,7 @@ def _resources(schema_version: str):
 
 
 try:
-    google_client, store = _resources("phase4b3-consolidated-moe-v1")
+    google_client, store = _resources("phase4b4-cleanup-v1")
 except Exception as exc:
     st.error(f"Could not initialise MOE billing storage: {type(exc).__name__}: {exc}")
     st.stop()
@@ -177,12 +178,38 @@ for payment in payments:
     if order_id and _upper(payment.get("PROVIDER")) == "INVOICE":
         payment_by_order[order_id] = payment
 
+
+def _order_has_billable_value(order: dict) -> bool:
+    order_id = _clean(order.get("ORDER_ID"))
+    try:
+        if Decimal(_clean(order.get("TOTAL_AMOUNT")) or "0") > 0:
+            return True
+    except Exception:
+        pass
+    payment = payment_by_order.get(order_id, {})
+    try:
+        if Decimal(_clean(payment.get("AMOUNT")) or "0") > 0:
+            return True
+    except Exception:
+        pass
+    return any(
+        _clean(entry.get("ORDER_ID")) == order_id
+        and _upper(entry.get("STATUS")) not in {"WITHDRAWN", "CANCELLED"}
+        and _upper(entry.get("IS_DELETED")) not in {"TRUE", "1", "YES", "Y"}
+        and Decimal(_clean(entry.get("ENTRY_FEE")) or "0") > 0
+        for entry in entries
+    )
+
+
 invoice_groups = group_invoice_lines(invoice_rows)
 
 invoice_orders: list[dict] = []
 for order in orders:
     order_id = _clean(order.get("ORDER_ID"))
     org = organization_by_id.get(_clean(order.get("ORGANIZATION_ID")), {})
+    if not _order_has_billable_value(order):
+        # Zero-value school registrations are NO_COST, not MOE receivables.
+        continue
     if _upper(order.get("PAYMENT_TYPE")) == "INVOICE" or order_id in payment_by_order:
         invoice_orders.append(order)
     elif org.get("type") == "SCHOOL":
@@ -483,7 +510,7 @@ else:
     c2.metric("Orders", summary.get("ORDER_COUNT", 0))
     c3.metric("Entries", summary.get("ENTRY_COUNT", 0))
     c4.metric("Amount", f"SGD {summary.get('AMOUNT', Decimal('0')):.2f}")
-    c5.metric("Paid at", summary.get("PAID_AT") or "-")
+    c5.metric("Paid at", format_singapore_timestamp(summary.get("PAID_AT")) or "-")
 
     display = pd.DataFrame(
         [
