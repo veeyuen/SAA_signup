@@ -28,7 +28,7 @@ from signup.stripe_financials import (
 st.set_page_config(page_title="SAA Financial Reporting", layout="wide")
 st.title("SAA Financial Reporting")
 st.caption(
-    "Phase 4A: payment/refund ledger reporting using completed transaction records "
+    "Phase 4: payment/refund/invoice ledger reporting using completed transaction records "
     "and Stripe's actual balance-transaction fees/net settlement."
 )
 
@@ -61,7 +61,7 @@ def _resources(schema_version: str):
 
 
 try:
-    google_client, store = _resources("phase4a-stripe-actual-financials-v1")
+    google_client, store = _resources("phase4b-moe-invoice-reporting-v1")
 except Exception as exc:
     st.error(f"Could not initialise financial reporting storage: {type(exc).__name__}: {exc}")
     st.stop()
@@ -108,6 +108,7 @@ def _read_rows() -> dict[str, list[dict[str, str]]]:
             "EVENT_ENTRIES",
             "PAYMENTS",
             "REFUNDS",
+            "MOE_INVOICES",
         )
     }
 
@@ -123,6 +124,7 @@ registrations = data["REGISTRATIONS"]
 entries = data["EVENT_ENTRIES"]
 payments = data["PAYMENTS"]
 refunds = data["REFUNDS"]
+invoices = data["MOE_INVOICES"]
 
 try:
     competitions = pilot_config.competitions(include_closed=True)
@@ -168,6 +170,7 @@ selected_order_ids = {_clean(o.get("ORDER_ID")) for o in selected_orders}
 selected_entries = [e for e in entries if _clean(e.get("ORDER_ID")) in selected_order_ids]
 selected_payments = [p for p in payments if _clean(p.get("ORDER_ID")) in selected_order_ids]
 selected_refunds = [r for r in refunds if _clean(r.get("ORDER_ID")) in selected_order_ids]
+selected_invoices = [i for i in invoices if _clean(i.get("ORDER_ID")) in selected_order_ids]
 
 completed_payments_missing_actuals = [
     p for p in selected_payments
@@ -292,12 +295,14 @@ entry_report = build_entry_financial_report(
     entries=selected_entries,
     payments=selected_payments,
     refunds=selected_refunds,
+    invoices=selected_invoices,
     competition_year_by_id=competition_year_by_id,
 )
 order_summary = build_order_financial_summary(
     orders=selected_orders,
     payments=selected_payments,
     refunds=selected_refunds,
+    invoices=selected_invoices,
 )
 ledger = build_transaction_ledger(
     orders=selected_orders,
@@ -317,9 +322,14 @@ for r in selected_refunds:
 actual_rows = [
     row for row in selected_payments
     if _clean(row.get("DISPLAY_STATUS")).upper() == "PAYMENT_COMPLETE"
+    and (
+        _clean(row.get("PROVIDER")).upper() == "STRIPE"
+        or _clean(row.get("STRIPE_PAYMENT_INTENT_ID"))
+    )
 ] + [
     row for row in selected_refunds
     if _clean(row.get("STATUS")).upper() == "REFUND_COMPLETE"
+    and _clean(row.get("STRIPE_REFUND_ID"))
 ]
 actual_complete = bool(actual_rows) and all(
     _clean(row.get("STRIPE_FEE_ACTUAL")) != ""
@@ -335,12 +345,19 @@ stripe_net_total = sum(
     Decimal("0"),
 )
 
-m1, m2, m3, m4, m5 = st.columns(5)
+invoiced_total = sum(
+    (Decimal(_clean(row.get("LINE_AMOUNT")) or "0") for row in selected_invoices
+     if _clean(row.get("STATUS")).upper() in {"ISSUED", "DISPUTED", "PAID"}),
+    Decimal("0"),
+)
+
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Successful payments", f"SGD {successful_payment_total:.2f}")
-m2.metric("Completed refunds", f"SGD {refund_total:.2f}")
-m3.metric("Customer net collected", f"SGD {(successful_payment_total - refund_total):.2f}")
-m4.metric("Actual Stripe fees", f"SGD {stripe_fee_total:.2f}" if actual_complete else "Incomplete")
-m5.metric("Net after Stripe", f"SGD {stripe_net_total:.2f}" if actual_complete else "Incomplete")
+m2.metric("Amount invoiced", f"SGD {invoiced_total:.2f}")
+m3.metric("Completed refunds", f"SGD {refund_total:.2f}")
+m4.metric("Customer net collected", f"SGD {(successful_payment_total - refund_total):.2f}")
+m5.metric("Actual Stripe fees", f"SGD {stripe_fee_total:.2f}" if (actual_complete or not actual_rows) else "Incomplete")
+m6.metric("Net after Stripe", f"SGD {stripe_net_total:.2f}" if (actual_complete or not actual_rows) else "Incomplete")
 
 if actual_rows and not actual_complete:
     st.warning(
@@ -370,8 +387,8 @@ else:
         "Gross is the current approved ENTRY_FEE after amendments. Amount Paid includes the "
         "reconstructed original entry allocation plus completed fee-increase payments. Refunds "
         "include completed fee decreases and withdrawals. Collected = Amount Paid − Refunds. "
-        "Revenue = Collected − actual Stripe fees allocated to the entry. Amount Invoiced is zero "
-        "in Phase 4A because the MOE invoice workflow has not yet been implemented."
+        "Revenue = Collected − actual Stripe fees allocated to the entry. Amount Invoiced comes "
+        "from the immutable MOE invoice line snapshot when a school invoice is issued."
     )
 
     display_cols = [
@@ -459,6 +476,6 @@ with st.expander("Immutable payment / refund ledger", expanded=False):
         st.dataframe(ledger, use_container_width=True, hide_index=True)
 
 st.caption(
-    "Phase 4A is read-only apart from the explicit Stripe-financial backfill action. "
+    "Financial reporting is read-only apart from the explicit Stripe-financial backfill action. "
     "It does not change payment amounts, refund amounts, entry fees or registration statuses."
 )

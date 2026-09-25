@@ -183,14 +183,27 @@ def _allocate_original_payment_fees(
     return dict(fee_by_entry), unknown
 
 
+def _invoiced_amount_by_entry(invoices: list[dict] | None) -> dict[str, Decimal]:
+    out: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for line in invoices or []:
+        if _clean(line.get("STATUS")).upper() not in {"ISSUED", "DISPUTED", "PAID"}:
+            continue
+        entry_id = _clean(line.get("ENTRY_ID"))
+        if entry_id:
+            out[entry_id] += _d(line.get("LINE_AMOUNT"))
+    return dict(out)
+
+
 def build_entry_financial_report(
     *,
     entries: list[dict],
     payments: list[dict],
     refunds: list[dict],
+    invoices: list[dict] | None = None,
     competition_year_by_id: dict[str, int] | None = None,
 ) -> pd.DataFrame:
     competition_year_by_id = competition_year_by_id or {}
+    invoiced_by_entry = _invoiced_amount_by_entry(invoices)
     payment_by_id = {
         _clean(p.get("PAYMENT_ID")): p
         for p in payments
@@ -280,7 +293,7 @@ def build_entry_financial_report(
                 "EVENT": _clean(entry.get("EVENT_NAME")),
                 "GROSS": _money_float(current_gross),
                 "AMOUNT_PAID": _money_float(amount_paid),
-                "AMOUNT_INVOICED": 0.0,
+                "AMOUNT_INVOICED": _money_float(invoiced_by_entry.get(entry_id, Decimal("0"))),
                 "COLLECTED": _money_float(collected),
                 "REFUNDS": _money_float(refund_total),
                 "STRIPE_FEES": _money_float(stripe_fee) if stripe_fee_known else None,
@@ -402,6 +415,7 @@ def build_order_financial_summary(
     orders: list[dict],
     payments: list[dict],
     refunds: list[dict],
+    invoices: list[dict] | None = None,
 ) -> pd.DataFrame:
     order_map = {
         _clean(o.get("ORDER_ID")): o
@@ -417,6 +431,13 @@ def build_order_financial_summary(
         if _clean(r.get("ORDER_ID")):
             refunds_by_order[_clean(r.get("ORDER_ID"))].append(r)
 
+    invoiced_by_order: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for line in invoices or []:
+        if _clean(line.get("STATUS")).upper() in {"ISSUED", "DISPUTED", "PAID"}:
+            order_id = _clean(line.get("ORDER_ID"))
+            if order_id:
+                invoiced_by_order[order_id] += _d(line.get("LINE_AMOUNT"))
+
     rows = []
     for order_id, order in order_map.items():
         paid_rows = [p for p in payments_by_order.get(order_id, []) if _is_complete_payment(p)]
@@ -424,7 +445,14 @@ def build_order_financial_summary(
         paid = sum((_d(p.get("AMOUNT")) for p in paid_rows), Decimal("0"))
         refunded = sum((_d(r.get("APPROVED_AMOUNT")) for r in refund_rows), Decimal("0"))
 
-        stripe_objects = paid_rows + refund_rows
+        stripe_objects = [
+            p for p in paid_rows
+            if _clean(p.get("PROVIDER")).upper() == "STRIPE"
+            or _clean(p.get("STRIPE_PAYMENT_INTENT_ID"))
+        ] + [
+            r for r in refund_rows
+            if _clean(r.get("STRIPE_REFUND_ID"))
+        ]
         actual_known = [
             row for row in stripe_objects
             if _known_money(row, "STRIPE_FEE_ACTUAL") and _known_money(row, "STRIPE_NET_ACTUAL")
@@ -440,6 +468,7 @@ def build_order_financial_summary(
                 "ORGANIZATION_ID": _clean(order.get("ORGANIZATION_ID")),
                 "ORDER_STATUS": _clean(order.get("STATUS")),
                 "ORDER_TOTAL": _money_float(_d(order.get("TOTAL_AMOUNT"))),
+                "AMOUNT_INVOICED": _money_float(invoiced_by_order.get(order_id, Decimal("0"))),
                 "SUCCESSFUL_PAYMENTS": _money_float(paid),
                 "COMPLETED_REFUNDS": _money_float(refunded),
                 "CUSTOMER_NET_COLLECTED": _money_float(paid - refunded),
