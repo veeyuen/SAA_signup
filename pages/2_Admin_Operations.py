@@ -43,7 +43,7 @@ if user.role != "SAA_ADMIN":
     st.stop()
 
 @st.cache_resource(show_spinner=False)
-def _admin_resources():
+def _admin_resources(schema_version: str):
     """Create the Google client/store once per Streamlit worker.
 
     The original Phase 3A page rebuilt the store and re-ran schema discovery on
@@ -58,7 +58,10 @@ def _admin_resources():
 
 
 try:
-    google_client, store = _admin_resources()
+    # Include the transaction schema generation in the cache key. This forces a
+    # one-time resource refresh after schema-bearing deployments while retaining
+    # the quota savings of cache_resource during normal widget reruns.
+    google_client, store = _admin_resources("phase3b2-merged-hardening")
 except Exception as exc:
     st.error(f"Could not initialise admin storage: {type(exc).__name__}: {exc}")
     st.stop()
