@@ -91,6 +91,7 @@ from signup.waiver_compliance import (
     normalise_signer_name,
     validate_waiver_acknowledgement,
 )
+from signup.competition_rules import validate_cart_competition_rules
 from signup.validation import (
     is_valid_email,
     is_valid_ic_last4,
@@ -1201,6 +1202,127 @@ def _validate_cart_against_transactions(
     return True
 
 
+def _competition_rule_tables(*, fresh: bool = False):
+    """Load the three master tables required for Phase 5C validation."""
+    return (
+        pilot_config.table("COMPETITIONS", fresh=fresh),
+        pilot_config.table("DIVISIONS", fresh=fresh),
+        pilot_config.table("COMPETITION_EVENTS", fresh=fresh),
+    )
+
+
+def _audit_competition_rule_issues(
+    *,
+    result,
+    stage: str,
+    order_id: str = "",
+) -> None:
+    if not result.blocked:
+        return
+
+    store = _transaction_store()
+    now_iso = _iso_now()
+    for issue in result.issues:
+        if issue.code == "CONFIG_ERROR":
+            action = "COMPETITION_RULE_CONFIG_ERROR"
+        elif stage == "pre-submit recheck":
+            action = "COMPETITION_RULES_CHANGED_BLOCKED"
+        elif issue.code == "DIVISION_INELIGIBLE":
+            action = "ATHLETE_DIVISION_INELIGIBLE_BLOCKED"
+        elif issue.code == "EVENT_INELIGIBLE":
+            action = "ATHLETE_EVENT_INELIGIBLE_BLOCKED"
+        else:
+            action = "COMPETITION_UNAVAILABLE_BLOCKED"
+
+        store.append_audit_log(
+            {
+                "AUDIT_ID": _new_id("AUD"),
+                "TIMESTAMP": now_iso,
+                "USER_ID": current_user.user_id,
+                "USER_EMAIL": current_user_email,
+                "ACTION": action,
+                "ENTITY_TYPE": "COMPETITION_RULE",
+                "ENTITY_ID": (
+                    issue.event_code
+                    or issue.event_name
+                    or issue.division_code
+                    or issue.athlete_name
+                    or issue.competition_id
+                    or "UNRESOLVED_RULE"
+                ),
+                "ORDER_ID": order_id,
+                "BEFORE_JSON": "",
+                "AFTER_JSON": json.dumps(issue.as_dict(), sort_keys=True),
+                "REASON": f"Phase 5C {stage}: {issue.code}",
+            }
+        )
+
+
+def _render_competition_rule_issues(result, *, final_recheck: bool) -> None:
+    if final_recheck:
+        st.error(
+            "The cart is no longer valid because the current competition "
+            "eligibility rules do not permit one or more entries. "
+            "No order or payment was created."
+        )
+    else:
+        st.error(
+            "This athlete cannot be added until the competition/division "
+            "eligibility issue below is resolved."
+        )
+
+    for issue in result.issues:
+        st.warning(issue.message)
+
+
+def _validate_cart_against_competition_rules(
+    cart_items: list[dict],
+    *,
+    fresh: bool,
+    stage: str,
+    order_id: str = "",
+) -> bool:
+    try:
+        competition_rows, division_rows, competition_event_rows = (
+            _competition_rule_tables(fresh=fresh)
+        )
+        result = validate_cart_competition_rules(
+            cart_items,
+            competition_id=selected_competition_id,
+            competition_rows=competition_rows,
+            division_rows=division_rows,
+            competition_event_rows=competition_event_rows,
+        )
+    except Exception as exc:
+        st.error(
+            "Unable to verify the current competition eligibility rules. "
+            "The registration has not been submitted. Please retry. "
+            f"({type(exc).__name__}: {exc})"
+        )
+        return False
+
+    if not result.blocked:
+        return True
+
+    try:
+        _audit_competition_rule_issues(
+            result=result,
+            stage=stage,
+            order_id=order_id,
+        )
+    except Exception as audit_exc:
+        st.warning(
+            "The registration was blocked correctly, but its Phase 5C audit "
+            "record could not be written: "
+            f"{type(audit_exc).__name__}: {audit_exc}"
+        )
+
+    _render_competition_rule_issues(
+        result, final_recheck=(stage == "pre-submit recheck")
+    )
+    return False
+
+
 def _same_cart_athlete(candidate_a: dict, candidate_b: dict) -> bool:
     id_a = str(candidate_a.get("athlete_id", "") or "").strip().casefold()
     id_b = str(candidate_b.get("athlete_id", "") or "").strip().casefold()
@@ -1531,35 +1653,41 @@ if add_to_cart_clicked:
                 "selected so the order contains one athlete record."
             )
         else:
-            try:
-                integrity_result = _check_cart_item_against_transactions(
-                    cart_item,
-                    ignore_order_id=str(
-                        st.session_state.get("draft_order_id", "") or ""
-                    ).strip(),
-                    stage="cart-add check",
-                )
-            except Exception as exc:
-                st.error(
-                    "Unable to verify existing competition registrations. "
-                    "The athlete was not added to the cart. Please retry. "
-                    f"({type(exc).__name__}: {exc})"
-                )
-            else:
-                if integrity_result.blocked:
-                    _render_integrity_conflicts(integrity_result)
+            rules_ok = _validate_cart_against_competition_rules(
+                [cart_item],
+                fresh=False,
+                stage="cart-add check",
+            )
+            if rules_ok:
+                try:
+                    integrity_result = _check_cart_item_against_transactions(
+                        cart_item,
+                        ignore_order_id=str(
+                            st.session_state.get("draft_order_id", "") or ""
+                        ).strip(),
+                        stage="cart-add check",
+                    )
+                except Exception as exc:
+                    st.error(
+                        "Unable to verify existing competition registrations. "
+                        "The athlete was not added to the cart. Please retry. "
+                        f"({type(exc).__name__}: {exc})"
+                    )
                 else:
-                    try:
-                        add_cart_item(
-                            cart_item,
-                            competition_id=selected_competition_id,
-                        )
-                    except ValueError as exc:
-                        st.error(str(exc))
+                    if integrity_result.blocked:
+                        _render_integrity_conflicts(integrity_result)
                     else:
-                        _queue_clear_athlete_form()
-                        st.toast("Athlete added to cart.")
-                        st.rerun()
+                        try:
+                            add_cart_item(
+                                cart_item,
+                                competition_id=selected_competition_id,
+                            )
+                        except ValueError as exc:
+                            st.error(str(exc))
+                        else:
+                            _queue_clear_athlete_form()
+                            st.toast("Athlete added to cart.")
+                            st.rerun()
 
 
 st.divider()
@@ -1725,6 +1853,13 @@ else:
             disabled=submit_disabled,
         ):
             order_id = _draft_order_id()
+            if not _validate_cart_against_competition_rules(
+                cart,
+                fresh=True,
+                stage="pre-submit recheck",
+                order_id=order_id,
+            ):
+                st.stop()
             if not _validate_cart_against_transactions(
                 cart, ignore_order_id=order_id
             ):
@@ -1829,6 +1964,13 @@ else:
             disabled=submit_disabled,
         ):
             order_id = _draft_order_id()
+            if not _validate_cart_against_competition_rules(
+                cart,
+                fresh=True,
+                stage="pre-submit recheck",
+                order_id=order_id,
+            ):
+                st.stop()
             if not _validate_cart_against_transactions(
                 cart, ignore_order_id=order_id
             ):

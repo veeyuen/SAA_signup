@@ -32,8 +32,15 @@ def get_gspread_client_read():
     )
     return gspread.authorize(creds)
 
-@st.cache_data(show_spinner=False, ttl=30)
-def read_sheet_as_df(sheet_url_or_id: str, worksheet: Optional[str] = None) -> pd.DataFrame:
+def read_sheet_as_df_uncached(
+    sheet_url_or_id: str, worksheet: Optional[str] = None
+) -> pd.DataFrame:
+    """Read the current worksheet values without Streamlit data caching.
+
+    Normal UI reads should continue to use :func:`read_sheet_as_df`. This
+    uncached path exists for final pre-submit integrity checks where the app
+    must see configuration changes made after a cart was created.
+    """
     sheet_id = extract_sheet_id(sheet_url_or_id)
     gc = get_gspread_client_read()
     sh = gc.open_by_key(sheet_id)
@@ -46,3 +53,8 @@ def read_sheet_as_df(sheet_url_or_id: str, worksheet: Optional[str] = None) -> p
     if not any((h or "").strip() for h in header):
         return pd.DataFrame()
     return pd.DataFrame(rows, columns=header)
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def read_sheet_as_df(sheet_url_or_id: str, worksheet: Optional[str] = None) -> pd.DataFrame:
+    return read_sheet_as_df_uncached(sheet_url_or_id, worksheet=worksheet)

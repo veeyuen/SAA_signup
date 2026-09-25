@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
-from google_sheets_reader import read_sheet_as_df
+from google_sheets_reader import read_sheet_as_df, read_sheet_as_df_uncached
 
 
 SINGAPORE_TZ = ZoneInfo("Asia/Singapore")
@@ -119,21 +119,21 @@ def _is_sheets_quota_error(exc: Exception) -> bool:
     )
 
 
-@st.cache_data(ttl=CONFIG_CACHE_TTL_SECONDS, show_spinner=False)
-def _read_config_sheet(sheet_url: str, worksheet: str) -> pd.DataFrame:
-    """Read one small master/config worksheet with shared caching and 429 backoff.
+def _read_config_sheet_with_retry(
+    sheet_url: str, worksheet: str, *, fresh: bool
+) -> pd.DataFrame:
+    """Read one config sheet with bounded retry.
 
-    Streamlit reruns can otherwise create bursts of Google Sheets reads. The
-    10-minute shared cache keeps stable master data off the API during normal
-    user interaction, while the bounded retry handles a transient quota window
-    during cold starts/deployments.
+    ``fresh=True`` bypasses both the pilot-config cache and the lower-level
+    Google Sheets data cache. It is reserved for final pre-submit rule checks.
     """
+    reader = read_sheet_as_df_uncached if fresh else read_sheet_as_df
     last_exc: Exception | None = None
     for delay in _CONFIG_RETRY_DELAYS_SECONDS:
         if delay:
             time.sleep(delay)
         try:
-            df = read_sheet_as_df(sheet_url, worksheet=worksheet)
+            df = reader(sheet_url, worksheet=worksheet)
             if df is None:
                 return pd.DataFrame()
             return _normalise_columns(pd.DataFrame(df))
@@ -146,9 +146,22 @@ def _read_config_sheet(sheet_url: str, worksheet: str) -> pd.DataFrame:
     raise last_exc
 
 
+@st.cache_data(ttl=CONFIG_CACHE_TTL_SECONDS, show_spinner=False)
+def _read_config_sheet(sheet_url: str, worksheet: str) -> pd.DataFrame:
+    """Read one small master/config worksheet with shared caching and 429 backoff.
+
+    Streamlit reruns can otherwise create bursts of Google Sheets reads. The
+    10-minute shared cache keeps stable master data off the API during normal
+    user interaction, while the bounded retry handles a transient quota window
+    during cold starts/deployments.
+    """
+    return _read_config_sheet_with_retry(sheet_url, worksheet, fresh=False)
+
+
 def clear_config_cache() -> None:
-    """Explicitly invalidate cached master/configuration worksheets."""
+    """Explicitly invalidate both layers of configuration-sheet caching."""
     _read_config_sheet.clear()
+    read_sheet_as_df.clear()
 
 
 @dataclass(frozen=True)
@@ -189,8 +202,12 @@ class PilotConfigRepository:
                 "CONFIG_SHEET_URL is missing from Streamlit secrets."
             )
 
-    def table(self, worksheet: str) -> pd.DataFrame:
+    def table(self, worksheet: str, *, fresh: bool = False) -> pd.DataFrame:
         try:
+            if fresh:
+                return _read_config_sheet_with_retry(
+                    self.sheet_url, worksheet, fresh=True
+                )
             return _read_config_sheet(self.sheet_url, worksheet)
         except Exception as exc:
             raise PilotConfigError(
