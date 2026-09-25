@@ -524,17 +524,24 @@ else:
     if status in {"ISSUED", "DISPUTED"}:
         left, right = st.columns(2)
         with left:
-            with st.form(f"mark_moe_paid_{selected_invoice_id}"):
-                payment_reference = st.text_input(
-                    "Finance payment reference",
-                    placeholder="e.g. vendor@gov receipt / bank reference",
-                )
-                confirm_paid = st.checkbox(
-                    "I confirm SA Finance has received the full consolidated invoice payment."
-                )
-                paid_submit = st.form_submit_button(
-                    "Mark invoice paid", type="primary", disabled=not confirm_paid
-                )
+            payment_reference = st.text_input(
+                "Finance payment reference",
+                placeholder="e.g. vendor@gov receipt / bank reference",
+                key=f"moe_payment_reference_{selected_invoice_id}",
+            )
+            confirm_paid = st.checkbox(
+                "I confirm SA Finance has received the full consolidated invoice payment.",
+                key=f"moe_confirm_paid_{selected_invoice_id}",
+            )
+            paid_submit = st.button(
+                "Mark invoice paid",
+                type="primary",
+                disabled=not (confirm_paid and bool(_clean(payment_reference))),
+                key=f"mark_moe_paid_{selected_invoice_id}",
+            )
+            st.caption(
+                "Enter a Finance payment reference and confirm receipt to enable this button."
+            )
 
             if paid_submit:
                 now = _now()
