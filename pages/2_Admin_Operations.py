@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from payment_store import create_google_client
-from signup.output_admin import (
+from signup.admin_output_projection import (
     OutputAdminError,
     get_output_entry_snapshot,
     sync_output_entry,
