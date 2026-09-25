@@ -300,6 +300,10 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
 
     try:
         store.update_by_id("REFUNDS", refund_id, updates)
+
+        fee_decrease_applied_now = False
+        entry_fee_before = ""
+
         if entry_id:
             entry_updates = {
                 "PAYMENT_STATUS": entry_payment_status,
@@ -311,18 +315,52 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
                     raise TransactionStoreError(
                         f"Fee-decrease refund {refund_id} has no TARGET_ENTRY_FEE."
                     )
+
+                # Stripe can deliver both refund.updated and refund.created for
+                # the same successful refund. Read the current entry immediately
+                # before applying the target fee and emit the fee-change audit
+                # only when this delivery actually changes the stored fee. The
+                # state update itself remains safely idempotent.
+                current_entry = store.find_first(
+                    "EVENT_ENTRIES",
+                    "ENTRY_ID",
+                    entry_id,
+                )
+                if current_entry is None:
+                    raise TransactionStoreError(
+                        f"Could not find EVENT_ENTRIES row for {entry_id}."
+                    )
+
+                entry_fee_before = str(
+                    current_entry.get("ENTRY_FEE", "") or ""
+                ).strip()
+                try:
+                    fee_decrease_applied_now = (
+                        Decimal(entry_fee_before or "0")
+                        != Decimal(target_entry_fee)
+                    )
+                except Exception:
+                    fee_decrease_applied_now = (
+                        entry_fee_before != str(target_entry_fee).strip()
+                    )
+
                 entry_updates["ENTRY_FEE"] = target_entry_fee
+
             store.update_by_id(
                 "EVENT_ENTRIES",
                 entry_id,
                 entry_updates,
             )
 
-        if internal_status == "REFUND_COMPLETE" and is_fee_decrease_refund and entry_id:
-            # Deterministic audit ID makes refund.created/refund.updated retries
-            # idempotent. The original fee comes from REFUNDS rather than the
-            # current entry row, so the history remains correct even if another
-            # successful Stripe event is delivered later.
+        if (
+            internal_status == "REFUND_COMPLETE"
+            and is_fee_decrease_refund
+            and entry_id
+            and fee_decrease_applied_now
+        ):
+            # Only the delivery that actually changes ENTRY_FEE emits this
+            # business-level audit. Event-level STRIPE_REFUND_RECONCILED rows
+            # remain separate for refund.created/refund.updated traceability.
             store.append_audit_log(
                 {
                     "AUDIT_ID": f"AUD-FEE-{refund_id}",
@@ -334,7 +372,7 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
                     "ENTITY_ID": entry_id,
                     "ORDER_ID": order_id,
                     "BEFORE_JSON": json.dumps(
-                        {"ENTRY_FEE": original_entry_fee},
+                        {"ENTRY_FEE": entry_fee_before},
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
