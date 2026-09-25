@@ -10,6 +10,7 @@ import streamlit as st
 
 from payment_store import create_google_client
 from signup.output_admin import OutputAdminError, sync_output_entry
+from signup.refund_payment import StripeRefundError, create_stripe_refund
 from signup.pilot_config import PilotConfigError, PilotConfigRepository, require_configured_user
 from signup.transaction_store import TransactionSheetStore, TransactionStoreError
 
@@ -425,10 +426,11 @@ if withdraw_clicked:
         st.success(f"Entry withdrawn. Compatibility OUTPUT rows updated: {output_rows}.")
         st.rerun()
 
-st.subheader("Refund request")
+st.subheader("Refunds")
 st.info(
-    "This records an administrative refund request only. It does not call Stripe or move funds. "
-    "Automatic refunds remain disabled until SAA defines approval, deadline and fee-refund rules."
+    "Refunds are controlled by SAA Admin. A withdrawn paid entry first gets a refund "
+    "request. An admin can then reject it or approve an amount and send the refund to "
+    "Stripe. Stripe webhook events remain authoritative for final completion."
 )
 
 payment_complete = _clean(payment.get("DISPLAY_STATUS")).upper() == "PAYMENT_COMPLETE"
@@ -438,48 +440,85 @@ entry_withdrawn = (
     or _clean(entry.get("IS_DELETED")).upper() == "TRUE"
 )
 
+entry_refunds = [
+    r for r in order_refunds
+    if _clean(r.get("ENTRY_ID")) == selected_entry_id
+]
 open_refund = next(
     (
-        r for r in order_refunds
-        if _clean(r.get("ENTRY_ID")) == selected_entry_id
-        and _clean(r.get("STATUS")).upper() in {"REFUND_REQUESTED", "REFUND_STARTED"}
+        r for r in entry_refunds
+        if _clean(r.get("STATUS")).upper() in {"REFUND_REQUESTED", "REFUND_STARTED"}
     ),
     None,
 )
 
+payment_amount = _to_decimal(payment.get("AMOUNT"))
+entry_fee = _to_decimal(entry.get("ENTRY_FEE"))
+
+# Only refunds already sent to Stripe or completed reduce the remaining amount.
+committed_statuses = {"REFUND_STARTED", "REFUND_COMPLETE"}
+payment_committed = sum(
+    (
+        _to_decimal(r.get("APPROVED_AMOUNT"))
+        for r in refunds
+        if _clean(r.get("PAYMENT_ID")) == _clean(payment.get("PAYMENT_ID"))
+        and _clean(r.get("STATUS")).upper() in committed_statuses
+    ),
+    Decimal("0"),
+)
+entry_committed = sum(
+    (
+        _to_decimal(r.get("APPROVED_AMOUNT"))
+        for r in entry_refunds
+        if _clean(r.get("STATUS")).upper() in committed_statuses
+    ),
+    Decimal("0"),
+)
+
+payment_remaining = max(Decimal("0"), payment_amount - payment_committed)
+entry_remaining = (
+    max(Decimal("0"), entry_fee - entry_committed)
+    if entry_fee > 0
+    else payment_remaining
+)
+max_new_refund = min(payment_remaining, entry_remaining)
+
 if open_refund:
     st.warning(
-        f"Open refund request: {_clean(open_refund.get('REFUND_ID'))} "
+        f"Open refund: {_clean(open_refund.get('REFUND_ID'))} "
         f"({_clean(open_refund.get('STATUS'))})."
     )
 
+# ---------------------------------------------------------------------------
+# 1. Record a new refund request
+# ---------------------------------------------------------------------------
 if not is_stripe:
-    st.caption("This order is not a Stripe-paid order; no Stripe refund request is applicable.")
+    st.caption("This order is not a Stripe-paid order; Stripe refunds do not apply.")
 elif not payment_complete:
-    st.caption("The payment is not complete, so a refund request cannot be recorded.")
+    st.caption("The original Stripe payment is not complete, so a refund cannot be requested.")
 elif not entry_withdrawn:
     st.caption("Withdraw the event entry before recording a refund request.")
-else:
-    entry_fee = _to_decimal(entry.get("ENTRY_FEE"))
-    payment_amount = _to_decimal(payment.get("AMOUNT"))
-    default_amount = entry_fee if entry_fee > 0 else payment_amount
+elif open_refund is None and max_new_refund <= 0:
+    st.success("This entry has no remaining refundable entry fee.")
+elif open_refund is None:
+    default_amount = max_new_refund
     with st.form("refund_request"):
         requested_amount_text = st.text_input(
             "Requested refund amount (SGD)",
             value=f"{default_amount:.2f}",
         )
         refund_reason = st.text_area("Refund reason", placeholder="Required")
-        request_clicked = st.form_submit_button(
-            "Record refund request",
-            disabled=open_refund is not None,
-        )
+        request_clicked = st.form_submit_button("Record refund request")
 
     if request_clicked:
         amount = _to_decimal(requested_amount_text, "-1")
         if amount <= 0:
             st.error("Requested refund amount must be greater than zero.")
-        elif payment_amount > 0 and amount > payment_amount:
-            st.error("Requested refund amount cannot exceed the original payment amount.")
+        elif amount > max_new_refund:
+            st.error(
+                "Requested refund amount exceeds the remaining refundable amount "
+                f"of SGD {max_new_refund:.2f}."
+            )
         elif not refund_reason.strip():
             st.error("A refund reason is required.")
         else:
@@ -502,6 +541,9 @@ else:
                 "REQUESTED_AT": timestamp,
                 "APPROVED_BY_USER_ID": "",
                 "APPROVED_AT": "",
+                "DECIDED_BY_USER_ID": "",
+                "DECIDED_AT": "",
+                "DECISION_REASON": "",
                 "STRIPE_REFUND_ID": "",
                 "STRIPE_STATUS": "",
                 "COMPLETED_AT": "",
@@ -518,6 +560,13 @@ else:
                     "UPDATED_AT": timestamp,
                 },
             )
+            sync_output_entry(
+                gc=google_client,
+                output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                output_worksheet=OUTPUT_WORKSHEET,
+                entry=entry,
+                payment_status="REFUND_REQUESTED",
+            )
             _audit(
                 action="REFUND_REQUESTED",
                 entity_type="REFUND",
@@ -528,8 +577,239 @@ else:
                 reason=refund_reason.strip(),
             )
             _load_admin_rows.clear()
-            st.success(f"Refund request {refund_id} recorded. No funds have been moved.")
+            st.success(f"Refund request {refund_id} recorded. No funds have been moved yet.")
             st.rerun()
+
+# ---------------------------------------------------------------------------
+# 2. Decide a pending refund request
+# ---------------------------------------------------------------------------
+if open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_REQUESTED":
+    st.markdown("#### Refund decision")
+    requested_amount = _to_decimal(open_refund.get("REQUESTED_AMOUNT"))
+    max_approvable = min(requested_amount, max_new_refund)
+    payment_intent_id = _clean(payment.get("STRIPE_PAYMENT_INTENT_ID"))
+
+    st.write(
+        f"Requested: **SGD {requested_amount:.2f}**  |  "
+        f"Maximum currently approvable: **SGD {max_approvable:.2f}**"
+    )
+    st.caption(
+        "Only the competition entry amount is refundable here. Stripe's original processing "
+        "fees are not added to the refund."
+    )
+
+    with st.form("refund_decision"):
+        approved_amount_text = st.text_input(
+            "Approved refund amount (SGD)",
+            value=f"{max_approvable:.2f}",
+        )
+        decision_reason = st.text_area(
+            "Decision note",
+            placeholder="Required for rejection; optional for approval",
+        )
+        confirm_send = st.checkbox(
+            "I confirm that approval will send this refund to Stripe.",
+        )
+        approve_clicked = st.form_submit_button(
+            "Approve and send to Stripe",
+            type="primary",
+        )
+        reject_clicked = st.form_submit_button("Reject refund request")
+
+    if reject_clicked:
+        if not decision_reason.strip():
+            st.error("A rejection reason is required.")
+        else:
+            timestamp = _now()
+            before = dict(open_refund)
+            updates = {
+                "STATUS": "REFUND_REJECTED",
+                "DECIDED_BY_USER_ID": user.user_id,
+                "DECIDED_AT": timestamp,
+                "DECISION_REASON": decision_reason.strip(),
+                "UPDATED_AT": timestamp,
+            }
+            store.update_by_id("REFUNDS", _clean(open_refund.get("REFUND_ID")), updates)
+            store.update_by_id(
+                "EVENT_ENTRIES",
+                selected_entry_id,
+                {
+                    "PAYMENT_STATUS": "PAYMENT_COMPLETE",
+                    "PAYMENT_STATUS_CHANGED_AT": timestamp,
+                    "UPDATED_AT": timestamp,
+                },
+            )
+            sync_output_entry(
+                gc=google_client,
+                output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                output_worksheet=OUTPUT_WORKSHEET,
+                entry=entry,
+                payment_status="PAYMENT_COMPLETE",
+            )
+            after = dict(before)
+            after.update(updates)
+            _audit(
+                action="REFUND_REJECTED",
+                entity_type="REFUND",
+                entity_id=_clean(open_refund.get("REFUND_ID")),
+                order_id=selected_order_id,
+                before=before,
+                after=after,
+                reason=decision_reason.strip(),
+            )
+            _load_admin_rows.clear()
+            st.success("Refund request rejected. No funds were moved.")
+            st.rerun()
+
+    if approve_clicked:
+        approved_amount = _to_decimal(approved_amount_text, "-1")
+        if approved_amount <= 0:
+            st.error("Approved refund amount must be greater than zero.")
+        elif approved_amount > requested_amount:
+            st.error("Approved amount cannot exceed the requested amount.")
+        elif approved_amount > max_approvable:
+            st.error(
+                "Approved amount exceeds the remaining refundable amount "
+                f"of SGD {max_approvable:.2f}."
+            )
+        elif not confirm_send:
+            st.error("Please confirm that the refund should be sent to Stripe.")
+        elif not payment_intent_id:
+            st.error("The payment does not contain a Stripe PaymentIntent ID.")
+        else:
+            timestamp = _now()
+            stripe_secret_key = str(st.secrets.get("STRIPE_SECRET_KEY", "") or "").strip()
+            refund_id = _clean(open_refund.get("REFUND_ID"))
+            try:
+                stripe_result = create_stripe_refund(
+                    secret_key=stripe_secret_key,
+                    refund_id=refund_id,
+                    payment_intent_id=payment_intent_id,
+                    amount=approved_amount,
+                    currency=_clean(open_refund.get("CURRENCY")) or "SGD",
+                    entry_id=selected_entry_id,
+                    registration_id=_clean(entry.get("REGISTRATION_ID")),
+                    order_id=selected_order_id,
+                    payment_id=_clean(payment.get("PAYMENT_ID")),
+                    approved_by_user_id=user.user_id,
+                    approved_at=timestamp,
+                )
+            except StripeRefundError as exc:
+                # Leave the request pending so an admin can safely retry. The
+                # Stripe idempotency key protects against accidental duplicates.
+                try:
+                    store.update_by_id(
+                        "REFUNDS",
+                        refund_id,
+                        {
+                            "FAILURE_REASON": str(exc),
+                            "UPDATED_AT": timestamp,
+                        },
+                    )
+                except Exception:
+                    pass
+                st.error(f"Stripe refund was not started: {exc}")
+            else:
+                stripe_status = _clean(stripe_result.get("status")).lower()
+                technical_failure = stripe_status in {"failed", "canceled"}
+                immediate_success = stripe_status == "succeeded"
+                refund_status = (
+                    "REFUND_FAILED"
+                    if technical_failure
+                    else "REFUND_COMPLETE"
+                    if immediate_success
+                    else "REFUND_STARTED"
+                )
+                entry_payment_status = (
+                    "PAYMENT_COMPLETE"
+                    if technical_failure
+                    else "REFUND_COMPLETE"
+                    if immediate_success
+                    else "REFUND_STARTED"
+                )
+                failure_reason = _clean(stripe_result.get("failure_reason"))
+
+                before = dict(open_refund)
+                updates = {
+                    "APPROVED_AMOUNT": f"{approved_amount:.2f}",
+                    "APPROVED_BY_USER_ID": user.user_id,
+                    "APPROVED_AT": timestamp,
+                    "DECIDED_BY_USER_ID": user.user_id,
+                    "DECIDED_AT": timestamp,
+                    "DECISION_REASON": decision_reason.strip(),
+                    "STATUS": refund_status,
+                    "STRIPE_REFUND_ID": _clean(stripe_result.get("refund_id")),
+                    "STRIPE_STATUS": stripe_status,
+                    "FAILURE_REASON": failure_reason,
+                    "COMPLETED_AT": timestamp if immediate_success else "",
+                    "UPDATED_AT": timestamp,
+                }
+                try:
+                    store.update_by_id("REFUNDS", refund_id, updates)
+                    store.update_by_id(
+                        "EVENT_ENTRIES",
+                        selected_entry_id,
+                        {
+                            "PAYMENT_STATUS": entry_payment_status,
+                            "PAYMENT_STATUS_CHANGED_AT": timestamp,
+                            "UPDATED_AT": timestamp,
+                        },
+                    )
+                    sync_output_entry(
+                        gc=google_client,
+                        output_sheet_url_or_id=OUTPUT_SHEET_URL,
+                        output_worksheet=OUTPUT_WORKSHEET,
+                        entry=entry,
+                        payment_status=entry_payment_status,
+                    )
+                    after = dict(before)
+                    after.update(updates)
+                    _audit(
+                        action=(
+                            "REFUND_EXECUTION_FAILED"
+                            if technical_failure
+                            else "REFUND_APPROVED_AND_COMPLETED"
+                            if immediate_success
+                            else "REFUND_APPROVED_AND_STARTED"
+                        ),
+                        entity_type="REFUND",
+                        entity_id=refund_id,
+                        order_id=selected_order_id,
+                        before=before,
+                        after=after,
+                        reason=decision_reason.strip() or _clean(open_refund.get("REASON")),
+                    )
+                except Exception as exc:
+                    st.error(
+                        "Stripe accepted the refund, but local reconciliation was interrupted. "
+                        "Do not create another refund request. The Stripe webhook can repair the "
+                        f"state using refund {stripe_result.get('refund_id')}. Details: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    st.stop()
+
+                _load_admin_rows.clear()
+                if technical_failure:
+                    st.error(
+                        "Stripe returned a failed/canceled refund state. No completed refund was recorded."
+                    )
+                elif immediate_success:
+                    st.success(
+                        f"Refund {stripe_result.get('refund_id')} completed according to Stripe. "
+                        "The webhook will reconcile and audit the final state as well."
+                    )
+                else:
+                    st.success(
+                        f"Refund {stripe_result.get('refund_id')} sent to Stripe. "
+                        "Waiting for authoritative webhook reconciliation."
+                    )
+                st.rerun()
+
+elif open_refund and _clean(open_refund.get("STATUS")).upper() == "REFUND_STARTED":
+    st.info(
+        f"Stripe refund {_clean(open_refund.get('STRIPE_REFUND_ID')) or '-'} is in progress. "
+        f"Stripe status: {_clean(open_refund.get('STRIPE_STATUS')) or 'pending'}."
+    )
 
 with st.expander("Refund history", expanded=False):
     if order_refunds:

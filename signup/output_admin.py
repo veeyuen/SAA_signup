@@ -95,6 +95,7 @@ def sync_output_entry(
     season_best: str | None = None,
     status: str | None = None,
     is_deleted: bool | None = None,
+    payment_status: str | None = None,
 ) -> int:
     """Update the compatibility OUTPUT projection for one event entry."""
     spreadsheet = _open_spreadsheet(gc, output_sheet_url_or_id)
@@ -106,7 +107,7 @@ def sync_output_entry(
 
     _, header_map = _ensure_headers(
         worksheet,
-        ["entry_id", "entry_status", "is_deleted"],
+        ["entry_id", "entry_status", "is_deleted", "payment_status"],
     )
     rows = _matching_rows(worksheet, header_map, entry)
     for row_number in rows:
@@ -120,4 +121,10 @@ def sync_output_entry(
             worksheet.update_cell(row_number, header_map["entry_status"], _clean(status))
         if is_deleted is not None:
             worksheet.update_cell(row_number, header_map["is_deleted"], "TRUE" if is_deleted else "FALSE")
+        if payment_status is not None:
+            worksheet.update_cell(
+                row_number,
+                header_map["payment_status"],
+                _clean(payment_status),
+            )
     return len(rows)
