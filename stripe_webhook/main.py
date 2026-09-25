@@ -20,6 +20,7 @@ from transaction_store import (
 from webhook_email import send_paid_confirmation_email
 from webhook_output_writer import (
     append_confirmed_entries_if_missing,
+    update_entry_payment_status,
 )
 
 
@@ -178,6 +179,161 @@ def _mark_transaction_failure(
         return False, str(exc)
 
 
+
+def _refund_amount_major(refund_obj: dict) -> str:
+    try:
+        amount = Decimal(str(refund_obj.get("amount", 0) or 0)) / Decimal("100")
+        return f"{amount:.2f}"
+    except Exception:
+        return ""
+
+
+def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
+    """Reconcile Stripe refund events into REFUNDS/EVENT_ENTRIES/OUTPUT.
+
+    Refunds created by this application carry the internal REFUND_ID in Stripe
+    metadata. Events without a matching internal refund are acknowledged and
+    ignored so unrelated Dashboard activity does not create retry storms.
+    """
+    google_client = create_google_client(_json_env("GCP_SERVICE_ACCOUNT_JSON"))
+    transaction_sheet_url = _transaction_sheet_url()
+    if not transaction_sheet_url:
+        return jsonify({"error": "TRANSACTION_SHEET_URL/OUTPUT_SHEET_URL is missing"}), 500
+
+    try:
+        store = TransactionSheetStore(
+            google_client=google_client,
+            sheet_url=transaction_sheet_url,
+        )
+    except TransactionStoreError as exc:
+        return jsonify({"error": f"Transaction store unavailable: {exc}"}), 500
+
+    metadata = refund_obj.get("metadata") or {}
+    refund_id = str(metadata.get("refund_id", "") or "").strip()
+    stripe_refund_id = str(refund_obj.get("id", "") or "").strip()
+
+    refund_row = None
+    try:
+        if refund_id:
+            refund_row = store.find_first("REFUNDS", "REFUND_ID", refund_id)
+        if not refund_row and stripe_refund_id:
+            refund_row = store.find_first(
+                "REFUNDS",
+                "STRIPE_REFUND_ID",
+                stripe_refund_id,
+            )
+    except TransactionStoreError as exc:
+        return jsonify({"error": f"Refund lookup failed: {exc}"}), 500
+
+    if not refund_row:
+        return jsonify(
+            {
+                "received": True,
+                "ignored": "untracked_refund",
+                "stripe_refund_id": stripe_refund_id,
+            }
+        ), 200
+
+    refund_id = str(refund_row.get("REFUND_ID", "") or refund_id).strip()
+    entry_id = str(refund_row.get("ENTRY_ID", "") or metadata.get("entry_id", "") or "").strip()
+    order_id = str(refund_row.get("ORDER_ID", "") or metadata.get("order_id", "") or "").strip()
+
+    stripe_status = str(refund_obj.get("status", "") or "").strip().lower()
+    failure_reason = str(refund_obj.get("failure_reason", "") or "").strip()
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    if event_type == "refund.failed" or stripe_status in {"failed", "canceled"}:
+        internal_status = "REFUND_FAILED"
+        entry_payment_status = "PAYMENT_COMPLETE"
+    elif stripe_status == "succeeded":
+        internal_status = "REFUND_COMPLETE"
+        entry_payment_status = "REFUND_COMPLETE"
+    else:
+        internal_status = "REFUND_STARTED"
+        entry_payment_status = "REFUND_STARTED"
+
+    approved_by = str(metadata.get("approved_by_user_id", "") or "").strip()
+    approved_at = str(metadata.get("approved_at", "") or "").strip()
+    approved_amount = _refund_amount_major(refund_obj)
+
+    before = dict(refund_row)
+    updates = {
+        "STATUS": internal_status,
+        "STRIPE_REFUND_ID": stripe_refund_id,
+        "STRIPE_STATUS": stripe_status,
+        "FAILURE_REASON": failure_reason,
+        "UPDATED_AT": now,
+    }
+    if approved_amount:
+        updates["APPROVED_AMOUNT"] = approved_amount
+    if approved_by:
+        updates["APPROVED_BY_USER_ID"] = approved_by
+        updates["DECIDED_BY_USER_ID"] = approved_by
+    if approved_at:
+        updates["APPROVED_AT"] = approved_at
+        updates["DECIDED_AT"] = approved_at
+    if internal_status == "REFUND_COMPLETE":
+        updates["COMPLETED_AT"] = now
+
+    try:
+        store.update_by_id("REFUNDS", refund_id, updates)
+        if entry_id:
+            store.update_by_id(
+                "EVENT_ENTRIES",
+                entry_id,
+                {
+                    "PAYMENT_STATUS": entry_payment_status,
+                    "PAYMENT_STATUS_CHANGED_AT": now,
+                    "UPDATED_AT": now,
+                },
+            )
+
+        after = dict(before)
+        after.update(updates)
+        event_id = str(event.get("id", "") or "").strip()
+        audit_id = f"AUD-{event_id}" if event_id else f"AUD-STRIPE-{stripe_refund_id}-{stripe_status}"
+        store.append_audit_log(
+            {
+                "AUDIT_ID": audit_id,
+                "TIMESTAMP": now,
+                "USER_ID": "SYSTEM_STRIPE",
+                "USER_EMAIL": "",
+                "ACTION": "STRIPE_REFUND_RECONCILED",
+                "ENTITY_TYPE": "REFUND",
+                "ENTITY_ID": refund_id,
+                "ORDER_ID": order_id,
+                "BEFORE_JSON": json.dumps(before, ensure_ascii=False, sort_keys=True),
+                "AFTER_JSON": json.dumps(after, ensure_ascii=False, sort_keys=True),
+                "REASON": event_type,
+            }
+        )
+    except TransactionStoreError as exc:
+        return jsonify({"error": f"Refund reconciliation failed: {exc}"}), 500
+
+    output_url = str(os.environ.get("OUTPUT_SHEET_URL", "") or "").strip()
+    if output_url and entry_id:
+        try:
+            update_entry_payment_status(
+                gc=google_client,
+                output_sheet_url_or_id=output_url,
+                output_worksheet=os.environ.get("OUTPUT_WORKSHEET", ""),
+                entry_id=entry_id,
+                payment_status=entry_payment_status,
+            )
+        except Exception as exc:
+            return jsonify(
+                {"error": f"Refund OUTPUT reconciliation failed: {type(exc).__name__}: {exc}"}
+            ), 500
+
+    return jsonify(
+        {
+            "received": True,
+            "refund_id": refund_id,
+            "stripe_refund_id": stripe_refund_id,
+            "status": internal_status,
+        }
+    ), 200
+
 def stripe_webhook(request: Request):
     raw_body = request.get_data()
     signature = request.headers.get("Stripe-Signature", "")
@@ -218,6 +374,14 @@ def stripe_webhook(request: Request):
             session = session.to_dict_recursive()
         elif hasattr(session, "to_dict"):
             session = session.to_dict()
+
+    refund_events = {"refund.created", "refund.updated", "refund.failed"}
+    if event_type in refund_events:
+        return _handle_refund_event(
+            event=event,
+            event_type=event_type,
+            refund_obj=session,
+        )
 
     handled_success_events = {
         "checkout.session.completed",

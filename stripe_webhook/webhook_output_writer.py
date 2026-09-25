@@ -165,3 +165,55 @@ def append_confirmed_entries_if_missing(
         )
 
     return True
+
+
+def update_entry_payment_status(
+    *,
+    gc,
+    output_sheet_url_or_id: str,
+    output_worksheet: str,
+    entry_id: str,
+    payment_status: str,
+) -> int:
+    """Update compatibility OUTPUT payment_status for one transaction entry.
+
+    Phase 3B refund webhooks use ENTRY_ID as the stable join key. If the OUTPUT
+    row is absent, return 0 rather than failing the authoritative transaction
+    update.
+    """
+    entry_id = str(entry_id or "").strip()
+    if not entry_id:
+        return 0
+
+    spreadsheet = _open_spreadsheet(gc, output_sheet_url_or_id)
+    worksheet = (
+        spreadsheet.worksheet(output_worksheet)
+        if str(output_worksheet or "").strip()
+        else spreadsheet.sheet1
+    )
+
+    headers = worksheet.row_values(1)
+    normalized = [_normalize_header(h) for h in headers]
+    missing = [h for h in ["entry_id", "payment_status"] if h not in normalized]
+    if missing:
+        _ensure_column_capacity(worksheet, len(headers) + len(missing))
+        for header in missing:
+            headers.append(header)
+            worksheet.update_cell(1, len(headers), header)
+            normalized.append(header)
+
+    entry_col = normalized.index("entry_id") + 1
+    payment_col = normalized.index("payment_status") + 1
+    try:
+        entry_values = worksheet.col_values(entry_col)
+    except Exception:
+        return 0
+
+    count = 0
+    for row_number, value in enumerate(entry_values, start=1):
+        if row_number == 1:
+            continue
+        if str(value or "").strip() == entry_id:
+            worksheet.update_cell(row_number, payment_col, str(payment_status or "").strip())
+            count += 1
+    return count
