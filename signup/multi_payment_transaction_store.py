@@ -105,6 +105,9 @@ SHEETS: dict[str, list[str]] = {
         "STRIPE_CHECKOUT_URL",
         "NOTIFICATION_EMAIL",
         "NOTIFICATION_SENT_AT",
+        "STRIPE_BALANCE_TRANSACTION_ID",
+        "STRIPE_FEE_ACTUAL",
+        "STRIPE_NET_ACTUAL",
     ],
     "WAIVERS": [
         "WAIVER_ID",
@@ -147,6 +150,9 @@ SHEETS: dict[str, list[str]] = {
         "COMPLETED_AT",
         "FAILURE_REASON",
         "UPDATED_AT",
+        "STRIPE_BALANCE_TRANSACTION_ID",
+        "STRIPE_FEE_ACTUAL",
+        "STRIPE_NET_ACTUAL",
     ],
     "AUDIT_LOG": [
         "AUDIT_ID",
@@ -721,6 +727,9 @@ class TransactionSheetStore:
         paid_at: str,
         payment_method: str = "",
         processing_fee: Any = "",
+        stripe_balance_transaction_id: str = "",
+        stripe_fee_actual: Any = "",
+        stripe_net_actual: Any = "",
     ) -> str:
         """Webhook helper: confirm all rows belonging to a paid order.
 
@@ -748,6 +757,9 @@ class TransactionSheetStore:
         payment_updates = {
             "STRIPE_PAYMENT_INTENT_ID": stripe_payment_intent_id,
             "PROCESSING_FEE": processing_fee,
+            "STRIPE_BALANCE_TRANSACTION_ID": stripe_balance_transaction_id,
+            "STRIPE_FEE_ACTUAL": stripe_fee_actual,
+            "STRIPE_NET_ACTUAL": stripe_net_actual,
             "DISPLAY_STATUS": "PAYMENT_COMPLETE",
             "STRIPE_STATUS": "paid",
             "PAID_AT": paid_at,

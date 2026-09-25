@@ -156,6 +156,106 @@ def _actual_payment_method(session: dict) -> str:
     return ""
 
 
+
+def _stripe_object_to_dict(value):
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "to_dict_recursive"):
+        return value.to_dict_recursive()
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    return {}
+
+
+def _stripe_balance_values(balance_transaction) -> dict[str, str]:
+    bt = _stripe_object_to_dict(balance_transaction)
+    bt_id = str(bt.get("id", "") or "").strip()
+    if not bt_id:
+        return {}
+    try:
+        fee = Decimal(str(bt.get("fee", 0) or 0)) / Decimal("100")
+        net = Decimal(str(bt.get("net", 0) or 0)) / Decimal("100")
+    except Exception:
+        return {}
+    return {
+        "STRIPE_BALANCE_TRANSACTION_ID": bt_id,
+        "STRIPE_FEE_ACTUAL": f"{fee:.2f}",
+        "STRIPE_NET_ACTUAL": f"{net:.2f}",
+    }
+
+
+def _payment_balance_financials(payment_intent_id: str) -> dict[str, str]:
+    """Best-effort actual Stripe fee/net lookup for one PaymentIntent.
+
+    Financial reporting metadata must never make an otherwise valid payment
+    webhook fail. If Stripe's balance transaction is not yet available, return
+    blanks and let the Phase 4 backfill action reconcile it later.
+    """
+    secret_key = str(os.environ.get("STRIPE_SECRET_KEY", "") or "").strip()
+    payment_intent_id = str(payment_intent_id or "").strip()
+    if not secret_key or not payment_intent_id:
+        return {}
+
+    previous_key = getattr(stripe, "api_key", None)
+    stripe.api_key = secret_key
+    try:
+        intent = stripe.PaymentIntent.retrieve(
+            payment_intent_id,
+            expand=["latest_charge.balance_transaction"],
+        )
+        intent = _stripe_object_to_dict(intent)
+        charge = intent.get("latest_charge")
+        if isinstance(charge, str) and charge:
+            charge = stripe.Charge.retrieve(
+                charge,
+                expand=["balance_transaction"],
+            )
+        charge = _stripe_object_to_dict(charge)
+        bt = charge.get("balance_transaction")
+        if isinstance(bt, str) and bt:
+            bt = stripe.BalanceTransaction.retrieve(bt)
+        return _stripe_balance_values(bt)
+    except Exception as exc:
+        print(
+            "Could not resolve Stripe payment balance transaction; "
+            f"Phase 4 backfill can repair it: {type(exc).__name__}: {exc}"
+        )
+        return {}
+    finally:
+        stripe.api_key = previous_key
+
+
+def _refund_balance_financials(stripe_refund_id: str) -> dict[str, str]:
+    """Best-effort actual Stripe fee/net lookup for one refund."""
+    secret_key = str(os.environ.get("STRIPE_SECRET_KEY", "") or "").strip()
+    stripe_refund_id = str(stripe_refund_id or "").strip()
+    if not secret_key or not stripe_refund_id:
+        return {}
+
+    previous_key = getattr(stripe, "api_key", None)
+    stripe.api_key = secret_key
+    try:
+        refund = stripe.Refund.retrieve(
+            stripe_refund_id,
+            expand=["balance_transaction"],
+        )
+        refund = _stripe_object_to_dict(refund)
+        bt = refund.get("balance_transaction")
+        if isinstance(bt, str) and bt:
+            bt = stripe.BalanceTransaction.retrieve(bt)
+        return _stripe_balance_values(bt)
+    except Exception as exc:
+        print(
+            "Could not resolve Stripe refund balance transaction; "
+            f"Phase 4 backfill can repair it: {type(exc).__name__}: {exc}"
+        )
+        return {}
+    finally:
+        stripe.api_key = previous_key
+
+
 def _mark_transaction_failure(
     *,
     store: TransactionSheetStore | None,
@@ -306,6 +406,11 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
     approved_by = str(metadata.get("approved_by_user_id", "") or "").strip()
     approved_at = str(metadata.get("approved_at", "") or "").strip()
     approved_amount = _refund_amount_major(refund_obj)
+    refund_financials = (
+        _refund_balance_financials(stripe_refund_id)
+        if stripe_status == "succeeded" and stripe_refund_id
+        else {}
+    )
 
     before = dict(refund_row)
     updates = {
@@ -322,6 +427,7 @@ def _handle_refund_event(*, event: dict, event_type: str, refund_obj: dict):
         "FAILURE_REASON": failure_reason,
         "UPDATED_AT": now,
     }
+    updates.update(refund_financials)
     if approved_amount:
         updates["APPROVED_AMOUNT"] = approved_amount
     if approved_by:
@@ -807,12 +913,14 @@ def _handle_fee_increase_checkout_event(*, event: dict, event_type: str, session
 
         payment_intent_id = str(session.get("payment_intent", "") or "").strip()
         actual_payment_method = _actual_payment_method(session)
+        payment_financials = _payment_balance_financials(payment_intent_id)
         store.update_by_id(
             "PAYMENTS",
             payment_id,
             {
                 "STRIPE_PAYMENT_INTENT_ID": payment_intent_id,
                 "PAYMENT_METHOD": actual_payment_method,
+                **payment_financials,
                 "DISPLAY_STATUS": "PAYMENT_COMPLETE",
                 "STRIPE_STATUS": "paid",
                 "PAID_AT": now,
@@ -855,6 +963,7 @@ def _handle_fee_increase_checkout_event(*, event: dict, event_type: str, session
             {
                 "STRIPE_PAYMENT_INTENT_ID": payment_intent_id,
                 "PAYMENT_METHOD": actual_payment_method,
+                **payment_financials,
                 "DISPLAY_STATUS": "PAYMENT_COMPLETE",
                 "STRIPE_STATUS": "paid",
                 "PAID_AT": now,
@@ -1230,12 +1339,18 @@ def stripe_webhook(request: Request):
     # retry will repair the transaction tables.
     if transaction_store is not None:
         try:
+            payment_financials = _payment_balance_financials(payment_intent_id)
             transaction_store.mark_payment_complete_by_stripe_session(
                 stripe_session_id=actual_session_id,
                 stripe_payment_intent_id=payment_intent_id,
                 paid_at=confirmed_at,
                 payment_method=_actual_payment_method(session),
                 processing_fee="",
+                stripe_balance_transaction_id=payment_financials.get(
+                    "STRIPE_BALANCE_TRANSACTION_ID", ""
+                ),
+                stripe_fee_actual=payment_financials.get("STRIPE_FEE_ACTUAL", ""),
+                stripe_net_actual=payment_financials.get("STRIPE_NET_ACTUAL", ""),
             )
         except TransactionStoreError as exc:
             return jsonify(
