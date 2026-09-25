@@ -79,6 +79,11 @@ from signup.transaction_store import (
     TransactionSheetStore,
     TransactionStoreError,
 )
+from signup.athlete_integrity import (
+    candidate_from_cart_item,
+    check_candidate_against_existing,
+    normalise_person_name,
+)
 from signup.validation import (
     is_valid_email,
     is_valid_ic_last4,
@@ -940,6 +945,193 @@ def _transaction_store() -> TransactionSheetStore:
     )
 
 
+def _existing_entries_for_integrity(
+    store: TransactionSheetStore,
+    *,
+    ignore_order_id: str = "",
+) -> list[dict[str, str]]:
+    rows = store.list_rows("EVENT_ENTRIES")
+    ignored = str(ignore_order_id or "").strip()
+    if not ignored:
+        return rows
+    return [
+        row
+        for row in rows
+        if str(row.get("ORDER_ID", "") or "").strip() != ignored
+    ]
+
+
+def _candidate_summary(candidate: dict) -> dict:
+    return {
+        "REGISTRATION_ID": candidate.get("registration_id", ""),
+        "COMPETITION_ID": candidate.get("competition_id", ""),
+        "ORGANIZATION_ID": candidate.get("organization_id", ""),
+        "TEAM_CODE": candidate.get("team_code", ""),
+        "ATHLETE_ID": candidate.get("athlete_id", ""),
+        "ATHLETE_NAME": candidate.get("athlete_name", ""),
+        "DOB": candidate.get("dob", ""),
+        "EVENTS": candidate.get("events", []),
+    }
+
+
+def _audit_integrity_conflicts(
+    *,
+    store: TransactionSheetStore,
+    candidate: dict,
+    result,
+    stage: str,
+) -> None:
+    action_by_code = {
+        "DUPLICATE_EVENT": "ATHLETE_DUPLICATE_EVENT_BLOCKED",
+        "TEAM_CONFLICT": "ATHLETE_TEAM_CONFLICT_BLOCKED",
+        "IDENTITY_COLLISION": "ATHLETE_IDENTITY_COLLISION_BLOCKED",
+    }
+    now_iso = _iso_now()
+    for conflict in result.conflicts:
+        before = {
+            "ENTRY_ID": conflict.existing_entry_id,
+            "ORDER_ID": conflict.existing_order_id,
+            "REGISTRATION_ID": conflict.existing_registration_id,
+            "ORGANIZATION_ID": conflict.existing_organization_id,
+            "TEAM_CODE": conflict.existing_team_code,
+            "EVENT_NAME": conflict.existing_event_name,
+            "EVENT_CODE": conflict.existing_event_code,
+            "ATHLETE_ID": conflict.existing_athlete_id,
+            "ATHLETE_NAME": conflict.existing_athlete_name,
+            "DOB": conflict.existing_dob,
+        }
+        store.append_audit_log(
+            {
+                "AUDIT_ID": _new_id("AUD"),
+                "TIMESTAMP": now_iso,
+                "USER_ID": current_user.user_id,
+                "USER_EMAIL": current_user_email,
+                "ACTION": action_by_code.get(
+                    conflict.code, "ATHLETE_INTEGRITY_BLOCKED"
+                ),
+                "ENTITY_TYPE": "REGISTRATION_INTEGRITY",
+                "ENTITY_ID": (
+                    candidate.get("registration_id", "")
+                    or candidate.get("athlete_id", "")
+                    or "UNRESOLVED_ATHLETE"
+                ),
+                "ORDER_ID": conflict.existing_order_id,
+                "BEFORE_JSON": json.dumps(before, sort_keys=True),
+                "AFTER_JSON": json.dumps(
+                    _candidate_summary(candidate), sort_keys=True
+                ),
+                "REASON": f"Phase 5A {stage}: {conflict.code}",
+            }
+        )
+
+
+def _render_integrity_conflicts(result) -> None:
+    st.error(
+        "This athlete cannot be added/submitted until the registration "
+        "integrity issue below is resolved."
+    )
+    for conflict in result.conflicts:
+        reference_bits = []
+        if conflict.existing_entry_id:
+            reference_bits.append(f"entry {conflict.existing_entry_id}")
+        if conflict.existing_order_id:
+            reference_bits.append(f"order {conflict.existing_order_id}")
+        reference = (
+            " Existing record: " + ", ".join(reference_bits) + "."
+            if reference_bits
+            else ""
+        )
+        st.warning(f"{conflict.message}{reference}")
+
+
+def _check_cart_item_against_transactions(
+    cart_item: dict,
+    *,
+    store: TransactionSheetStore | None = None,
+    existing_entries: list[dict[str, str]] | None = None,
+    ignore_order_id: str = "",
+    stage: str = "cart-add check",
+):
+    integrity_store = store or _transaction_store()
+    rows = (
+        existing_entries
+        if existing_entries is not None
+        else _existing_entries_for_integrity(
+            integrity_store, ignore_order_id=ignore_order_id
+        )
+    )
+    candidate = candidate_from_cart_item(cart_item)
+    result = check_candidate_against_existing(candidate, rows)
+    if result.blocked:
+        try:
+            _audit_integrity_conflicts(
+                store=integrity_store,
+                candidate=candidate,
+                result=result,
+                stage=stage,
+            )
+        except Exception as audit_exc:
+            st.warning(
+                "The registration was blocked correctly, but its audit record "
+                f"could not be written: {type(audit_exc).__name__}: {audit_exc}"
+            )
+    return result
+
+
+def _validate_cart_against_transactions(
+    cart_items: list[dict],
+    *,
+    ignore_order_id: str = "",
+) -> bool:
+    try:
+        store = _transaction_store()
+        existing_entries = _existing_entries_for_integrity(
+            store, ignore_order_id=ignore_order_id
+        )
+    except Exception as exc:
+        st.error(
+            "Unable to verify existing competition registrations. The order "
+            "has not been submitted. Please retry. "
+            f"({type(exc).__name__}: {exc})"
+        )
+        return False
+
+    blocked_results = []
+    for item in cart_items:
+        result = _check_cart_item_against_transactions(
+            item,
+            store=store,
+            existing_entries=existing_entries,
+            ignore_order_id=ignore_order_id,
+            stage="pre-submit recheck",
+        )
+        if result.blocked:
+            blocked_results.append(result)
+
+    if blocked_results:
+        st.error(
+            "The cart is no longer valid because an athlete registration "
+            "conflict now exists. No order or payment was created."
+        )
+        for result in blocked_results:
+            _render_integrity_conflicts(result)
+        return False
+    return True
+
+
+def _same_cart_athlete(candidate_a: dict, candidate_b: dict) -> bool:
+    id_a = str(candidate_a.get("athlete_id", "") or "").strip().casefold()
+    id_b = str(candidate_b.get("athlete_id", "") or "").strip().casefold()
+    if id_a and id_b:
+        return id_a == id_b
+
+    name_a = normalise_person_name(candidate_a.get("athlete_name", ""))
+    name_b = normalise_person_name(candidate_b.get("athlete_name", ""))
+    dob_a = str(candidate_a.get("dob", "") or "").strip()[:10]
+    dob_b = str(candidate_b.get("dob", "") or "").strip()[:10]
+    return bool(name_a and name_b and dob_a and dob_b and name_a == name_b and dob_a == dob_b)
+
+
 def _system_int(key: str, default: int) -> int:
     raw = pilot_config.system_value(key, str(default))
     try:
@@ -1274,51 +1466,53 @@ if add_to_cart_clicked:
     else:
         cart_item = _build_current_athlete_cart_item()
 
-        # Guard against accidentally adding the same athlete/event/division twice.
-        existing_keys = {
-            (
-                str(row.get("unique_id", "") or "").strip().casefold()
-                or (
-                    str(row.get("full_name", "") or "").strip().casefold()
-                    + "|"
-                    + str(row.get("birth_date", "") or "")
-                ),
-                str(row.get("event_division", "") or "").strip().casefold(),
-                str(row.get("event", "") or "").strip().casefold(),
+        # One athlete should appear only once in a single order/cart. If the
+        # user wants additional events for an athlete already in the cart,
+        # remove that athlete and re-add them with all desired events selected.
+        new_candidate = candidate_from_cart_item(cart_item)
+        same_athlete_in_cart = any(
+            _same_cart_athlete(
+                new_candidate, candidate_from_cart_item(existing_item)
             )
             for existing_item in get_cart()
-            for row in (existing_item.get("entry_rows", []) or [])
-        }
-        new_keys = {
-            (
-                str(row.get("unique_id", "") or "").strip().casefold()
-                or (
-                    str(row.get("full_name", "") or "").strip().casefold()
-                    + "|"
-                    + str(row.get("birth_date", "") or "")
-                ),
-                str(row.get("event_division", "") or "").strip().casefold(),
-                str(row.get("event", "") or "").strip().casefold(),
-            )
-            for row in cart_item["entry_rows"]
-        }
+        )
 
-        if existing_keys.intersection(new_keys):
+        if same_athlete_in_cart:
             st.error(
-                "At least one of these athlete/event entries is already in the cart."
+                "This athlete is already in the current cart. Remove the "
+                "existing athlete and re-add them with all required events "
+                "selected so the order contains one athlete record."
             )
         else:
             try:
-                add_cart_item(
+                integrity_result = _check_cart_item_against_transactions(
                     cart_item,
-                    competition_id=selected_competition_id,
+                    ignore_order_id=str(
+                        st.session_state.get("draft_order_id", "") or ""
+                    ).strip(),
+                    stage="cart-add check",
                 )
-            except ValueError as exc:
-                st.error(str(exc))
+            except Exception as exc:
+                st.error(
+                    "Unable to verify existing competition registrations. "
+                    "The athlete was not added to the cart. Please retry. "
+                    f"({type(exc).__name__}: {exc})"
+                )
             else:
-                _queue_clear_athlete_form()
-                st.toast("Athlete added to cart.")
-                st.rerun()
+                if integrity_result.blocked:
+                    _render_integrity_conflicts(integrity_result)
+                else:
+                    try:
+                        add_cart_item(
+                            cart_item,
+                            competition_id=selected_competition_id,
+                        )
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        _queue_clear_athlete_form()
+                        st.toast("Athlete added to cart.")
+                        st.rerun()
 
 
 st.divider()
@@ -1423,6 +1617,10 @@ else:
             disabled=submit_disabled,
         ):
             order_id = _draft_order_id()
+            if not _validate_cart_against_transactions(
+                cart, ignore_order_id=order_id
+            ):
+                st.stop()
             payment_id = "PAY-" + order_id.removeprefix("ORD-")
 
             payment_type = "INVOICE" if is_school_order else "NO_COST"
@@ -1510,6 +1708,10 @@ else:
             disabled=submit_disabled,
         ):
             order_id = _draft_order_id()
+            if not _validate_cart_against_transactions(
+                cart, ignore_order_id=order_id
+            ):
+                st.stop()
             payment_id = "PAY-" + order_id.removeprefix("ORD-")
 
             currency = str(
