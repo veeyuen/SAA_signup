@@ -751,6 +751,7 @@ class TransactionSheetStore:
         payment_id: str,
         stripe_session_id: str,
         attempted_at: str,
+        checkout_url: str = "",
     ) -> None:
         self.update_by_id(
             "ORDERS",
@@ -760,16 +761,19 @@ class TransactionSheetStore:
                 "UPDATED_AT": attempted_at,
             },
         )
+        payment_updates = {
+            "STRIPE_CHECKOUT_SESSION_ID": stripe_session_id,
+            "DISPLAY_STATUS": "PAYMENT_STARTED",
+            "STRIPE_STATUS": "checkout_created",
+            "LAST_ATTEMPT_AT": attempted_at,
+            "FAILURE_REASON": "",
+        }
+        if str(checkout_url or "").strip():
+            payment_updates["STRIPE_CHECKOUT_URL"] = str(checkout_url).strip()
         self.update_by_id(
             "PAYMENTS",
             payment_id,
-            {
-                "STRIPE_CHECKOUT_SESSION_ID": stripe_session_id,
-                "DISPLAY_STATUS": "PAYMENT_STARTED",
-                "STRIPE_STATUS": "checkout_created",
-                "LAST_ATTEMPT_AT": attempted_at,
-                "FAILURE_REASON": "",
-            },
+            payment_updates,
         )
         self.update_where(
             "EVENT_ENTRIES",

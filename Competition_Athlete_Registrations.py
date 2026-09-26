@@ -110,6 +110,12 @@ from payment_store import (
 )
 from signup.pending_payment import upsert_pending_registration
 from signup.stripe_payment import get_or_create_registration_checkout
+from signup.payment_recovery import (
+    checkout_force_new,
+    find_resumable_payment_orders,
+    order_can_be_resumed,
+    pending_stripe_order_in_scope,
+)
 
 APP_VARIANT = "public_entry_only"
 
@@ -127,6 +133,57 @@ TRANSACTION_SHEET_URL = str(
     st.secrets.get("TRANSACTION_SHEET_URL", CONFIG_SHEET_URL)
     or CONFIG_SHEET_URL
 ).strip()
+
+
+def _transaction_store() -> TransactionSheetStore:
+    try:
+        google_client = create_google_client(
+            dict(st.secrets["gcp_service_account"])
+        )
+    except Exception as exc:
+        raise TransactionStoreError(
+            "Could not create the Google Sheets service-account client: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    return TransactionSheetStore(
+        google_client=google_client,
+        sheet_url=TRANSACTION_SHEET_URL,
+    )
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_resumable_payment_orders(
+    transaction_sheet_url: str,
+    user_id: str,
+    organization_id: str,
+) -> list[dict]:
+    # transaction_sheet_url participates in the cache key even though the store
+    # reads the same configured URL. The short TTL cuts repeated Sheets reads
+    # from Streamlit reruns without making payment state stale for long.
+    _ = transaction_sheet_url
+    store = _transaction_store()
+    orders = store.list_rows("ORDERS")
+    scoped_orders = [
+        order
+        for order in orders
+        if pending_stripe_order_in_scope(
+            order,
+            user_id=user_id,
+            organization_id=organization_id,
+        )
+    ]
+    if not scoped_orders:
+        return []
+
+    return find_resumable_payment_orders(
+        orders=scoped_orders,
+        payments=store.list_rows("PAYMENTS"),
+        registrations=store.list_rows("REGISTRATIONS"),
+        event_entries=store.list_rows("EVENT_ENTRIES"),
+        user_id=user_id,
+        organization_id=organization_id,
+    )
 
 @st.cache_resource(show_spinner=False)
 def _get_pilot_config_repository(sheet_url: str) -> PilotConfigRepository:
@@ -264,6 +321,213 @@ def show_stripe_return_status():
 
 
 show_stripe_return_status()
+
+
+def _show_session_pending_checkout() -> None:
+    pending = st.session_state.get("pending_checkout", {}) or {}
+    if not pending:
+        return
+
+    st.success("Your order is pending payment.")
+    st.write(f"Amount payable: **SGD {pending.get('amount', '')}**")
+
+    order_id = str(
+        pending.get("order_id", "")
+        or pending.get("registration_id", "")
+        or ""
+    ).strip()
+    if order_id:
+        st.caption(f"Order reference: {order_id}")
+
+    payment_url = str(pending.get("payment_url", "") or "").strip()
+    if payment_url:
+        st.link_button(
+            "Pay by Card or PayNow",
+            payment_url,
+            type="primary",
+        )
+    else:
+        st.info(
+            "Stripe has already accepted or completed this Checkout session. "
+            "Please wait for webhook confirmation rather than starting another payment."
+        )
+
+    st.warning(
+        "The order is not yet confirmed. It will be confirmed only after Stripe "
+        "verifies successful payment."
+    )
+
+    if st.button("Hide this payment prompt for now"):
+        st.session_state.pop("pending_checkout", None)
+        st.rerun()
+
+    st.stop()
+
+
+def _resume_persisted_payment(candidate: dict) -> None:
+    order_id = str(candidate.get("order_id", "") or "").strip()
+    payment_id = str(candidate.get("payment_id", "") or "").strip()
+    if not order_id or not payment_id:
+        st.error("This pending order is incomplete and must be reviewed by SAA Admin.")
+        return
+
+    stripe_secret_key = str(st.secrets.get("STRIPE_SECRET_KEY", "") or "").strip()
+    public_app_url = str(
+        st.secrets.get("PUBLIC_APP_URL", "https://saapublicaccess.streamlit.app")
+        or ""
+    ).strip()
+    currency = str(
+        candidate.get("currency", "")
+        or st.secrets.get("STRIPE_CURRENCY", "sgd")
+        or "sgd"
+    ).strip().lower()
+
+    if not stripe_secret_key:
+        st.error("Stripe is not configured: STRIPE_SECRET_KEY is missing.")
+        return
+    if currency != "sgd":
+        st.error("Stripe PayNow requires STRIPE_CURRENCY to be set to 'sgd'.")
+        return
+
+    # Re-read the two authoritative rows immediately before resuming so a stale
+    # cached prompt cannot reopen an order that has since been settled/admin-changed.
+    store = _transaction_store()
+    order_row = store.find_first("ORDERS", "ORDER_ID", order_id) or {}
+    payment_row = store.find_first("PAYMENTS", "PAYMENT_ID", payment_id) or {}
+    if not order_can_be_resumed(
+        order_row,
+        payment_row,
+        user_id=current_user.user_id,
+        organization_id=current_organization.organization_id,
+    ):
+        _cached_resumable_payment_orders.clear()
+        st.info(
+            "This order is no longer available for payment. Refresh the page to "
+            "see its current status."
+        )
+        return
+
+    amount = str(
+        payment_row.get("AMOUNT", "")
+        or order_row.get("TOTAL_AMOUNT", "")
+        or candidate.get("amount", "")
+    ).strip()
+    existing_session_id = str(
+        payment_row.get("STRIPE_CHECKOUT_SESSION_ID", "")
+        or candidate.get("stripe_session_id", "")
+        or ""
+    ).strip()
+    stripe_status = str(payment_row.get("STRIPE_STATUS", "") or "").strip()
+
+    customer_email = str(
+        candidate.get("customer_email", "") or current_user_email
+    ).strip()
+    athlete_names = list(candidate.get("athlete_names", []) or [])
+    athlete_label = (
+        athlete_names[0]
+        if len(athlete_names) == 1
+        else f"{len(athlete_names)} athletes"
+    )
+    competition_id = str(candidate.get("competition_id", "") or "").strip()
+    description = f"{competition_id}: {athlete_label or 'competition registration'}"
+
+    try:
+        checkout = get_or_create_registration_checkout(
+            secret_key=stripe_secret_key,
+            registration_id=order_id,
+            amount=amount,
+            currency=currency,
+            customer_email=customer_email,
+            description=description,
+            public_app_url=public_app_url,
+            existing_session_id=existing_session_id,
+            force_new=checkout_force_new(stripe_status),
+        )
+
+        attempted_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        if checkout.get("payment_status") != "paid":
+            store.mark_payment_started(
+                order_id=order_id,
+                payment_id=payment_id,
+                stripe_session_id=checkout.get("session_id", ""),
+                attempted_at=attempted_at,
+                checkout_url=checkout.get("payment_url", ""),
+            )
+        elif str(checkout.get("payment_url", "") or "").strip():
+            store.update_by_id(
+                "PAYMENTS",
+                payment_id,
+                {"STRIPE_CHECKOUT_URL": checkout.get("payment_url", "")},
+            )
+    except Exception as exc:
+        st.error(f"Unable to resume payment: {type(exc).__name__}: {exc}")
+        return
+
+    _cached_resumable_payment_orders.clear()
+    st.session_state["draft_order_id"] = order_id
+    st.session_state["pending_checkout"] = {
+        "order_id": order_id,
+        "registration_id": order_id,
+        "payment_id": payment_id,
+        "session_id": checkout.get("session_id", ""),
+        "payment_url": checkout.get("payment_url", ""),
+        "amount": amount,
+        "currency": currency,
+        "athlete_count": candidate.get("athlete_count", 0),
+        "event_entry_count": candidate.get("event_entry_count", 0),
+    }
+    st.rerun()
+
+
+def _show_persisted_pending_payments() -> None:
+    try:
+        candidates = _cached_resumable_payment_orders(
+            TRANSACTION_SHEET_URL,
+            current_user.user_id,
+            current_organization.organization_id,
+        )
+    except Exception as exc:
+        st.warning(
+            "Could not check for existing pending payments right now: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    if not candidates:
+        return
+
+    st.warning(
+        "You have an unpaid registration that can be resumed. Resuming uses the "
+        "existing order and does not create a duplicate registration."
+    )
+
+    candidate_by_id = {row["order_id"]: row for row in candidates}
+    order_ids = list(candidate_by_id)
+    selected_order_id = st.selectbox(
+        "Pending payment",
+        order_ids,
+        format_func=lambda oid: (
+            f"{oid} · {candidate_by_id[oid].get('competition_id', '')} · "
+            f"SGD {candidate_by_id[oid].get('amount', '')}"
+        ),
+        key="resumable_pending_order_id",
+    )
+    selected = candidate_by_id[selected_order_id]
+
+    names = ", ".join(selected.get("athlete_names", []) or []) or "Registration"
+    st.caption(
+        f"{names} · {selected.get('event_entry_count', 0)} event entry/entries · "
+        f"status {selected.get('display_status', '') or 'pending'}"
+    )
+
+    if st.button("Resume payment", type="primary", key="resume_persisted_payment"):
+        _resume_persisted_payment(selected)
+
+    st.divider()
+
+
+_show_session_pending_checkout()
+_show_persisted_pending_payments()
 
 
 apply_pending_text_updates()
@@ -947,45 +1211,8 @@ ready_to_add = (
 
 
 
-# Existing pending Checkout session, if one has already been created.
-_pending_checkout = st.session_state.get("pending_checkout", {}) or {}
-if _pending_checkout:
-    st.success("Your order is pending payment.")
-    st.write(f"Amount payable: **SGD {_pending_checkout.get('amount', '')}**")
-
-    _pending_order_id = str(
-        _pending_checkout.get("order_id", "")
-        or _pending_checkout.get("registration_id", "")
-        or ""
-    ).strip()
-    if _pending_order_id:
-        st.caption(f"Order reference: {_pending_order_id}")
-
-    _pending_payment_url = str(
-        _pending_checkout.get("payment_url", "") or ""
-    ).strip()
-    if _pending_payment_url:
-        st.link_button(
-            "Pay by Card or PayNow",
-            _pending_payment_url,
-            type="primary",
-        )
-    else:
-        st.info(
-            "Stripe has already accepted or completed this Checkout session. "
-            "Please wait for webhook confirmation rather than starting another payment."
-        )
-
-    st.warning(
-        "The order is not yet confirmed. It will be written to the confirmed "
-        "entry sheet only after Stripe verifies successful payment."
-    )
-
-    if st.button("Cancel this payment request and return to cart"):
-        st.session_state.pop("pending_checkout", None)
-        st.rerun()
-
-    st.stop()
+# Pending Checkout recovery is rendered immediately after authentication so it
+# remains available even if later competition/master-data reads fail.
 
 
 def _new_id(prefix: str) -> str:
@@ -1009,23 +1236,6 @@ def _draft_order_id() -> str:
         order_id = _new_id("ORD")
         st.session_state["draft_order_id"] = order_id
     return order_id
-
-
-def _transaction_store() -> TransactionSheetStore:
-    try:
-        google_client = create_google_client(
-            dict(st.secrets["gcp_service_account"])
-        )
-    except Exception as exc:
-        raise TransactionStoreError(
-            "Could not create the Google Sheets service-account client: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
-
-    return TransactionSheetStore(
-        google_client=google_client,
-        sheet_url=TRANSACTION_SHEET_URL,
-    )
 
 
 def _existing_entries_for_integrity(
@@ -2162,6 +2372,7 @@ else:
                         payment_id=payment_id,
                         stripe_session_id=checkout["session_id"],
                         attempted_at=attempt_time,
+                        checkout_url=checkout.get("payment_url", ""),
                     )
 
             except Exception as exc:
