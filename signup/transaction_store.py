@@ -788,6 +788,120 @@ class TransactionSheetStore:
             },
         )
 
+    def cancel_pending_stripe_order(
+        self,
+        *,
+        order_id: str,
+        payment_id: str,
+        cancelled_at: str,
+    ) -> dict[str, Any]:
+        """Cancel one unpaid Stripe registration without deleting its history.
+
+        The method re-checks all logical rows immediately before mutation. Any
+        evidence of successful payment/confirmation causes a fail-closed error.
+        Duplicate rows for the same logical IDs are updated together.
+        """
+        order_id = _clean(order_id)
+        payment_id = _clean(payment_id)
+        if not order_id or not payment_id:
+            raise TransactionStoreError("ORDER_ID and PAYMENT_ID are required.")
+
+        orders = [
+            row for row in self.list_rows("ORDERS")
+            if _clean(row.get("ORDER_ID")) == order_id
+        ]
+        payments = [
+            row for row in self.list_rows("PAYMENTS")
+            if _clean(row.get("ORDER_ID")) == order_id
+            and _clean(row.get("PAYMENT_ID")) == payment_id
+        ]
+        registrations = [
+            row for row in self.list_rows("REGISTRATIONS")
+            if _clean(row.get("ORDER_ID")) == order_id
+        ]
+        entries = [
+            row for row in self.list_rows("EVENT_ENTRIES")
+            if _clean(row.get("ORDER_ID")) == order_id
+        ]
+
+        if not orders:
+            raise TransactionStoreError(f"Order {order_id} was not found.")
+        if not payments:
+            raise TransactionStoreError(
+                f"Payment {payment_id} for order {order_id} was not found."
+            )
+
+        paid_payment_statuses = {
+            "PAYMENT_COMPLETE", "PAID", "SUCCEEDED", "NO_COST", "REFUNDED"
+        }
+        terminal_order_statuses = {"CONFIRMED", "PAID", "COMPLETED", "WITHDRAWN"}
+
+        if any(_normalise(row.get("STATUS")) in terminal_order_statuses for row in orders):
+            raise TransactionStoreError(
+                "This order is already confirmed/settled and cannot be cancelled."
+            )
+        if any(
+            _normalise(row.get("DISPLAY_STATUS")) in paid_payment_statuses
+            or _normalise(row.get("STRIPE_STATUS")) in {"PAID", "SUCCEEDED"}
+            or bool(_clean(row.get("PAID_AT")))
+            for row in payments
+        ):
+            raise TransactionStoreError(
+                "This payment is already settled and cannot be cancelled."
+            )
+        if any(
+            _normalise(row.get("PAYMENT_STATUS")) in paid_payment_statuses
+            for row in entries
+        ):
+            raise TransactionStoreError(
+                "An event entry already records completed payment; cancellation was refused."
+            )
+
+        before = {
+            "ORDER_STATUS": _clean(orders[-1].get("STATUS")),
+            "PAYMENT_STATUS": _clean(payments[-1].get("DISPLAY_STATUS")),
+            "STRIPE_STATUS": _clean(payments[-1].get("STRIPE_STATUS")),
+            "REGISTRATION_COUNT": len(registrations),
+            "EVENT_ENTRY_COUNT": len(entries),
+        }
+
+        self.update_where(
+            "ORDERS",
+            "ORDER_ID",
+            order_id,
+            {"STATUS": "CANCELLED", "UPDATED_AT": cancelled_at},
+        )
+        self.update_where(
+            "PAYMENTS",
+            "PAYMENT_ID",
+            payment_id,
+            {
+                "DISPLAY_STATUS": "CANCELLED",
+                "STRIPE_STATUS": "expired",
+                "LAST_ATTEMPT_AT": cancelled_at,
+                "FAILURE_REASON": "",
+            },
+        )
+        self.update_where(
+            "REGISTRATIONS",
+            "ORDER_ID",
+            order_id,
+            {"STATUS": "CANCELLED", "UPDATED_AT": cancelled_at},
+        )
+        self.update_where(
+            "EVENT_ENTRIES",
+            "ORDER_ID",
+            order_id,
+            {
+                "PAYMENT_STATUS": "CANCELLED",
+                "PAYMENT_STATUS_CHANGED_AT": cancelled_at,
+                "STATUS": "CANCELLED",
+                "UPDATED_AT": cancelled_at,
+            },
+        )
+
+        return before
+
     def mark_payment_complete_by_stripe_session(
         self,
         *,

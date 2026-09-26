@@ -199,3 +199,70 @@ def retarget_pending_checkout_session(
 
     _update_row(worksheet, row_number, row_values)
     return row_number
+
+
+def cancel_pending_registration(
+    *,
+    worksheet,
+    registration_id: str,
+    reason: str = "Cancelled by registrant before payment",
+) -> int:
+    """Mark every legacy PendingPayments row for an unpaid order CANCELLED.
+
+    This preserves the historical rows and Stripe session IDs. Cancellation is
+    refused if any row for the logical order is already PAID so a stale browser
+    action cannot overwrite successful payment evidence.
+
+    Returns the number of rows updated.
+    """
+    values = worksheet.get_all_values()
+    if not values:
+        raise RuntimeError("PendingPayments sheet has no header row.")
+
+    headers = values[0]
+    header_map = {_norm(h): i for i, h in enumerate(headers)}
+    reg_idx = header_map.get("registration_id")
+    if reg_idx is None:
+        raise RuntimeError("PendingPayments is missing registration_id header.")
+
+    registration_id = str(registration_id or "").strip()
+    if not registration_id:
+        raise ValueError("registration_id/order_id is required.")
+
+    matches: list[tuple[int, list[str]]] = []
+    for row_number, row in enumerate(values[1:], start=2):
+        cell = row[reg_idx] if reg_idx < len(row) else ""
+        if str(cell or "").strip() == registration_id:
+            padded = list(row) + [""] * max(0, len(headers) - len(row))
+            matches.append((row_number, padded[: len(headers)]))
+
+    if not matches:
+        raise RuntimeError(
+            f"No PendingPayments row exists for registration/order {registration_id}."
+        )
+
+    status_idx = header_map.get("status")
+    if status_idx is None:
+        raise RuntimeError("PendingPayments is missing status header.")
+
+    if any(
+        str(row_values[status_idx] or "").strip().upper() == "PAID"
+        for _, row_values in matches
+    ):
+        raise RuntimeError(
+            "This registration is already marked PAID and cannot be cancelled."
+        )
+
+    error_idx = header_map.get("error")
+    updated = 0
+    for row_number, row_values in matches:
+        current_status = str(row_values[status_idx] or "").strip().upper()
+        if current_status == "CANCELLED":
+            continue
+        row_values[status_idx] = "CANCELLED"
+        if error_idx is not None:
+            row_values[error_idx] = str(reason or "").strip()
+        _update_row(worksheet, row_number, row_values)
+        updated += 1
+
+    return updated

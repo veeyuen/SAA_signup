@@ -132,3 +132,88 @@ def get_or_create_registration_checkout(
     )
 
     return _checkout_result(session, reused=False)
+
+
+def expire_registration_checkout(
+    *,
+    secret_key: str,
+    session_id: str,
+) -> dict:
+    """Expire an unpaid open Checkout Session before cancelling its order.
+
+    A completed/paid session is never expired and returns ``can_cancel=False``.
+    This is deliberately fail-closed: if Stripe cannot verify the session, the
+    caller receives the exception and must not cancel the local transaction.
+    """
+    secret_key = str(secret_key or "").strip()
+    session_id = str(session_id or "").strip()
+    if not secret_key:
+        raise ValueError("Stripe secret key is missing.")
+    if not session_id:
+        raise ValueError("Stripe Checkout session ID is required.")
+
+    stripe.api_key = secret_key
+    session = stripe.checkout.Session.retrieve(session_id)
+    data = _as_dict(session)
+    status = str(data.get("status", "") or "").strip().lower()
+    payment_status = str(data.get("payment_status", "") or "").strip().lower()
+
+    if status == "complete" or payment_status in {"paid", "no_payment_required"}:
+        return {
+            "session_id": session_id,
+            "status": status,
+            "payment_status": payment_status,
+            "can_cancel": False,
+            "expired": False,
+        }
+
+    if status == "expired":
+        return {
+            "session_id": session_id,
+            "status": status,
+            "payment_status": payment_status,
+            "can_cancel": True,
+            "expired": True,
+        }
+
+    if status != "open":
+        raise RuntimeError(
+            "Stripe Checkout session is in an unexpected state "
+            f"({status or 'unknown'} / {payment_status or 'unknown'}). "
+            "The registration was not cancelled."
+        )
+
+    try:
+        expired_session = stripe.checkout.Session.expire(session_id)
+    except stripe.error.InvalidRequestError:
+        # A payment may have completed in the narrow window between retrieve
+        # and expire. Re-read once and fail closed if it is now complete/paid.
+        latest = stripe.checkout.Session.retrieve(session_id)
+        latest_data = _as_dict(latest)
+        latest_status = str(latest_data.get("status", "") or "").strip().lower()
+        latest_payment = str(
+            latest_data.get("payment_status", "") or ""
+        ).strip().lower()
+        if latest_status == "complete" or latest_payment in {
+            "paid",
+            "no_payment_required",
+        }:
+            return {
+                "session_id": session_id,
+                "status": latest_status,
+                "payment_status": latest_payment,
+                "can_cancel": False,
+                "expired": False,
+            }
+        raise
+
+    expired_data = _as_dict(expired_session)
+    return {
+        "session_id": session_id,
+        "status": str(expired_data.get("status", "expired") or "expired").strip().lower(),
+        "payment_status": str(
+            expired_data.get("payment_status", payment_status) or payment_status
+        ).strip().lower(),
+        "can_cancel": True,
+        "expired": True,
+    }

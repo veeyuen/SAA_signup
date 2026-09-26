@@ -7,7 +7,10 @@ from signup.payment_recovery import (
     pending_stripe_order_in_scope,
 )
 from signup.transaction_store import TransactionSheetStore
-from signup.pending_payment import retarget_pending_checkout_session
+from signup.pending_payment import (
+    cancel_pending_registration,
+    retarget_pending_checkout_session,
+)
 
 
 def _order(**overrides):
@@ -358,3 +361,152 @@ def test_payment_complete_updates_all_duplicate_logical_ids():
         sheet == "ORDERS" and column == "ORDER_ID" and value == "ORD-1"
         for sheet, column, value, _ in calls
     )
+
+
+def test_cancelled_payment_is_not_resumable_even_if_order_row_is_stale_pending():
+    rows = find_resumable_payment_orders(
+        orders=[_order(STATUS="PAYMENT_STARTED")],
+        payments=[_payment(DISPLAY_STATUS="CANCELLED", STRIPE_STATUS="expired")],
+        registrations=[_registration()],
+        event_entries=[_entry()],
+        user_id="USR-1",
+        organization_id="ORG-1",
+        now=_now(),
+    )
+    assert rows == []
+
+
+def test_cancel_pending_registration_marks_all_duplicate_legacy_rows_cancelled():
+    headers = [
+        "registration_id",
+        "status",
+        "stripe_checkout_session_id",
+        "error",
+    ]
+    ws = _FakeWorksheet(
+        [
+            headers,
+            ["ORD-1", "PENDING", "cs_old", ""],
+            ["ORD-1", "FAILED", "cs_new", "expired"],
+            ["ORD-2", "PENDING", "cs_other", ""],
+        ]
+    )
+
+    updated = cancel_pending_registration(
+        worksheet=ws,
+        registration_id="ORD-1",
+    )
+
+    assert updated == 2
+    assert ws.values[1][1] == "CANCELLED"
+    assert ws.values[2][1] == "CANCELLED"
+    assert ws.values[1][3] == "Cancelled by registrant before payment"
+    assert ws.values[2][3] == "Cancelled by registrant before payment"
+    assert ws.values[3][1] == "PENDING"
+
+
+def test_cancel_pending_registration_refuses_any_paid_legacy_row():
+    headers = [
+        "registration_id",
+        "status",
+        "stripe_checkout_session_id",
+    ]
+    ws = _FakeWorksheet(
+        [
+            headers,
+            ["ORD-1", "PENDING", "cs_old"],
+            ["ORD-1", "PAID", "cs_paid"],
+        ]
+    )
+
+    try:
+        cancel_pending_registration(worksheet=ws, registration_id="ORD-1")
+        assert False, "Expected paid order cancellation to be refused"
+    except RuntimeError as exc:
+        assert "already marked PAID" in str(exc)
+
+    assert ws.values[1][1] == "PENDING"
+    assert ws.values[2][1] == "PAID"
+
+
+def test_transaction_store_cancel_pending_order_updates_all_logical_rows():
+    store = object.__new__(TransactionSheetStore)
+    calls = []
+
+    data = {
+        "ORDERS": [_order()],
+        "PAYMENTS": [_payment()],
+        "REGISTRATIONS": [_registration(STATUS="PENDING_PAYMENT")],
+        "EVENT_ENTRIES": [
+            _entry(STATUS="PENDING_PAYMENT", PAYMENT_STATUS="PAYMENT_STARTED")
+        ],
+    }
+    store.list_rows = lambda sheet: list(data[sheet])
+
+    def update_where(sheet, column, value, updates):
+        calls.append((sheet, column, value, updates))
+        return 1
+
+    store.update_where = update_where
+
+    before = store.cancel_pending_stripe_order(
+        order_id="ORD-1",
+        payment_id="PAY-1",
+        cancelled_at="2026-09-26T06:50:00+00:00",
+    )
+
+    assert before["ORDER_STATUS"] == "PAYMENT_STARTED"
+    assert before["PAYMENT_STATUS"] == "PAYMENT_STARTED"
+    assert any(
+        sheet == "ORDERS" and updates["STATUS"] == "CANCELLED"
+        for sheet, _, _, updates in calls
+    )
+    assert any(
+        sheet == "PAYMENTS"
+        and updates["DISPLAY_STATUS"] == "CANCELLED"
+        and updates["STRIPE_STATUS"] == "expired"
+        for sheet, _, _, updates in calls
+    )
+    assert any(
+        sheet == "REGISTRATIONS" and updates["STATUS"] == "CANCELLED"
+        for sheet, _, _, updates in calls
+    )
+    assert any(
+        sheet == "EVENT_ENTRIES"
+        and updates["STATUS"] == "CANCELLED"
+        and updates["PAYMENT_STATUS"] == "CANCELLED"
+        for sheet, _, _, updates in calls
+    )
+
+
+def test_transaction_store_cancel_refuses_paid_transaction_without_updates():
+    store = object.__new__(TransactionSheetStore)
+    calls = []
+    data = {
+        "ORDERS": [_order()],
+        "PAYMENTS": [
+            _payment(
+                DISPLAY_STATUS="PAYMENT_COMPLETE",
+                STRIPE_STATUS="paid",
+                PAID_AT="2026-09-26T06:49:00+00:00",
+            )
+        ],
+        "REGISTRATIONS": [_registration(STATUS="CONFIRMED")],
+        "EVENT_ENTRIES": [
+            _entry(STATUS="CONFIRMED", PAYMENT_STATUS="PAYMENT_COMPLETE")
+        ],
+    }
+    store.list_rows = lambda sheet: list(data[sheet])
+    store.update_where = lambda *args, **kwargs: calls.append((args, kwargs))
+
+    try:
+        store.cancel_pending_stripe_order(
+            order_id="ORD-1",
+            payment_id="PAY-1",
+            cancelled_at="2026-09-26T06:50:00+00:00",
+        )
+        assert False, "Expected paid transaction cancellation to be refused"
+    except Exception as exc:
+        assert "settled" in str(exc).lower() or "completed payment" in str(exc).lower()
+
+    assert calls == []

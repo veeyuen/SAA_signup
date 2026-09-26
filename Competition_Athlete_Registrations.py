@@ -109,10 +109,14 @@ from payment_store import (
     get_pending_worksheet,
 )
 from signup.pending_payment import (
+    cancel_pending_registration,
     retarget_pending_checkout_session,
     upsert_pending_registration,
 )
-from signup.stripe_payment import get_or_create_registration_checkout
+from signup.stripe_payment import (
+    expire_registration_checkout,
+    get_or_create_registration_checkout,
+)
 from signup.payment_recovery import (
     checkout_force_new,
     find_resumable_payment_orders,
@@ -326,6 +330,194 @@ def show_stripe_return_status():
 show_stripe_return_status()
 
 
+def _fresh_resumable_candidate(order_id: str) -> tuple[TransactionSheetStore, dict | None]:
+    """Re-read Sheets and return this user's still-resumable logical order."""
+    store = _transaction_store()
+    candidates = find_resumable_payment_orders(
+        orders=store.list_rows("ORDERS"),
+        payments=store.list_rows("PAYMENTS"),
+        registrations=store.list_rows("REGISTRATIONS"),
+        event_entries=store.list_rows("EVENT_ENTRIES"),
+        user_id=current_user.user_id,
+        organization_id=current_organization.organization_id,
+    )
+    wanted = str(order_id or "").strip()
+    return store, next(
+        (row for row in candidates if str(row.get("order_id", "")).strip() == wanted),
+        None,
+    )
+
+
+def _cancel_persisted_payment(order_id: str) -> None:
+    """Safely cancel one unpaid registration while preserving its history."""
+    order_id = str(order_id or "").strip()
+    if not order_id:
+        st.error("The pending order reference is missing.")
+        return
+
+    stripe_secret_key = str(st.secrets.get("STRIPE_SECRET_KEY", "") or "").strip()
+    if not stripe_secret_key:
+        st.error("Stripe is not configured: STRIPE_SECRET_KEY is missing.")
+        return
+
+    try:
+        store, candidate = _fresh_resumable_candidate(order_id)
+    except Exception as exc:
+        st.error(
+            "Unable to verify the pending registration before cancellation: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    if not candidate:
+        _cached_resumable_payment_orders.clear()
+        st.info(
+            "This order is no longer an unpaid resumable registration. "
+            "Its status may already have changed."
+        )
+        return
+
+    payment_id = str(candidate.get("payment_id", "") or "").strip()
+    session_id = str(candidate.get("stripe_session_id", "") or "").strip()
+    if not payment_id or not session_id:
+        st.error(
+            "This pending transaction is missing its payment/session reference and "
+            "must be reviewed by SAA Admin rather than cancelled automatically."
+        )
+        return
+
+
+    # Stripe is checked first and an open Checkout Session is expired before any
+    # local row is cancelled. This closes the race where a user could otherwise
+    # pay a Checkout URL immediately after cancelling the registration.
+    try:
+        stripe_result = expire_registration_checkout(
+            secret_key=stripe_secret_key,
+            session_id=session_id,
+        )
+    except Exception as exc:
+        st.error(
+            "Stripe could not verify/expire this Checkout session, so no local "
+            "records were cancelled. "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    if not stripe_result.get("can_cancel"):
+        _cached_resumable_payment_orders.clear()
+        st.warning(
+            "Stripe reports that this Checkout session has already completed or "
+            "been paid. The registration was not cancelled; refresh after the "
+            "payment webhook finishes processing."
+        )
+        return
+
+    cancelled_at = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    # Keep the legacy PendingPayments record synchronized. It is historical
+    # storage used by the webhook, so rows are retained and status is changed
+    # rather than physically deleted.
+    try:
+        pending_sheet_url = str(
+            st.secrets.get("PENDING_PAYMENT_SHEET_URL", "") or ""
+        ).strip()
+        pending_worksheet_name = str(
+            st.secrets.get("PENDING_PAYMENT_WORKSHEET", "PendingPayments")
+            or "PendingPayments"
+        ).strip()
+        if not pending_sheet_url:
+            raise RuntimeError("PENDING_PAYMENT_SHEET_URL is missing.")
+        google_client = create_google_client(dict(st.secrets["gcp_service_account"]))
+        pending_worksheet = get_pending_worksheet(
+            google_client, pending_sheet_url, pending_worksheet_name
+        )
+        cancel_pending_registration(
+            worksheet=pending_worksheet,
+            registration_id=order_id,
+        )
+    except Exception as exc:
+        st.error(
+            "Stripe Checkout was expired, but PendingPayments could not be updated. "
+            "The transaction rows were left unchanged so the cancellation can be "
+            "retried safely. "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    try:
+        before = store.cancel_pending_stripe_order(
+            order_id=order_id,
+            payment_id=payment_id,
+            cancelled_at=cancelled_at,
+        )
+        store.append_audit_log(
+            {
+                "AUDIT_ID": f"AUD-{secrets.token_hex(6).upper()}",
+                "TIMESTAMP": cancelled_at,
+                "USER_ID": current_user.user_id,
+                "USER_EMAIL": current_user_email,
+                "ACTION": "PENDING_REGISTRATION_CANCELLED",
+                "ENTITY_TYPE": "ORDER",
+                "ENTITY_ID": order_id,
+                "ORDER_ID": order_id,
+                "BEFORE_JSON": json.dumps(before, sort_keys=True),
+                "AFTER_JSON": json.dumps(
+                    {
+                        "ORDER_STATUS": "CANCELLED",
+                        "PAYMENT_STATUS": "CANCELLED",
+                        "REGISTRATION_STATUS": "CANCELLED",
+                        "EVENT_ENTRY_STATUS": "CANCELLED",
+                        "STRIPE_CHECKOUT_STATUS": stripe_result.get("status", "expired"),
+                    },
+                    sort_keys=True,
+                ),
+                "REASON": "Registrant cancelled unpaid registration before payment",
+            }
+        )
+    except Exception as exc:
+        st.error(
+            "The Stripe Checkout session was expired, but the transaction records "
+            "could not be fully cancelled. SAA Admin should review this order. "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    _cached_resumable_payment_orders.clear()
+    if str((st.session_state.get("pending_checkout", {}) or {}).get("order_id", "")).strip() == order_id:
+        st.session_state.pop("pending_checkout", None)
+    if str(st.session_state.get("draft_order_id", "") or "").strip() == order_id:
+        st.session_state.pop("draft_order_id", None)
+    st.session_state.pop("cancel_pending_order_confirm_id", None)
+    st.success(f"Pending registration {order_id} was cancelled.")
+    st.rerun()
+
+
+def _render_cancel_pending_confirmation(order_id: str, *, key_prefix: str) -> None:
+    confirm_id = str(
+        st.session_state.get("cancel_pending_order_confirm_id", "") or ""
+    ).strip()
+    if confirm_id != str(order_id or "").strip():
+        return
+
+    st.warning(
+        f"Cancel {order_id}? The unpaid registration will be retained for audit "
+        "history but will no longer be resumable or treated as an active entry."
+    )
+    confirm_col, keep_col = st.columns(2)
+    if confirm_col.button(
+        "Confirm cancellation",
+        type="primary",
+        key=f"{key_prefix}_confirm_cancel",
+    ):
+        _cancel_persisted_payment(order_id)
+    if keep_col.button(
+        "Keep registration",
+        key=f"{key_prefix}_keep_registration",
+    ):
+        st.session_state.pop("cancel_pending_order_confirm_id", None)
+        st.rerun()
+
+
 def _show_session_pending_checkout() -> None:
     pending = st.session_state.get("pending_checkout", {}) or {}
     if not pending:
@@ -360,9 +552,21 @@ def _show_session_pending_checkout() -> None:
         "verifies successful payment."
     )
 
-    if st.button("Hide this payment prompt for now"):
+    action_col1, action_col2 = st.columns(2)
+    if action_col1.button("Hide this payment prompt for now"):
         st.session_state.pop("pending_checkout", None)
         st.rerun()
+    if order_id and action_col2.button(
+        "Cancel pending registration",
+        key=f"cancel_session_pending_{order_id}",
+    ):
+        st.session_state["cancel_pending_order_confirm_id"] = order_id
+        st.rerun()
+
+    if order_id:
+        _render_cancel_pending_confirmation(
+            order_id, key_prefix=f"session_pending_{order_id}"
+        )
 
     st.stop()
 
@@ -555,8 +759,21 @@ def _show_persisted_pending_payments() -> None:
         f"status {selected.get('display_status', '') or 'pending'}"
     )
 
-    if st.button("Resume payment", type="primary", key="resume_persisted_payment"):
+    resume_col, cancel_col = st.columns(2)
+    if resume_col.button(
+        "Resume payment", type="primary", key="resume_persisted_payment"
+    ):
         _resume_persisted_payment(selected)
+    if cancel_col.button(
+        "Cancel pending registration",
+        key=f"cancel_persisted_payment_{selected_order_id}",
+    ):
+        st.session_state["cancel_pending_order_confirm_id"] = selected_order_id
+        st.rerun()
+
+    _render_cancel_pending_confirmation(
+        selected_order_id, key_prefix=f"persisted_pending_{selected_order_id}"
+    )
 
     st.divider()
 
