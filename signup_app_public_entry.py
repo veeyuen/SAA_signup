@@ -28,9 +28,20 @@ hytek_page = st.Page(
     "pages/5_HyTek_Exports.py",
     title="Hy-Tek Exports",
 )
+results_reconciliation_page = st.Page(
+    "pages/6_Results_Reconciliation.py",
+    title="Results Reconciliation",
+)
 
 navigation = st.navigation(
-    [registration_page, admin_page, financial_page, moe_page, hytek_page],
+    [
+        registration_page,
+        admin_page,
+        financial_page,
+        moe_page,
+        hytek_page,
+        results_reconciliation_page,
+    ],
     position="sidebar",
 )
 navigation.run()
