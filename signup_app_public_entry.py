@@ -24,9 +24,13 @@ moe_page = st.Page(
     "pages/4_MOE_Billing.py",
     title="MOE Billing",
 )
+hytek_page = st.Page(
+    "pages/5_HyTek_Exports.py",
+    title="Hy-Tek Exports",
+)
 
 navigation = st.navigation(
-    [registration_page, admin_page, financial_page, moe_page],
+    [registration_page, admin_page, financial_page, moe_page, hytek_page],
     position="sidebar",
 )
 navigation.run()

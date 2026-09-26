@@ -1,0 +1,9 @@
+I; Athlete; PhaseFive; ; M; 14/09/2007; TAC; Test Athletics Club; ; ; ; ; ; ; ; ; Singapore; ; ; ; ; P134F07; ; ; 
+I; Athlete; PhaseFive; ; M; 14/09/2007; TAC; Test Athletics Club; ; ; ; ; ; ; ; ; Singapore; ; ; ; ; P123F07; ; ; 
+I; Athlete; PhaseFive; ; M; 14/09/2007; TAC; Test Athletics Club; ; ; ; ; ; ; ; ; Singapore; ; ; ; ; P134F07; ; ; 
+I; Athlete; CollisionTest; ; M; 20/08/2007; TAC; Test Athletics Club; ; ; ; ; ; ; ; ; Singapore; ; ; ; ; C456G07; ; ; 
+I; test; test; ; M; 09/11/2008; TAC; Test Athletics Club; ; ; ; ; ; ; ; ; Singapore; ; ; ; ; T145G08; ; ; 
+I; test; test; ; F; 09/12/2008; TAC; Test Athletics Club; ; ; ; ; ; ; ; ; Brunei; ; ; ; ; T134F08; ; ; 
+I; Test; Test; ; F; 18/09/2008; TAC; Test Athletics Club; ; ; ; ; ; ; ; ; Singapore; ; ; ; ; T456H08; ; ; 
+I; Athlete; RaceReset; ; M; 15/07/2007; TAC; Test Athletics Club; ; ; ; ; ; ; ; ; Singapore; ; ; ; ; R567H07; ; ; 
+I; Test; Regression; ; M; 18/09/2009; TAC; Test Athletics Club; ; ; ; ; ; ; ; ; Singapore; ; ; ; ; R123A09; ; ; 

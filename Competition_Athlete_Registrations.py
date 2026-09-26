@@ -1429,6 +1429,9 @@ def _build_transaction_bundle(
                 "TEAM_NAME": current_organization.organization_name,
                 "EMAIL": item.get("athlete_email", ""),
                 "CONTACT_NUMBER": first_row.get("contact_number", ""),
+                "FIRST_NAME": first_row.get("first_name", ""),
+                "OTHER_NAME": first_row.get("other_name", ""),
+                "LAST_NAME": first_row.get("last_name", ""),
             }
         )
 
@@ -1464,6 +1467,9 @@ def _build_transaction_bundle(
                     "TEAM_NAME": current_organization.organization_name,
                     "EMAIL": row.get("email", ""),
                     "CONTACT_NUMBER": row.get("contact_number", ""),
+                    "FIRST_NAME": row.get("first_name", ""),
+                    "OTHER_NAME": row.get("other_name", ""),
+                    "LAST_NAME": row.get("last_name", ""),
                 }
             )
 

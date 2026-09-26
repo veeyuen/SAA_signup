@@ -130,6 +130,12 @@ def sheet_df_to_entries(df: pd.DataFrame) -> list[dict]:
     return entries
 
 def build_semicolon_export_from_output_sheet(sheet_df: pd.DataFrame, record_type: str = "I") -> str:
-    if sheet_df is None or sheet_df.empty:
-        return ""
-    return ""
+    """Build the established Hy-Tek I/E semicolon export from legacy OUTPUT.
+
+    Phase 6A keeps this compatibility entry point because the private/admin site
+    already imports it. New exports should use the transaction-backed builder
+    in :mod:`signup.hytek_export`.
+    """
+    from .hytek_export import build_legacy_output_hytek_export
+
+    return build_legacy_output_hytek_export(sheet_df, record_type=record_type)

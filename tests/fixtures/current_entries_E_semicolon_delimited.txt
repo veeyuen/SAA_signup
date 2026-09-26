@@ -1,0 +1,9 @@
+E; Athlete; PhaseFive; ; M; 14/09/2007; TAC; Test Athletics Club; ; ; 100; 13.5; ; M; U20; ; 
+E; Athlete; PhaseFive; ; M; 14/09/2007; TAC; Test Athletics Club; ; ; 100; 13.5; ; M; U20; ; 
+E; Athlete; PhaseFive; ; M; 14/09/2007; TAC; Test Athletics Club; ; ; LJ; 5.4; ; M; U20; ; 
+E; Athlete; CollisionTest; ; M; 20/08/2007; TAC; Test Athletics Club; ; ; 100; 13.2; ; M; U20; ; 
+E; test; test; ; M; 09/11/2008; TAC; Test Athletics Club; ; ; 100; 12.5; ; M; U20; ; 
+E; test; test; ; F; 09/12/2008; TAC; Test Athletics Club; ; ; 100; 12.3; ; M; U20; ; 
+E; Test; Test; ; F; 18/09/2008; TAC; Test Athletics Club; ; ; 100; 13.4; ; M; U20; ; 
+E; Athlete; RaceReset; ; M; 15/07/2007; TAC; Test Athletics Club; ; ; 100; 13.4; ; M; U20; ; 
+E; Test; Regression; ; M; 18/09/2009; TAC; Test Athletics Club; ; ; 100; 14.44; ; M; U18; ; 

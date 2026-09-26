@@ -46,6 +46,9 @@ SHEETS: dict[str, list[str]] = {
         "TEAM_NAME",
         "EMAIL",
         "CONTACT_NUMBER",
+        "FIRST_NAME",
+        "OTHER_NAME",
+        "LAST_NAME",
     ],
     "EVENT_ENTRIES": [
         "ENTRY_ID",
@@ -75,6 +78,9 @@ SHEETS: dict[str, list[str]] = {
         "TEAM_NAME",
         "EMAIL",
         "CONTACT_NUMBER",
+        "FIRST_NAME",
+        "OTHER_NAME",
+        "LAST_NAME",
     ],
     "PAYMENTS": [
         "PAYMENT_ID",
