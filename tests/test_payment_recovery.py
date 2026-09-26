@@ -7,6 +7,7 @@ from signup.payment_recovery import (
     pending_stripe_order_in_scope,
 )
 from signup.transaction_store import TransactionSheetStore
+from signup.pending_payment import retarget_pending_checkout_session
 
 
 def _order(**overrides):
@@ -193,9 +194,167 @@ def test_mark_payment_started_persists_checkout_url_in_same_payment_update():
         checkout_url="https://checkout.stripe.test/session",
     )
 
-    payment_calls = [c for c in calls if c[0] == "update_by_id" and c[1] == "PAYMENTS"]
+    payment_calls = [c for c in calls if c[0] == "update_where" and c[1] == "PAYMENTS"]
     assert len(payment_calls) == 1
-    updates = payment_calls[0][3]
+    assert payment_calls[0][2] == "PAYMENT_ID"
+    assert payment_calls[0][3] == "PAY-1"
+    updates = payment_calls[0][4]
     assert updates["STRIPE_CHECKOUT_SESSION_ID"] == "cs_test_123"
     assert updates["STRIPE_CHECKOUT_URL"] == "https://checkout.stripe.test/session"
     assert updates["DISPLAY_STATUS"] == "PAYMENT_STARTED"
+
+
+
+def test_paid_duplicate_payment_row_wins_over_stale_pending_duplicate():
+    rows = find_resumable_payment_orders(
+        orders=[_order()],
+        payments=[
+            _payment(PAYMENT_ID="PAY-OLD", DISPLAY_STATUS="PAYMENT_STARTED"),
+            _payment(
+                PAYMENT_ID="PAY-PAID",
+                DISPLAY_STATUS="PAYMENT_COMPLETE",
+                STRIPE_STATUS="paid",
+                PAID_AT="2026-09-26T05:10:00+00:00",
+            ),
+        ],
+        registrations=[_registration()],
+        event_entries=[_entry()],
+        user_id="USR-1",
+        organization_id="ORG-1",
+        now=_now(),
+    )
+    assert rows == []
+
+
+def test_confirmed_duplicate_order_row_wins_over_stale_pending_duplicate():
+    rows = find_resumable_payment_orders(
+        orders=[
+            _order(STATUS="PAYMENT_STARTED"),
+            _order(STATUS="CONFIRMED", UPDATED_AT="2026-09-26T05:10:00+00:00"),
+        ],
+        payments=[_payment()],
+        registrations=[_registration()],
+        event_entries=[_entry()],
+        user_id="USR-1",
+        organization_id="ORG-1",
+        now=_now(),
+    )
+    assert rows == []
+
+
+def test_confirmed_child_payment_state_suppresses_resume_prompt():
+    rows = find_resumable_payment_orders(
+        orders=[_order()],
+        payments=[_payment()],
+        registrations=[_registration(STATUS="CONFIRMED")],
+        event_entries=[
+            _entry(
+                STATUS="CONFIRMED",
+                PAYMENT_STATUS="PAYMENT_COMPLETE",
+                IS_DELETED="FALSE",
+            )
+        ],
+        user_id="USR-1",
+        organization_id="ORG-1",
+        now=_now(),
+    )
+    assert rows == []
+
+
+def test_stale_duplicate_order_rows_are_collapsed_to_one_resume_candidate():
+    rows = find_resumable_payment_orders(
+        orders=[
+            _order(CREATED_AT="2026-09-26T03:00:00+00:00"),
+            _order(CREATED_AT="2026-09-26T04:00:00+00:00"),
+        ],
+        payments=[_payment()],
+        registrations=[_registration()],
+        event_entries=[_entry()],
+        user_id="USR-1",
+        organization_id="ORG-1",
+        now=_now(),
+    )
+    assert len(rows) == 1
+    assert rows[0]["order_id"] == "ORD-1"
+    assert rows[0]["duplicate_order_rows"] == 1
+
+
+class _FakeWorksheet:
+    def __init__(self, values):
+        self.values = [list(row) for row in values]
+        self.updates = []
+
+    def get_all_values(self):
+        return [list(row) for row in self.values]
+
+    def update(self, *args, **kwargs):
+        if kwargs:
+            range_name = kwargs["range_name"]
+            values = kwargs["values"]
+        else:
+            range_name, values = args
+        row_number = int(range_name.split(":")[0][1:])
+        self.values[row_number - 1] = list(values[0])
+        self.updates.append((range_name, values))
+
+
+def test_retarget_pending_checkout_session_updates_current_row_only():
+    headers = [
+        "registration_id",
+        "status",
+        "stripe_checkout_session_id",
+        "error",
+        "entry_rows_json",
+    ]
+    ws = _FakeWorksheet(
+        [
+            headers,
+            ["ORD-1", "FAILED", "cs_old_1", "expired", "[{\"x\":1}]"],
+            ["ORD-1", "FAILED", "cs_old_2", "expired", "[{\"x\":2}]"],
+        ]
+    )
+
+    row_number = retarget_pending_checkout_session(
+        worksheet=ws,
+        registration_id="ORD-1",
+        stripe_session_id="cs_new",
+    )
+
+    assert row_number == 3
+    assert ws.values[1][2] == "cs_old_1"
+    assert ws.values[2][1] == "PENDING"
+    assert ws.values[2][2] == "cs_new"
+    assert ws.values[2][3] == ""
+    assert ws.values[2][4] == '[{"x":2}]'
+
+
+def test_payment_complete_updates_all_duplicate_logical_ids():
+    store = object.__new__(TransactionSheetStore)
+    calls = []
+
+    store.find_first = lambda *args: {
+        "PAYMENT_ID": "PAY-1",
+        "ORDER_ID": "ORD-1",
+    }
+
+    def update_where(sheet, column, value, updates):
+        calls.append((sheet, column, value, updates))
+        return 2
+
+    store.update_where = update_where
+
+    order_id = store.mark_payment_complete_by_stripe_session(
+        stripe_session_id="cs_paid",
+        stripe_payment_intent_id="pi_1",
+        paid_at="2026-09-26T05:20:00+00:00",
+    )
+
+    assert order_id == "ORD-1"
+    assert any(
+        sheet == "PAYMENTS" and column == "PAYMENT_ID" and value == "PAY-1"
+        for sheet, column, value, _ in calls
+    )
+    assert any(
+        sheet == "ORDERS" and column == "ORDER_ID" and value == "ORD-1"
+        for sheet, column, value, _ in calls
+    )

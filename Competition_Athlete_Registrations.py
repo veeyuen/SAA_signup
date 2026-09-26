@@ -108,7 +108,10 @@ from payment_store import (
     create_google_client,
     get_pending_worksheet,
 )
-from signup.pending_payment import upsert_pending_registration
+from signup.pending_payment import (
+    retarget_pending_checkout_session,
+    upsert_pending_registration,
+)
 from signup.stripe_payment import get_or_create_registration_checkout
 from signup.payment_recovery import (
     checkout_force_new,
@@ -454,11 +457,43 @@ def _resume_persisted_payment(candidate: dict) -> None:
                 checkout_url=checkout.get("payment_url", ""),
             )
         elif str(checkout.get("payment_url", "") or "").strip():
-            store.update_by_id(
+            store.update_where(
                 "PAYMENTS",
+                "PAYMENT_ID",
                 payment_id,
                 {"STRIPE_CHECKOUT_URL": checkout.get("payment_url", "")},
             )
+
+        # The legacy PendingPayments row is still used by the Stripe webhook
+        # to validate the current Checkout Session. When Resume payment creates
+        # or reuses a replacement session, keep that row synchronized with the
+        # authoritative PAYMENTS row. Otherwise a successful replacement
+        # payment can be rejected by the webhook as a session mismatch.
+        pending_sheet_url = str(
+            st.secrets.get("PENDING_PAYMENT_SHEET_URL", "") or ""
+        ).strip()
+        pending_worksheet_name = str(
+            st.secrets.get("PENDING_PAYMENT_WORKSHEET", "PendingPayments")
+            or "PendingPayments"
+        ).strip()
+        if not pending_sheet_url:
+            raise RuntimeError(
+                "PENDING_PAYMENT_SHEET_URL is missing; cannot synchronize "
+                "the resumed Checkout session."
+            )
+        google_client = create_google_client(
+            dict(st.secrets["gcp_service_account"])
+        )
+        pending_worksheet = get_pending_worksheet(
+            google_client,
+            pending_sheet_url,
+            pending_worksheet_name,
+        )
+        retarget_pending_checkout_session(
+            worksheet=pending_worksheet,
+            registration_id=order_id,
+            stripe_session_id=checkout.get("session_id", ""),
+        )
     except Exception as exc:
         st.error(f"Unable to resume payment: {type(exc).__name__}: {exc}")
         return

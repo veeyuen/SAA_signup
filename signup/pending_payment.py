@@ -131,3 +131,71 @@ def upsert_pending_registration(
 
     _update_row(worksheet, row_number, row_values)
     return row_number
+
+
+def retarget_pending_checkout_session(
+    *,
+    worksheet,
+    registration_id: str,
+    stripe_session_id: str,
+) -> int:
+    """Point the current PendingPayments row at a replacement Checkout session.
+
+    Resume-payment may create a new Stripe Checkout Session after the previous
+    session expired/failed. The webhook validates the incoming session against
+    PendingPayments, so the legacy pending row must be updated at the same time
+    as PAYMENTS. This helper changes only the session/status fields and preserves
+    the original order payload/entry JSON.
+
+    Returns the row number updated. Historical duplicate rows, if any, are left
+    untouched; the newest row for the order is the current row.
+    """
+    values = worksheet.get_all_values()
+    if not values:
+        raise RuntimeError("PendingPayments sheet has no header row.")
+
+    headers = values[0]
+    header_map = {_norm(h): i for i, h in enumerate(headers)}
+    reg_idx = header_map.get("registration_id")
+    session_idx = header_map.get("stripe_checkout_session_id")
+    if reg_idx is None:
+        raise RuntimeError("PendingPayments is missing registration_id header.")
+    if session_idx is None:
+        raise RuntimeError(
+            "PendingPayments is missing stripe_checkout_session_id header."
+        )
+
+    registration_id = str(registration_id or "").strip()
+    stripe_session_id = str(stripe_session_id or "").strip()
+    if not registration_id or not stripe_session_id:
+        raise ValueError("registration_id and stripe_session_id are required.")
+
+    matches: list[tuple[int, list[str]]] = []
+    for row_number, row in enumerate(values[1:], start=2):
+        cell = row[reg_idx] if reg_idx < len(row) else ""
+        if str(cell or "").strip() == registration_id:
+            padded = list(row) + [""] * max(0, len(headers) - len(row))
+            matches.append((row_number, padded[: len(headers)]))
+
+    if not matches:
+        raise RuntimeError(
+            f"No PendingPayments row exists for registration/order {registration_id}."
+        )
+
+    # Use the newest/current row for this logical order. Older duplicates are
+    # historical artefacts and must not be silently rewritten.
+    row_number, row_values = matches[-1]
+    row_values[session_idx] = stripe_session_id
+
+    status_idx = header_map.get("status")
+    if status_idx is not None:
+        current_status = str(row_values[status_idx] or "").strip().upper()
+        if current_status != "PAID":
+            row_values[status_idx] = "PENDING"
+
+    error_idx = header_map.get("error")
+    if error_idx is not None:
+        row_values[error_idx] = ""
+
+    _update_row(worksheet, row_number, row_values)
+    return row_number

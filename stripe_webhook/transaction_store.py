@@ -718,16 +718,18 @@ class TransactionSheetStore:
         stripe_session_id: str,
         attempted_at: str,
     ) -> None:
-        self.update_by_id(
+        self.update_where(
             "ORDERS",
+            "ORDER_ID",
             order_id,
             {
                 "STATUS": "PAYMENT_STARTED",
                 "UPDATED_AT": attempted_at,
             },
         )
-        self.update_by_id(
+        self.update_where(
             "PAYMENTS",
+            "PAYMENT_ID",
             payment_id,
             {
                 "STRIPE_CHECKOUT_SESSION_ID": stripe_session_id,
@@ -798,13 +800,15 @@ class TransactionSheetStore:
         if str(payment_method or "").strip():
             payment_updates["PAYMENT_METHOD"] = str(payment_method).strip()
 
-        self.update_by_id(
+        self.update_where(
             "PAYMENTS",
+            "PAYMENT_ID",
             payment_id,
             payment_updates,
         )
-        self.update_by_id(
+        self.update_where(
             "ORDERS",
+            "ORDER_ID",
             order_id,
             {
                 "STATUS": "CONFIRMED",
@@ -856,9 +860,10 @@ class TransactionSheetStore:
         payment_id = _clean(payment.get("PAYMENT_ID"))
         order_id = _clean(payment.get("ORDER_ID"))
 
-        self.update_by_id(
+        self.update_where(
             "PAYMENTS",
-            payment_id,
+            "STRIPE_CHECKOUT_SESSION_ID",
+            stripe_session_id,
             {
                 "DISPLAY_STATUS": "REQUIRED",
                 "STRIPE_STATUS": stripe_status,
@@ -866,8 +871,9 @@ class TransactionSheetStore:
                 "FAILURE_REASON": failure_reason,
             },
         )
-        self.update_by_id(
+        self.update_where(
             "ORDERS",
+            "ORDER_ID",
             order_id,
             {
                 "STATUS": "PENDING_PAYMENT",
