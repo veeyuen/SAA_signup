@@ -1203,11 +1203,27 @@ def _validate_cart_against_transactions(
 
 
 def _competition_rule_tables(*, fresh: bool = False):
-    """Load the three master tables required for Phase 5C validation."""
+    """Load the three master tables required for Phase 5C validation.
+
+    For a final pre-submit check, explicitly clear both configuration cache
+    layers before reading the worksheets again.  Deliberately call
+    ``PilotConfigRepository.table()`` with its long-standing one-argument
+    interface so a Streamlit hot reload cannot leave the page code coupled to
+    a newer repository method signature.
+    """
+    if fresh:
+        clear_config_cache()
+        # ``read_sheet_as_df`` is a Streamlit cached function in both the
+        # pre-5C and 5C readers. Clearing it guarantees the repository's next
+        # reads reach Google Sheets rather than the 30-second data cache.
+        clear_reader_cache = getattr(read_sheet_as_df, "clear", None)
+        if callable(clear_reader_cache):
+            clear_reader_cache()
+
     return (
-        pilot_config.table("COMPETITIONS", fresh=fresh),
-        pilot_config.table("DIVISIONS", fresh=fresh),
-        pilot_config.table("COMPETITION_EVENTS", fresh=fresh),
+        pilot_config.table("COMPETITIONS"),
+        pilot_config.table("DIVISIONS"),
+        pilot_config.table("COMPETITION_EVENTS"),
     )
 
 
