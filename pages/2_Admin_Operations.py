@@ -23,6 +23,7 @@ from signup.fee_increase_payment import (
 )
 from signup.refund_payment import StripeRefundError, create_stripe_refund
 from signup.pilot_config import PilotConfigError, PilotConfigRepository, require_configured_user
+from signup.data_quality import latest_review_state, scan_data_quality
 from signup.multi_payment_transaction_store import TransactionSheetStore, TransactionStoreError
 
 
@@ -343,6 +344,196 @@ except TransactionStoreError as exc:
         "refresh. The page now caches reads to prevent repeated quota bursts."
     )
     st.stop()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5D — live data-quality review
+# ---------------------------------------------------------------------------
+# This is intentionally a review layer, not an automatic merge engine.  The
+# requirements assign duplicate cleanup decisions to SA Events, so suspicious
+# identities/duplicates are surfaced here while the existing audited amendment
+# and withdrawal controls remain the mechanism for correcting the data.
+try:
+    data_quality_issues = scan_data_quality(
+        orders=orders,
+        registrations=registrations,
+        entries=entries,
+    )
+except Exception as exc:
+    st.error(
+        "Could not evaluate registration data quality. No data was changed. "
+        f"({type(exc).__name__}: {exc})"
+    )
+    data_quality_issues = []
+
+review_states = latest_review_state(audit_rows)
+
+st.subheader("Data quality review")
+st.caption(
+    "Live checks flag duplicate identities, duplicate active events, team conflicts, broken "
+    "parent references, registration/entry mismatches and missing critical identity data. "
+    "Nothing is merged or deleted automatically; SA Events Admin reviews the underlying "
+    "records and uses the audited amendment/withdrawal controls below."
+)
+
+include_false_positives = st.checkbox(
+    "Include issues previously marked false positive",
+    value=False,
+    key="dq_include_false_positives",
+)
+
+visible_quality_issues = [
+    issue for issue in data_quality_issues
+    if include_false_positives
+    or review_states.get(issue.issue_key, {}).get("STATUS") != "FALSE_POSITIVE"
+]
+
+critical_count = sum(issue.severity == "CRITICAL" for issue in visible_quality_issues)
+error_count = sum(issue.severity == "ERROR" for issue in visible_quality_issues)
+warning_count = sum(issue.severity == "WARNING" for issue in visible_quality_issues)
+q1, q2, q3, q4 = st.columns(4)
+q1.metric("Open issues", len(visible_quality_issues))
+q2.metric("Critical", critical_count)
+q3.metric("Errors", error_count)
+q4.metric("Warnings", warning_count)
+
+if not data_quality_issues:
+    st.success("No registration data-quality issues were detected in the current transaction data.")
+elif not visible_quality_issues:
+    st.success(
+        "All currently detected issues have been marked false positive. "
+        "Enable the checkbox above to review them."
+    )
+else:
+    issue_types = sorted({issue.issue_type for issue in visible_quality_issues})
+    competition_values = sorted(
+        {issue.competition_id for issue in visible_quality_issues if issue.competition_id}
+    )
+    dqf1, dqf2 = st.columns(2)
+    selected_issue_type = dqf1.selectbox(
+        "Issue type",
+        ["All"] + issue_types,
+        key="dq_issue_type_filter",
+    )
+    selected_competition = dqf2.selectbox(
+        "Competition",
+        ["All"] + competition_values,
+        key="dq_competition_filter",
+    )
+
+    filtered_quality_issues = [
+        issue for issue in visible_quality_issues
+        if (selected_issue_type == "All" or issue.issue_type == selected_issue_type)
+        and (selected_competition == "All" or issue.competition_id == selected_competition)
+    ]
+
+    if not filtered_quality_issues:
+        st.info("No issues match the selected filters.")
+    else:
+        queue_rows = []
+        for issue in filtered_quality_issues:
+            row = issue.as_dict()
+            state = review_states.get(issue.issue_key, {})
+            row["REVIEW_STATUS"] = state.get("STATUS", "OPEN")
+            row["LAST_REVIEWED_AT"] = state.get("TIMESTAMP", "")
+            queue_rows.append(row)
+        queue_df = pd.DataFrame(queue_rows)
+        display_columns = [
+            "SEVERITY",
+            "ISSUE_TYPE",
+            "REVIEW_STATUS",
+            "COMPETITION_ID",
+            "ATHLETE_NAME",
+            "DOB",
+            "ORDER_IDS",
+            "ENTRY_IDS",
+            "SUMMARY",
+        ]
+        st.dataframe(
+            queue_df[display_columns],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        issue_by_key = {issue.issue_key: issue for issue in filtered_quality_issues}
+        selected_quality_issue_key = st.selectbox(
+            "Review issue",
+            options=list(issue_by_key),
+            format_func=lambda key: (
+                f"{issue_by_key[key].severity} — {issue_by_key[key].issue_type} — "
+                f"{issue_by_key[key].athlete_name or issue_by_key[key].competition_id or key}"
+            ),
+            key="dq_selected_issue",
+        )
+        selected_quality_issue = issue_by_key[selected_quality_issue_key]
+        selected_quality_row = selected_quality_issue.as_dict()
+
+        if selected_quality_issue.severity == "CRITICAL":
+            st.error(selected_quality_issue.summary)
+        elif selected_quality_issue.severity == "ERROR":
+            st.warning(selected_quality_issue.summary)
+        else:
+            st.info(selected_quality_issue.summary)
+        st.write(selected_quality_issue.details)
+        st.caption(
+            "Related records — "
+            f"orders: {selected_quality_row['ORDER_IDS'] or '-'}; "
+            f"registrations: {selected_quality_row['REGISTRATION_IDS'] or '-'}; "
+            f"entries: {selected_quality_row['ENTRY_IDS'] or '-'}"
+        )
+        st.markdown(f"**Recommended action:** {selected_quality_issue.recommended_action}")
+        if selected_quality_issue.order_ids:
+            st.caption(
+                "Use an Order ID shown above in the order search below to open the existing "
+                "audited amendment/withdrawal workflow."
+            )
+
+        prior_review = review_states.get(selected_quality_issue.issue_key, {})
+        if prior_review:
+            st.caption(
+                "Latest review: "
+                f"{prior_review.get('STATUS', '-')} by "
+                f"{prior_review.get('USER_EMAIL') or prior_review.get('USER_ID') or '-'} at "
+                f"{prior_review.get('TIMESTAMP') or '-'} — "
+                f"{prior_review.get('REASON') or 'no note'}"
+            )
+
+        with st.form("data_quality_review_form"):
+            review_outcome = st.selectbox(
+                "Review outcome",
+                ["ACKNOWLEDGED — requires/admin action", "FALSE POSITIVE — no data correction required"],
+            )
+            review_note = st.text_area(
+                "Review note",
+                placeholder="Required. Record what was checked and the intended/actual resolution.",
+            )
+            review_clicked = st.form_submit_button("Record data-quality review")
+
+        if review_clicked:
+            if not review_note.strip():
+                st.error("A review note is required for the audit trail.")
+            else:
+                is_false_positive = review_outcome.startswith("FALSE POSITIVE")
+                review_action = (
+                    "DATA_QUALITY_FALSE_POSITIVE"
+                    if is_false_positive
+                    else "DATA_QUALITY_REVIEW_ACKNOWLEDGED"
+                )
+                _audit(
+                    action=review_action,
+                    entity_type="DATA_QUALITY_ISSUE",
+                    entity_id=selected_quality_issue.issue_key,
+                    order_id=(selected_quality_issue.order_ids[0] if selected_quality_issue.order_ids else ""),
+                    before=prior_review,
+                    after={
+                        "STATUS": "FALSE_POSITIVE" if is_false_positive else "ACKNOWLEDGED",
+                        "ISSUE": selected_quality_row,
+                    },
+                    reason=review_note.strip(),
+                )
+                _load_admin_rows.clear()
+                st.success("Data-quality review recorded in AUDIT_LOG.")
+                st.rerun()
 
 if not orders:
     st.info("There are no transaction orders to administer yet.")
