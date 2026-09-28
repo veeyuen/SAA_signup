@@ -1195,9 +1195,9 @@ if athlete_ui_mode == ATHLETE_UI_SEARCH_FIRST:
                 key="use_search_first_athlete",
             ):
                 chosen_row = candidates[int(chosen_index)]
-                # Diagnostic capture at the exact selection boundary.  Store it
-                # through the normal pending-state mechanism so it survives the
-                # rerun without changing registration behaviour.
+                # Diagnostic capture at the exact selection boundary. Store it
+                # directly under a persistent diagnostic-only key so the normal
+                # pending-state promotion cannot discard the evidence on rerun.
                 _selected_row_debug = {
                     "diagnostic_version": "2026-09-28-selection-boundary-v2",
                     "chosen_row_keys": sorted(str(k) for k in chosen_row.keys()),
@@ -1219,7 +1219,7 @@ if athlete_ui_mode == ATHLETE_UI_SEARCH_FIRST:
                         (st.session_state.get("selected_athlete_prefill_snapshot__pending") or {}).get("nationality_override")
                     ),
                 })
-                st.session_state["selected_row_debug__pending"] = _selected_row_debug
+                st.session_state["selected_row_debug"] = _selected_row_debug
                 st.session_state["athlete_selection_status__pending"] = "EXISTING"
                 st.session_state["athlete_search_first_query__pending"] = ""
                 st.session_state["athlete_search_first_match__pending"] = 0
