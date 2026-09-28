@@ -510,3 +510,79 @@ def test_transaction_store_cancel_refuses_paid_transaction_without_updates():
         assert "settled" in str(exc).lower() or "completed payment" in str(exc).lower()
 
     assert calls == []
+
+
+def test_list_rows_many_uses_one_batch_read_for_multiple_sheets():
+    from signup.transaction_store import WorksheetInfo
+
+    class FakeWorksheet:
+        def __init__(self, title):
+            self.title = title
+
+    class FakeSpreadsheet:
+        def __init__(self):
+            self.calls = []
+
+        def values_batch_get(self, ranges):
+            self.calls.append(list(ranges))
+            return {
+                "valueRanges": [
+                    {"values": [["ORDER_ID", "STATUS"], ["ORD-1", "PAYMENT_STARTED"]]},
+                    {"values": [["PAYMENT_ID", "ORDER_ID"], ["PAY-1", "ORD-1"]]},
+                ]
+            }
+
+    spreadsheet = FakeSpreadsheet()
+    store = object.__new__(TransactionSheetStore)
+    store.spreadsheet = spreadsheet
+    store._worksheet_cache = {}
+    store._info_cache = {
+        "ORDERS": WorksheetInfo(
+            worksheet=FakeWorksheet("ORDERS"),
+            header_row=1,
+            headers=["ORDER_ID", "STATUS"],
+            header_map={"ORDER_ID": 1, "STATUS": 2},
+        ),
+        "PAYMENTS": WorksheetInfo(
+            worksheet=FakeWorksheet("PAYMENTS"),
+            header_row=1,
+            headers=["PAYMENT_ID", "ORDER_ID"],
+            header_map={"PAYMENT_ID": 1, "ORDER_ID": 2},
+        ),
+    }
+
+    rows = store.list_rows_many(["ORDERS", "PAYMENTS"])
+
+    assert len(spreadsheet.calls) == 1
+    assert len(spreadsheet.calls[0]) == 2
+    assert rows["ORDERS"] == [{"ORDER_ID": "ORD-1", "STATUS": "PAYMENT_STARTED"}]
+    assert rows["PAYMENTS"] == [{"PAYMENT_ID": "PAY-1", "ORDER_ID": "ORD-1"}]
+
+
+def test_list_rows_many_turns_429_into_actionable_quota_error():
+    from signup.transaction_store import TransactionStoreError, WorksheetInfo
+
+    class FakeWorksheet:
+        title = "ORDERS"
+
+    class FakeSpreadsheet:
+        def values_batch_get(self, ranges):
+            raise RuntimeError("APIError: [429]: Quota exceeded for Read requests")
+
+    store = object.__new__(TransactionSheetStore)
+    store.spreadsheet = FakeSpreadsheet()
+    store._worksheet_cache = {}
+    store._info_cache = {
+        "ORDERS": WorksheetInfo(
+            worksheet=FakeWorksheet(),
+            header_row=1,
+            headers=["ORDER_ID", "STATUS"],
+            header_map={"ORDER_ID": 1, "STATUS": 2},
+        )
+    }
+
+    try:
+        store.list_rows_many(["ORDERS"])
+        assert False, "Expected a quota error"
+    except TransactionStoreError as exc:
+        assert "Wait about 60 seconds" in str(exc)

@@ -277,22 +277,37 @@ class TransactionSheetStore:
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         self._info_cache: dict[str, WorksheetInfo] = {}
+        self._worksheet_cache: dict[str, Any] = {}
 
     def ensure_schema(self) -> None:
         for sheet_name in SHEETS:
             self._worksheet_info(sheet_name)
 
     def _get_or_create_worksheet(self, sheet_name: str):
-        try:
-            worksheets = self.spreadsheet.worksheets()
-        except Exception as exc:
-            raise TransactionStoreError(
-                f"Could not list worksheets: {type(exc).__name__}: {exc}"
-            ) from exc
+        cached = self._worksheet_cache.get(sheet_name)
+        if cached is not None:
+            return cached
 
-        for worksheet in worksheets:
-            if _clean(getattr(worksheet, "title", "")) == sheet_name:
-                return worksheet
+        # Populate the worksheet map in one API call and reuse it for the
+        # lifetime of this store. Streamlit reruns can otherwise burn several
+        # Sheets read requests merely rediscovering the same worksheet objects.
+        if not self._worksheet_cache:
+            try:
+                worksheets = self.spreadsheet.worksheets()
+            except Exception as exc:
+                raise TransactionStoreError(
+                    f"Could not list worksheets: {type(exc).__name__}: {exc}"
+                ) from exc
+            self._worksheet_cache.update(
+                {
+                    _clean(getattr(worksheet, "title", "")): worksheet
+                    for worksheet in worksheets
+                    if _clean(getattr(worksheet, "title", ""))
+                }
+            )
+            cached = self._worksheet_cache.get(sheet_name)
+            if cached is not None:
+                return cached
 
         headers = SHEETS[sheet_name]
         try:
@@ -308,6 +323,7 @@ class TransactionSheetStore:
             ) from exc
 
         self._update_range(worksheet, "A1", [headers])
+        self._worksheet_cache[sheet_name] = worksheet
         return worksheet
 
     @staticmethod
@@ -651,6 +667,80 @@ class TransactionSheetStore:
             rows.append(row)
         return rows
 
+    @staticmethod
+    def _column_letter(column_number: int) -> str:
+        if column_number < 1:
+            raise ValueError("column_number must be >= 1")
+        letters = []
+        n = column_number
+        while n:
+            n, remainder = divmod(n - 1, 26)
+            letters.append(chr(65 + remainder))
+        return "".join(reversed(letters))
+
+    @staticmethod
+    def _rows_from_values(info: WorksheetInfo, values: list[list[Any]]) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        for row_values in (values or [])[info.header_row:]:
+            if not any(_clean(v) for v in row_values):
+                continue
+            row: dict[str, str] = {}
+            for idx, header in enumerate(info.headers):
+                row[header] = row_values[idx] if idx < len(row_values) else ""
+            rows.append(row)
+        return rows
+
+    def list_rows_many(self, sheet_names: list[str]) -> dict[str, list[dict[str, str]]]:
+        """Read several transaction worksheets with one Sheets batch request.
+
+        The cancellation/recovery paths need a coherent snapshot of ORDERS,
+        PAYMENTS, REGISTRATIONS and EVENT_ENTRIES. Reading those sheets one at
+        a time unnecessarily consumes the per-user Google Sheets read quota.
+        """
+        names = list(dict.fromkeys(sheet_names))
+        if not names:
+            return {}
+
+        infos = {name: self._worksheet_info(name) for name in names}
+        batch_get = getattr(self.spreadsheet, "values_batch_get", None)
+        if not callable(batch_get):
+            return {name: self.list_rows(name) for name in names}
+
+        ranges = []
+        for name in names:
+            info = infos[name]
+            title = _clean(getattr(info.worksheet, "title", name)) or name
+            safe_title = title.replace("'", "''")
+            last_col = self._column_letter(max(1, len(info.headers)))
+            ranges.append(f"'{safe_title}'!A:{last_col}")
+
+        try:
+            payload = batch_get(ranges)
+        except Exception as exc:
+            message = str(exc)
+            if "429" in message or "quota" in message.lower():
+                raise TransactionStoreError(
+                    "Google Sheets read quota is temporarily exhausted. "
+                    "Wait about 60 seconds and retry once."
+                ) from exc
+            raise TransactionStoreError(
+                "Could not batch-read transaction worksheets: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+        value_ranges = (payload or {}).get("valueRanges", [])
+        if len(value_ranges) != len(names):
+            # Fail safe rather than silently pairing the wrong sheet with data.
+            return {name: self.list_rows(name) for name in names}
+
+        result: dict[str, list[dict[str, str]]] = {}
+        for name, value_range in zip(names, value_ranges):
+            result[name] = self._rows_from_values(
+                infos[name],
+                (value_range or {}).get("values", []) or [],
+            )
+        return result
+
     def append_audit_log(self, row: dict[str, Any]) -> bool:
         """Append one immutable audit record, idempotently by AUDIT_ID."""
         return self.append_if_missing("AUDIT_LOG", row)
@@ -806,21 +896,35 @@ class TransactionSheetStore:
         if not order_id or not payment_id:
             raise TransactionStoreError("ORDER_ID and PAYMENT_ID are required.")
 
+        # Re-check the four logical transaction tables immediately before
+        # mutation, but fetch them as one batch request to avoid exhausting the
+        # Google Sheets per-user read quota. The fallback keeps lightweight
+        # unit-test stores/backward-compatible mocks working.
+        if getattr(self, "spreadsheet", None) is not None:
+            snapshot = self.list_rows_many(
+                ["ORDERS", "PAYMENTS", "REGISTRATIONS", "EVENT_ENTRIES"]
+            )
+        else:
+            snapshot = {
+                name: self.list_rows(name)
+                for name in ["ORDERS", "PAYMENTS", "REGISTRATIONS", "EVENT_ENTRIES"]
+            }
+
         orders = [
-            row for row in self.list_rows("ORDERS")
+            row for row in snapshot["ORDERS"]
             if _clean(row.get("ORDER_ID")) == order_id
         ]
         payments = [
-            row for row in self.list_rows("PAYMENTS")
+            row for row in snapshot["PAYMENTS"]
             if _clean(row.get("ORDER_ID")) == order_id
             and _clean(row.get("PAYMENT_ID")) == payment_id
         ]
         registrations = [
-            row for row in self.list_rows("REGISTRATIONS")
+            row for row in snapshot["REGISTRATIONS"]
             if _clean(row.get("ORDER_ID")) == order_id
         ]
         entries = [
-            row for row in self.list_rows("EVENT_ENTRIES")
+            row for row in snapshot["EVENT_ENTRIES"]
             if _clean(row.get("ORDER_ID")) == order_id
         ]
 

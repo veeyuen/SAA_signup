@@ -149,7 +149,9 @@ TRANSACTION_SHEET_URL = str(
 ).strip()
 
 
-def _transaction_store() -> TransactionSheetStore:
+@st.cache_resource(show_spinner=False)
+def _get_transaction_store(transaction_sheet_url: str) -> TransactionSheetStore:
+    """Reuse one Sheets store so worksheet metadata is not re-read on every rerun."""
     try:
         google_client = create_google_client(
             dict(st.secrets["gcp_service_account"])
@@ -162,8 +164,12 @@ def _transaction_store() -> TransactionSheetStore:
 
     return TransactionSheetStore(
         google_client=google_client,
-        sheet_url=TRANSACTION_SHEET_URL,
+        sheet_url=transaction_sheet_url,
     )
+
+
+def _transaction_store() -> TransactionSheetStore:
+    return _get_transaction_store(TRANSACTION_SHEET_URL)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -177,7 +183,10 @@ def _cached_resumable_payment_orders(
     # from Streamlit reruns without making payment state stale for long.
     _ = transaction_sheet_url
     store = _transaction_store()
-    orders = store.list_rows("ORDERS")
+    snapshot = store.list_rows_many(
+        ["ORDERS", "PAYMENTS", "REGISTRATIONS", "EVENT_ENTRIES"]
+    )
+    orders = snapshot["ORDERS"]
     scoped_orders = [
         order
         for order in orders
@@ -192,9 +201,9 @@ def _cached_resumable_payment_orders(
 
     return find_resumable_payment_orders(
         orders=scoped_orders,
-        payments=store.list_rows("PAYMENTS"),
-        registrations=store.list_rows("REGISTRATIONS"),
-        event_entries=store.list_rows("EVENT_ENTRIES"),
+        payments=snapshot["PAYMENTS"],
+        registrations=snapshot["REGISTRATIONS"],
+        event_entries=snapshot["EVENT_ENTRIES"],
         user_id=user_id,
         organization_id=organization_id,
     )
@@ -376,11 +385,14 @@ show_stripe_return_status()
 def _fresh_resumable_candidate(order_id: str) -> tuple[TransactionSheetStore, dict | None]:
     """Re-read Sheets and return this user's still-resumable logical order."""
     store = _transaction_store()
+    snapshot = store.list_rows_many(
+        ["ORDERS", "PAYMENTS", "REGISTRATIONS", "EVENT_ENTRIES"]
+    )
     candidates = find_resumable_payment_orders(
-        orders=store.list_rows("ORDERS"),
-        payments=store.list_rows("PAYMENTS"),
-        registrations=store.list_rows("REGISTRATIONS"),
-        event_entries=store.list_rows("EVENT_ENTRIES"),
+        orders=snapshot["ORDERS"],
+        payments=snapshot["PAYMENTS"],
+        registrations=snapshot["REGISTRATIONS"],
+        event_entries=snapshot["EVENT_ENTRIES"],
         user_id=current_user.user_id,
         organization_id=current_organization.organization_id,
     )
@@ -406,10 +418,18 @@ def _cancel_persisted_payment(order_id: str) -> None:
     try:
         store, candidate = _fresh_resumable_candidate(order_id)
     except Exception as exc:
-        st.error(
-            "Unable to verify the pending registration before cancellation: "
-            f"{type(exc).__name__}: {exc}"
-        )
+        message = str(exc)
+        if "429" in message or "quota" in message.lower():
+            st.error(
+                "Google Sheets is temporarily rate-limited, so the pending "
+                "registration could not be verified. No cancellation was made. "
+                "Please wait about 60 seconds and retry once."
+            )
+        else:
+            st.error(
+                "Unable to verify the pending registration before cancellation: "
+                f"{type(exc).__name__}: {exc}"
+            )
         return
 
     if not candidate:
