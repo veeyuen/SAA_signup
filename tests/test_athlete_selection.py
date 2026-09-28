@@ -3,6 +3,9 @@ from signup.athlete_selection import (
     SEARCH_FIRST,
     normalize_ui_mode,
     roster_row_name,
+    roster_row_ic_last4,
+    resolve_nationality_option,
+    sync_auto_full_name,
     search_roster_rows,
     find_new_athlete_identity_matches,
     IDENTITY_STRONG_MATCH,
@@ -184,7 +187,7 @@ def test_new_athlete_single_name_signal_does_not_block_creation():
     assert matches == []
 
 
-def test_new_athlete_exact_legacy_id_is_review_signal_not_silent_merge():
+def test_auto_generated_legacy_id_is_not_independent_duplicate_evidence():
     rows = [
         {
             "FULL_NAME": "Existing Athlete",
@@ -201,9 +204,85 @@ def test_new_athlete_exact_legacy_id_is_review_signal_not_silent_merge():
         ic_last4="999Z",
         derived_unique_id="E123A08",
     )
+    assert matches == []
+
+
+def test_legacy_unique_id_can_supply_missing_roster_ic4_for_identity_check():
+    rows = [
+        {
+            "FIRST_NAME": "Veronica Shanti",
+            "LAST_NAME": "Pereira",
+            "DOB": "1996-09-20",
+            "UNIQUE_ID": "V852E96",
+            "GENDER": "Female",
+        }
+    ]
+    assert roster_row_ic_last4(rows[0]) == "852E"
+    matches = find_new_athlete_identity_matches(
+        rows,
+        first_name="Veronica Shanti",
+        last_name="Pereira",
+        birth_date="20/09/1996",
+        ic_last4="852E",
+        gender="Female",
+    )
     assert len(matches) == 1
-    assert matches[0].classification == IDENTITY_REVIEW
-    assert "CURRENT_ID_MATCH" in matches[0].reasons
+    assert matches[0].classification == IDENTITY_STRONG_MATCH
+    assert set(matches[0].reasons) >= {"NAME_MATCH", "DOB_MATCH", "IC_LAST4_MATCH"}
+
+
+def test_legacy_unique_id_ic4_fallback_rejects_birth_year_mismatch():
+    row = {
+        "DOB": "1997-09-20",
+        "UNIQUE_ID": "V852E96",
+    }
+    assert roster_row_ic_last4(row) == ""
+
+
+def test_roster_row_name_prefers_complete_structured_name_over_stale_full_name():
+    row = {
+        "FIRST_NAME": "VERONICA SHANTI",
+        "LAST_NAME": "PEREIRA",
+        "FULL_NAME": "VERONICA SHANTI",
+    }
+    assert roster_row_name(row) == "VERONICA SHANTI PEREIRA"
+
+
+def test_nationality_resolves_code_plus_country_to_dropdown_country():
+    options = ["Singapore", "Malaysia", "Japan"]
+    assert resolve_nationality_option("SGP Singapore", options) == "Singapore"
+    assert resolve_nationality_option("Singapore", options) == "Singapore"
+
+
+def test_nationality_unmatched_value_is_preserved_for_override():
+    assert resolve_nationality_option("XYZ Exampleland", ["Singapore"]) == "XYZ Exampleland"
+
+
+def test_auto_full_name_tracks_structured_edits_until_user_overrides():
+    value, marker = sync_auto_full_name(
+        typed_full_name="Pereira",
+        current_full_name="",
+        previous_auto_full_name="",
+    )
+    assert (value, marker) == ("Pereira", "Pereira")
+
+    value, marker = sync_auto_full_name(
+        typed_full_name="Veronica Shanti Pereira",
+        current_full_name=value,
+        previous_auto_full_name=marker,
+    )
+    assert (value, marker) == (
+        "Veronica Shanti Pereira",
+        "Veronica Shanti Pereira",
+    )
+
+    value, marker = sync_auto_full_name(
+        typed_full_name="Veronica S Pereira",
+        current_full_name="Veronica Shanti P.",
+        previous_auto_full_name=marker,
+    )
+    assert value == "Veronica Shanti P."
+    assert marker == "Veronica Shanti Pereira"
 
 
 def test_gender_conflict_downgrades_full_identity_match_to_review():
@@ -226,3 +305,36 @@ def test_gender_conflict_downgrades_full_identity_match_to_review():
     assert len(matches) == 1
     assert matches[0].classification == IDENTITY_REVIEW
     assert "GENDER_CONFLICT" in matches[0].reasons
+
+
+def test_roster_prefill_normalises_veronica_recall_fields():
+    from signup.athlete_selection import roster_prefill_values
+
+    row = {
+        "FIRST_NAME": "VERONICA SHANTI",
+        "OTHER_NAME": "",
+        "LAST_NAME": "PEREIRA",
+        "FULL_NAME": "VERONICA SHANTI",
+        "DOB": "1996-09-20",
+        "UNIQUE_ID": "V852E96",
+        "GENDER": "Female",
+        "NATIONALITY": "SGP Singapore",
+    }
+    prefill = roster_prefill_values(row, ["Singapore", "Malaysia", "Japan"])
+    assert prefill["full_name"] == "VERONICA SHANTI PEREIRA"
+    assert prefill["name_passport"] == "VERONICA SHANTI PEREIRA"
+    assert prefill["ic_last4"] == "852E"
+    assert prefill["nationality"] == "Singapore"
+    assert prefill["nationality_override"] == ""
+    assert prefill["unique_id"] == "V852E96"
+
+
+def test_roster_prefill_preserves_unconfigured_nationality_as_override():
+    from signup.athlete_selection import roster_prefill_values
+
+    prefill = roster_prefill_values(
+        {"FIRST_NAME": "A", "LAST_NAME": "B", "NATIONALITY": "XYZ Exampleland"},
+        ["Singapore"],
+    )
+    assert prefill["nationality"] == "XYZ Exampleland"
+    assert prefill["nationality_override"] == "XYZ Exampleland"

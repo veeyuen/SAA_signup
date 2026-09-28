@@ -62,16 +62,197 @@ def _last4(value: Any) -> str:
 
 
 def roster_row_name(row: Mapping[str, Any]) -> str:
-    """Return the best available full-name representation for one roster row."""
+    """Return the best available full-name representation for one roster row.
+
+    Prefer structured first/other/last fields when both first and last name are
+    available.  Some historical roster rows contain a stale or differently
+    formatted FULL_NAME even though the structured fields are authoritative.
+    """
+    first = _text(row.get("FIRST_NAME"))
+    other = _text(row.get("OTHER_NAME"))
+    last = _text(row.get("LAST_NAME"))
+    structured = " ".join(part for part in [first, other, last] if part).strip()
+    if first and last:
+        return structured
+
     full = _text(row.get("FULL_NAME"))
     if full:
         return full
-    parts = [
-        _text(row.get("FIRST_NAME")),
-        _text(row.get("OTHER_NAME")),
-        _text(row.get("LAST_NAME")),
-    ]
-    return " ".join(part for part in parts if part).strip()
+    return structured
+
+
+def _legacy_ic4_from_identifier(identifier: Any, dob: Any = None) -> str:
+    """Extract IC last-four from the historical SAA derived ID when safe.
+
+    Historical IDs have the shape ``A123B08``: one name initial, the four IC
+    characters, then two birth-year digits.  Future opaque ATHLETE_ID values do
+    not match this pattern and are therefore never decoded.  When DOB is known,
+    the year suffix must agree before the value is accepted.
+    """
+    raw = re.sub(r"[^A-Z0-9]", "", _text(identifier).upper())
+    match = re.fullmatch(r"[A-Z]([0-9]{3}[A-Z])([0-9]{2})", raw)
+    if not match:
+        return ""
+
+    dob_key = _date_key(dob)
+    if dob_key and dob_key[2:4] != match.group(2):
+        return ""
+    return match.group(1)
+
+
+def roster_row_ic_last4(row: Mapping[str, Any]) -> str:
+    """Return the best supported IC-last-four representation for a roster row."""
+    direct = _last4(
+        row.get("NRIC")
+        or row.get("IC_LAST4")
+        or row.get("NRIC_LAST4")
+        or ""
+    )
+    if re.fullmatch(r"[0-9]{3}[A-Z]", direct.upper()):
+        return direct.upper()
+
+    # Legacy UNIQUE_ID encodes the same four characters.  Use it only as a
+    # fallback when the direct roster field is absent, and only when its exact
+    # historical format (and DOB year, when available) validate.
+    for field in ("LEGACY_UNIQUE_ID", "UNIQUE_ID"):
+        inferred = _legacy_ic4_from_identifier(row.get(field), row.get("DOB"))
+        if inferred:
+            return inferred
+    return ""
+
+
+def resolve_nationality_option(value: Any, options: Iterable[Any]) -> str:
+    """Resolve roster nationality text to the registration dropdown value.
+
+    Handles exact country names as well as historical values such as
+    ``SGP Singapore`` without inventing a country when no supported option can
+    be established.  If no dropdown option matches, return the raw text so the
+    caller can expose it through the existing override mechanism.
+    """
+    raw = _text(value)
+    if not raw:
+        return ""
+
+    option_values = [_text(option) for option in (options or []) if _text(option)]
+    raw_key = _normalise_search(raw)
+    for option in option_values:
+        if raw_key == _normalise_search(option):
+            return option
+
+    # Common Singapore codes used in historical athletics data.
+    if raw_key in {"sg", "sin", "sgp", "singapore", "sg singapore", "sin singapore", "sgp singapore"}:
+        for option in option_values:
+            if _normalise_search(option) == "singapore":
+                return option
+
+    # Generic ``XXX Country Name`` form.  Only strip a short alphabetic code
+    # when the remainder exactly equals one of the configured options.
+    tokens = raw_key.split()
+    if len(tokens) >= 2 and 2 <= len(tokens[0]) <= 3 and tokens[0].isalpha():
+        remainder = " ".join(tokens[1:])
+        for option in option_values:
+            if remainder == _normalise_search(option):
+                return option
+
+    return raw
+
+
+
+def roster_prefill_values(row: Mapping[str, Any], nationality_options: Iterable[Any]) -> dict[str, Any]:
+    """Build the canonical one-time form prefill for a selected roster athlete.
+
+    Keeping this transformation pure makes the Streamlit hand-off deterministic
+    and testable.  In particular, historical roster values such as
+    ``SGP Singapore`` and legacy IDs such as ``V852E96`` are normalised before
+    widget state is touched.
+    """
+    first = _text(row.get("FIRST_NAME"))
+    other = _text(row.get("OTHER_NAME"))
+    last = _text(row.get("LAST_NAME"))
+    full = roster_row_name(row)
+
+    passport_name = _text(
+        row.get("NAME_PASSPORT")
+        or row.get("NAME_AS_PER_NRIC_PASSPORT")
+        or row.get("NAME AS PER NRIC/PASSPORT")
+        or full
+    )
+    ic_last4 = roster_row_ic_last4(row)
+
+    gender_raw = _text(row.get("GENDER")).upper()
+    gender = ""
+    if gender_raw in {"M", "MALE"}:
+        gender = "Male"
+    elif gender_raw in {"F", "FEMALE"}:
+        gender = "Female"
+
+    nationality_raw = _text(row.get("NATIONALITY"))
+    options = [_text(x) for x in (nationality_options or []) if _text(x)]
+    nationality = resolve_nationality_option(nationality_raw, options)
+    nationality_override = "" if nationality in options else (nationality or nationality_raw)
+
+    sgpr_raw = _text(
+        row.get("SINGAPORE_PR")
+        or row.get("SG_PR")
+        or row.get("PR_STATUS")
+    ).casefold()
+    nationality_cf = nationality_raw.casefold()
+    singapore_pr = (
+        sgpr_raw in {"yes", "y", "true", "1", "pr", "singapore pr", "sg pr"}
+        or nationality_cf in {"singapore pr", "sg pr"}
+    )
+
+    unique_id = _text(
+        row.get("ATHLETE_ID")
+        or row.get("UNIQUE_ID")
+        or row.get("LEGACY_UNIQUE_ID")
+    )
+    email = _text(row.get("EMAIL") or row.get("Email"))
+    contact = _text(
+        row.get("CONTACT_NUMBER")
+        or row.get("CONTACT")
+        or row.get("MOBILE")
+        or row.get("PHONE")
+    )
+
+    return {
+        "first_name": first or other,
+        "other_name": other,
+        "last_name": last,
+        "full_name": full,
+        "name_passport": passport_name,
+        "ic_last4": ic_last4,
+        "dob_raw": row.get("DOB"),
+        "gender": gender,
+        "nationality": nationality or nationality_raw,
+        "nationality_override": nationality_override,
+        "singapore_pr": bool(singapore_pr),
+        "unique_id": unique_id,
+        "email": email,
+        "contact_number": contact,
+    }
+
+def sync_auto_full_name(
+    *,
+    typed_full_name: Any,
+    current_full_name: Any,
+    previous_auto_full_name: Any,
+) -> tuple[str, str]:
+    """Return the next Full Name value and auto-source marker.
+
+    Structured name edits keep updating Full Name while it still equals the
+    previous auto-generated value. A genuine manual Full Name override is
+    preserved.
+    """
+    typed = _text(typed_full_name)
+    current = _text(current_full_name)
+    previous_auto = _text(previous_auto_full_name)
+
+    if typed and (not current or current == previous_auto):
+        return typed, typed
+    if not typed and current == previous_auto:
+        return "", ""
+    return current, previous_auto
 
 
 def roster_search_score(row: Mapping[str, Any], query: Any) -> int:
@@ -283,8 +464,10 @@ def find_new_athlete_identity_matches(
     Matching is intentionally conservative:
 
     * STRONG_MATCH requires exact canonical name + full DOB + NRIC last four.
-    * REVIEW requires any two of those three identity signals, or an exact
-      current/legacy ID match.
+    * REVIEW requires any two of those three identity signals.
+
+    The form's auto-generated legacy UNIQUE_ID is deliberately *not* treated as
+    independent evidence because it is itself derived from name/IC/DOB input.
     * A single common signal (for example name alone) never blocks creation.
 
     A gender conflict downgrades what would otherwise be a strong match to
@@ -299,32 +482,22 @@ def find_new_athlete_identity_matches(
     candidate_dob = _date_key(birth_date)
     candidate_ic4 = _normalise_search(_last4(ic_last4))
     candidate_gender = _gender_key(gender)
-    candidate_id = _normalise_search(derived_unique_id)
+    # ``derived_unique_id`` is retained as a backwards-compatible keyword only.
+    # Do not count it as an independent match signal; it is generated from the
+    # same fields already being compared below.
+    _ = derived_unique_id
 
     matches: list[tuple[int, int, AthleteIdentityMatch]] = []
 
     for index, row in enumerate(rows or []):
         row_names = _row_name_keys(row)
         row_dob = _date_key(row.get("DOB"))
-        row_ic4 = _normalise_search(
-            _last4(
-                row.get("NRIC")
-                or row.get("IC_LAST4")
-                or row.get("NRIC_LAST4")
-                or ""
-            )
-        )
+        row_ic4 = _normalise_search(roster_row_ic_last4(row))
         row_gender = _gender_key(row.get("GENDER"))
-        row_ids = {
-            _normalise_search(row.get(field))
-            for field in ("ATHLETE_ID", "UNIQUE_ID", "LEGACY_UNIQUE_ID")
-            if _normalise_search(row.get(field))
-        }
 
         name_match = bool(candidate_names and row_names and candidate_names & row_names)
         dob_match = bool(candidate_dob and row_dob and candidate_dob == row_dob)
         ic_match = bool(candidate_ic4 and row_ic4 and candidate_ic4 == row_ic4)
-        id_match = bool(candidate_id and candidate_id in row_ids)
         gender_conflict = bool(
             candidate_gender and row_gender and candidate_gender != row_gender
         )
@@ -336,9 +509,9 @@ def find_new_athlete_identity_matches(
         if core_count == 3 and not gender_conflict:
             classification = IDENTITY_STRONG_MATCH
             score = 100
-        elif core_count >= 2 or id_match:
+        elif core_count >= 2:
             classification = IDENTITY_REVIEW
-            score = 60 + core_count * 10 + (10 if id_match else 0)
+            score = 60 + core_count * 10
 
         if not classification:
             continue
@@ -350,8 +523,6 @@ def find_new_athlete_identity_matches(
             reasons.append("DOB_MATCH")
         if ic_match:
             reasons.append("IC_LAST4_MATCH")
-        if id_match:
-            reasons.append("CURRENT_ID_MATCH")
         if gender_conflict:
             reasons.append("GENDER_CONFLICT")
 

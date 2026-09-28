@@ -70,6 +70,10 @@ from signup.athlete_selection import (
     SEARCH_FIRST as ATHLETE_UI_SEARCH_FIRST,
     normalize_ui_mode as normalize_athlete_ui_mode,
     roster_row_name,
+    roster_row_ic_last4,
+    resolve_nationality_option,
+    roster_prefill_values,
+    sync_auto_full_name,
     search_roster_rows,
     find_new_athlete_identity_matches,
     IDENTITY_STRONG_MATCH,
@@ -282,6 +286,7 @@ def _queue_clear_athlete_fields() -> None:
         "gender": "",
         "name_passport": "",
         "full_name": "",
+        "full_name_auto_source": "",
         "db_name_override": "",
         "full_name_signature": "",
         "athlete_roster_match": "(keep typed)",
@@ -289,6 +294,8 @@ def _queue_clear_athlete_fields() -> None:
         "athlete_selection_status": "",
         "selected_athlete_roster_uid": "",
         "selected_athlete_label": "",
+        "selected_athlete_prefill_snapshot": {},
+        "selected_athlete_prefill_needs_apply": False,
         "athlete_search_first_query": "",
         "athlete_search_first_match": 0,
         "nationality": "",
@@ -1028,91 +1035,55 @@ def _roster_candidate_label(row: dict) -> str:
 
 
 def _queue_roster_row_for_autofill(row: dict) -> None:
-    """Queue one roster row into the existing registration widgets."""
-    full_name_sel = roster_row_name(row)
-    first_name_sel = str(row.get("FIRST_NAME", "") or "").strip()
-    last_name_sel = str(row.get("LAST_NAME", "") or "").strip()
-    other_name_sel = str(row.get("OTHER_NAME", "") or "").strip()
-    nric = str(row.get("NRIC", "") or "").strip()
-    dob = parse_dob(row.get("DOB"))
-    gender_raw = str(row.get("GENDER", "") or "").strip().upper()
-    nationality_raw = str(row.get("NATIONALITY", "") or "").strip()
-    sgpr_raw = str(
-        row.get("SINGAPORE_PR", "")
-        or row.get("SG_PR", "")
-        or row.get("PR_STATUS", "")
-        or ""
-    ).strip()
-    unique_id_sel = str(
-        row.get("ATHLETE_ID", "")
-        or row.get("UNIQUE_ID", "")
-        or row.get("LEGACY_UNIQUE_ID", "")
-        or ""
-    ).strip()
+    """Queue one roster row into the existing registration widgets.
 
-    st.session_state["first_name__pending"] = first_name_sel or other_name_sel
-    st.session_state["last_name__pending"] = last_name_sel
-    st.session_state["other_name__pending"] = other_name_sel
-    st.session_state["full_name__pending"] = full_name_sel
-    roster_name_passport = str(
-        row.get("NAME_PASSPORT", "")
-        or row.get("NAME_AS_PER_NRIC_PASSPORT", "")
-        or row.get("NAME AS PER NRIC/PASSPORT", "")
-        or ""
-    ).strip()
-    if roster_name_passport:
-        st.session_state["name_passport__pending"] = roster_name_passport
-    st.session_state["full_name_signature__pending"] = "|".join(
-        [first_name_sel or other_name_sel, other_name_sel, last_name_sel]
-    )
+    A normalised snapshot is also retained for exactly one rerun.  This avoids
+    a Streamlit widget-state race observed in live testing where some fields
+    (notably nationality, passport name and IC last-4) could retain the blank
+    values from the preceding "Create new athlete" screen even though the
+    selected roster row contained valid data.
+    """
+    prefill = roster_prefill_values(row, (COUNTRIES or []))
+    dob = parse_dob(prefill.get("dob_raw"))
 
-    st.session_state["ic_last4__pending"] = last4_from_nric(nric)
+    st.session_state["first_name__pending"] = prefill.get("first_name", "")
+    st.session_state["last_name__pending"] = prefill.get("last_name", "")
+    st.session_state["other_name__pending"] = prefill.get("other_name", "")
+    st.session_state["full_name__pending"] = prefill.get("full_name", "")
+    st.session_state["full_name_auto_source__pending"] = prefill.get("full_name", "")
+    st.session_state["name_passport__pending"] = prefill.get("name_passport", "")
+    st.session_state["full_name_signature__pending"] = "|".join([
+        prefill.get("first_name", ""),
+        prefill.get("other_name", ""),
+        prefill.get("last_name", ""),
+    ])
+    st.session_state["ic_last4__pending"] = prefill.get("ic_last4", "")
     st.session_state["birth_date__pending"] = dob
-    if gender_raw in ("M", "F", "MALE", "FEMALE"):
-        st.session_state["gender__pending"] = (
-            "Male" if gender_raw.startswith("M") else "Female"
-        )
-    else:
-        st.session_state["gender__pending"] = ""
+    st.session_state["gender__pending"] = prefill.get("gender", "")
+    st.session_state["nationality__pending"] = prefill.get("nationality", "")
+    st.session_state["nationality_override__pending"] = prefill.get("nationality_override", "")
+    st.session_state["singapore_pr__pending"] = bool(prefill.get("singapore_pr", False))
+    st.session_state["unique_id_override__pending"] = prefill.get("unique_id", "")
 
-    nationality_pick = _match_option_case_insensitive(
-        nationality_raw, (COUNTRIES or [])
-    )
-    if nationality_pick:
-        st.session_state["nationality__pending"] = nationality_pick
-        st.session_state["nationality_override__pending"] = ""
-    else:
-        st.session_state["nationality__pending"] = nationality_raw
-        st.session_state["nationality_override__pending"] = nationality_raw
+    if prefill.get("email"):
+        st.session_state["email__pending"] = prefill.get("email")
+    if prefill.get("contact_number"):
+        st.session_state["contact_number__pending"] = prefill.get("contact_number")
 
-    nationality_cf = nationality_raw.casefold()
-    sgpr_cf = sgpr_raw.casefold()
-    roster_is_sg_pr = (
-        sgpr_cf in ("yes", "y", "true", "1", "pr", "singapore pr", "sg pr")
-        or nationality_cf in ("singapore pr", "sg pr")
-    )
-    st.session_state["singapore_pr__pending"] = bool(roster_is_sg_pr)
-    if roster_is_sg_pr and not nationality_pick:
-        st.session_state["nationality__pending"] = "SGP"
-        st.session_state["nationality_override__pending"] = ""
-
-    st.session_state["unique_id_override__pending"] = unique_id_sel
-
-    roster_email = str(row.get("EMAIL", "") or row.get("Email", "") or "").strip()
-    roster_contact = str(
-        row.get("CONTACT_NUMBER", "")
-        or row.get("CONTACT", "")
-        or row.get("MOBILE", "")
-        or row.get("PHONE", "")
-        or ""
-    ).strip()
-    if roster_email:
-        st.session_state["email__pending"] = roster_email
-    if roster_contact:
-        st.session_state["contact_number__pending"] = roster_contact
-
+    unique_id_sel = prefill.get("unique_id", "")
     st.session_state["selected_athlete_roster_uid__pending"] = unique_id_sel
     st.session_state["selected_athlete_label__pending"] = _roster_candidate_label(row)
+    st.session_state["selected_athlete_prefill_snapshot__pending"] = {
+        **prefill,
+        "birth_date": dob,
+        "full_name_signature": "|".join([
+            prefill.get("first_name", ""),
+            prefill.get("other_name", ""),
+            prefill.get("last_name", ""),
+        ]),
+    }
+    st.session_state["selected_athlete_prefill_needs_apply__pending"] = True
+    st.session_state["athlete_search_first_match__pending"] = 0
 
 
 def _clear_for_new_or_changed_athlete() -> None:
@@ -1228,6 +1199,37 @@ if athlete_ui_mode == ATHLETE_UI_SEARCH_FIRST:
             )
 
 if athlete_form_visible:
+    # One-time authoritative hand-off after selecting an existing athlete.
+    # Apply the normalised snapshot immediately before widget creation so the
+    # previous new-athlete widget values cannot win a Streamlit state race.
+    if (
+        str(st.session_state.get("athlete_selection_status", "") or "").upper() == "EXISTING"
+        and bool(st.session_state.get("selected_athlete_prefill_needs_apply"))
+    ):
+        _prefill_snapshot = st.session_state.get("selected_athlete_prefill_snapshot") or {}
+        for _key in (
+            "first_name",
+            "other_name",
+            "last_name",
+            "full_name",
+            "name_passport",
+            "ic_last4",
+            "gender",
+            "nationality",
+            "nationality_override",
+            "singapore_pr",
+            "unique_id_override",
+            "email",
+            "contact_number",
+            "full_name_signature",
+        ):
+            if _key in _prefill_snapshot and _prefill_snapshot.get(_key) not in (None, ""):
+                st.session_state[_key] = _prefill_snapshot.get(_key)
+        if _prefill_snapshot.get("birth_date") is not None:
+            st.session_state["birth_date"] = _prefill_snapshot.get("birth_date")
+        st.session_state["full_name_auto_source"] = _prefill_snapshot.get("full_name", "")
+        st.session_state["selected_athlete_prefill_needs_apply"] = False
+
     st.subheader("Athlete Entry Form")
 
     # Athlete fields (no form, so dependent dropdowns update immediately)
@@ -1270,6 +1272,7 @@ if athlete_form_visible:
         # In search-first mode this also unlinks the selected roster identity and
         # treats the edited details as a manual/new-athlete entry.
         st.session_state["full_name__pending"] = ""
+        st.session_state["full_name_auto_source__pending"] = ""
         st.session_state["unique_id_override__pending"] = ""
         st.session_state["db_name_override__pending"] = ""
         st.session_state["full_name_signature__pending"] = ""
@@ -1537,12 +1540,16 @@ if athlete_form_visible:
     typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
     db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
 
-    # Full Name (auto) — editable
-    full_name_display = (st.session_state.get("full_name", "") or "").strip()
-    if (not full_name_display) and typed_full_name:
-        # Pre-fill from typed First/Other/Last (user can edit)
-        st.session_state["full_name"] = typed_full_name
-        full_name_display = typed_full_name
+    # Full Name (auto) — editable. Keep it synchronized with structured names
+    # while it still contains the previous auto-generated value. If the user
+    # manually edits Full Name, preserve that override.
+    full_name_display, next_auto_full_name_source = sync_auto_full_name(
+        typed_full_name=typed_full_name,
+        current_full_name=st.session_state.get("full_name", ""),
+        previous_auto_full_name=st.session_state.get("full_name_auto_source", ""),
+    )
+    st.session_state["full_name"] = full_name_display
+    st.session_state["full_name_auto_source"] = next_auto_full_name_source
     st.text_input("Full Name (auto)", key="full_name")
 
     # Live validation: name presence
@@ -1644,7 +1651,6 @@ if athlete_form_visible:
                 birth_date=birth_date,
                 ic_last4=ic_last4_norm,
                 gender=gender,
-                derived_unique_id=unique_id,
                 limit=5,
             )
         except Exception as exc:
@@ -1691,7 +1697,6 @@ if athlete_form_visible:
                     "NAME_MATCH": "name",
                     "DOB_MATCH": "full date of birth",
                     "IC_LAST4_MATCH": "IC last 4",
-                    "CURRENT_ID_MATCH": "current/legacy athlete ID",
                     "GENDER_CONFLICT": "gender conflict",
                 }
                 _reasons = [
@@ -2602,7 +2607,6 @@ if athlete_form_visible:
                         birth_date=birth_date,
                         ic_last4=ic_last4_norm,
                         gender=gender,
-                        derived_unique_id=unique_id,
                         limit=5,
                     )
                 except Exception as exc:
