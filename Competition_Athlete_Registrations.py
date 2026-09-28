@@ -1066,23 +1066,6 @@ def _queue_roster_row_for_autofill(row: dict) -> None:
             else _raw_roster_nationality
         )
 
-    # TEMPORARY DIAGNOSTIC: persist the queue-time nationality boundary across
-    # the rerun so we can see exactly where the selected roster value is lost.
-    st.session_state["nationality_prefill_boundary_debug"] = {
-        "diagnostic_version": "2026-09-28-prefill-boundary-v1",
-        "raw_roster_nationality": _raw_roster_nationality,
-        "resolved_roster_nationality": (
-            _resolved_roster_nationality if _raw_roster_nationality else ""
-        ),
-        "prefill_nationality": prefill.get("nationality", ""),
-        "prefill_override": prefill.get("nationality_override", ""),
-        "countries_has_raw": _raw_roster_nationality in (COUNTRIES or []),
-        "countries_has_resolved": (
-            bool(_raw_roster_nationality)
-            and _resolved_roster_nationality in (COUNTRIES or [])
-        ),
-    }
-
     dob = parse_dob(prefill.get("dob_raw"))
 
     st.session_state["first_name__pending"] = prefill.get("first_name", "")
@@ -1212,7 +1195,31 @@ if athlete_ui_mode == ATHLETE_UI_SEARCH_FIRST:
                 key="use_search_first_athlete",
             ):
                 chosen_row = candidates[int(chosen_index)]
+                # Diagnostic capture at the exact selection boundary.  Store it
+                # through the normal pending-state mechanism so it survives the
+                # rerun without changing registration behaviour.
+                _selected_row_debug = {
+                    "diagnostic_version": "2026-09-28-selection-boundary-v2",
+                    "chosen_row_keys": sorted(str(k) for k in chosen_row.keys()),
+                    "chosen_NATIONALITY": repr(chosen_row.get("NATIONALITY")),
+                    "chosen_FIRST_NAME": repr(chosen_row.get("FIRST_NAME")),
+                    "chosen_LAST_NAME": repr(chosen_row.get("LAST_NAME")),
+                    "chosen_DOB": repr(chosen_row.get("DOB")),
+                    "chosen_GENDER": repr(chosen_row.get("GENDER")),
+                    "chosen_UNIQUE_ID": repr(chosen_row.get("UNIQUE_ID")),
+                }
                 _queue_roster_row_for_autofill(chosen_row)
+                _selected_row_debug.update({
+                    "queued_nationality": repr(st.session_state.get("nationality__pending")),
+                    "queued_override": repr(st.session_state.get("nationality_override__pending")),
+                    "queued_snapshot_nationality": repr(
+                        (st.session_state.get("selected_athlete_prefill_snapshot__pending") or {}).get("nationality")
+                    ),
+                    "queued_snapshot_override": repr(
+                        (st.session_state.get("selected_athlete_prefill_snapshot__pending") or {}).get("nationality_override")
+                    ),
+                })
+                st.session_state["selected_row_debug__pending"] = _selected_row_debug
                 st.session_state["athlete_selection_status__pending"] = "EXISTING"
                 st.session_state["athlete_search_first_query__pending"] = ""
                 st.session_state["athlete_search_first_match__pending"] = 0
@@ -1645,23 +1652,17 @@ if athlete_form_visible:
             selected_existing=_selected_existing,
         )
 
-        # TEMPORARY DIAGNOSTIC: show queue-time and post-rerun values together.
-        _nationality_debug = dict(
-            st.session_state.get("nationality_prefill_boundary_debug") or {}
-        )
-        _nationality_debug.update({
-            "selection_status": st.session_state.get("athlete_selection_status", ""),
-            "session_nationality": st.session_state.get("nationality", ""),
-            "session_override": st.session_state.get("nationality_override", ""),
-            "snapshot_nationality": _selected_snapshot.get("nationality", ""),
-            "snapshot_override": _selected_snapshot.get("nationality_override", ""),
-            "snapshot_needs_apply": st.session_state.get(
-                "selected_athlete_prefill_needs_apply", False
-            ),
-            "desired": _desired_nationality,
-            "index": _nationality_index,
-        })
-        st.write("NATIONALITY PREFILL DEBUG:", _nationality_debug)
+        _selected_row_debug = dict(st.session_state.get("selected_row_debug") or {})
+        if _selected_row_debug:
+            _selected_row_debug.update({
+                "promoted_session_nationality": repr(st.session_state.get("nationality")),
+                "promoted_session_override": repr(st.session_state.get("nationality_override")),
+                "promoted_snapshot_nationality": repr(_selected_snapshot.get("nationality")),
+                "promoted_snapshot_override": repr(_selected_snapshot.get("nationality_override")),
+                "desired": repr(_desired_nationality),
+                "index": _nationality_index,
+            })
+            st.write("NATIONALITY SELECTION BOUNDARY DEBUG:", _selected_row_debug)
 
         # Seed a blank keyed widget directly from the resolved selected-athlete
         # value.  Once the user makes a non-blank choice, preserve that choice.
