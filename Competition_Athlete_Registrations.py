@@ -1066,6 +1066,23 @@ def _queue_roster_row_for_autofill(row: dict) -> None:
             else _raw_roster_nationality
         )
 
+    # TEMPORARY DIAGNOSTIC: persist the queue-time nationality boundary across
+    # the rerun so we can see exactly where the selected roster value is lost.
+    st.session_state["nationality_prefill_boundary_debug"] = {
+        "diagnostic_version": "2026-09-28-prefill-boundary-v1",
+        "raw_roster_nationality": _raw_roster_nationality,
+        "resolved_roster_nationality": (
+            _resolved_roster_nationality if _raw_roster_nationality else ""
+        ),
+        "prefill_nationality": prefill.get("nationality", ""),
+        "prefill_override": prefill.get("nationality_override", ""),
+        "countries_has_raw": _raw_roster_nationality in (COUNTRIES or []),
+        "countries_has_resolved": (
+            bool(_raw_roster_nationality)
+            and _resolved_roster_nationality in (COUNTRIES or [])
+        ),
+    }
+
     dob = parse_dob(prefill.get("dob_raw"))
 
     st.session_state["first_name__pending"] = prefill.get("first_name", "")
@@ -1627,6 +1644,24 @@ if athlete_form_visible:
             selected_prefill_value=_selected_snapshot_nat,
             selected_existing=_selected_existing,
         )
+
+        # TEMPORARY DIAGNOSTIC: show queue-time and post-rerun values together.
+        _nationality_debug = dict(
+            st.session_state.get("nationality_prefill_boundary_debug") or {}
+        )
+        _nationality_debug.update({
+            "selection_status": st.session_state.get("athlete_selection_status", ""),
+            "session_nationality": st.session_state.get("nationality", ""),
+            "session_override": st.session_state.get("nationality_override", ""),
+            "snapshot_nationality": _selected_snapshot.get("nationality", ""),
+            "snapshot_override": _selected_snapshot.get("nationality_override", ""),
+            "snapshot_needs_apply": st.session_state.get(
+                "selected_athlete_prefill_needs_apply", False
+            ),
+            "desired": _desired_nationality,
+            "index": _nationality_index,
+        })
+        st.write("NATIONALITY PREFILL DEBUG:", _nationality_debug)
 
         # Seed a blank keyed widget directly from the resolved selected-athlete
         # value.  Once the user makes a non-blank choice, preserve that choice.
