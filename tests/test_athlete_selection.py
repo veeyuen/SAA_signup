@@ -5,6 +5,7 @@ from signup.athlete_selection import (
     roster_row_name,
     roster_row_ic_last4,
     resolve_nationality_option,
+    nationality_widget_plan,
     sync_auto_full_name,
     search_roster_rows,
     find_new_athlete_identity_matches,
@@ -338,3 +339,27 @@ def test_roster_prefill_preserves_unconfigured_nationality_as_override():
     )
     assert prefill["nationality"] == "XYZ Exampleland"
     assert prefill["nationality_override"] == "XYZ Exampleland"
+
+
+def test_nationality_widget_plan_seeds_blank_existing_athlete_from_snapshot():
+    options, desired, index = nationality_widget_plan(
+        current_value="",
+        override_value="",
+        configured_options=["Singapore", "Malaysia", "Japan"],
+        selected_prefill_value="SGP Singapore",
+        selected_existing=True,
+    )
+    assert desired == "Singapore"
+    assert options[index] == "Singapore"
+
+
+def test_nationality_widget_plan_preserves_nonblank_user_choice():
+    options, desired, index = nationality_widget_plan(
+        current_value="Malaysia",
+        override_value="",
+        configured_options=["Singapore", "Malaysia", "Japan"],
+        selected_prefill_value="Singapore",
+        selected_existing=True,
+    )
+    assert desired == "Malaysia"
+    assert options[index] == "Malaysia"

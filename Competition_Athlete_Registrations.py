@@ -72,6 +72,7 @@ from signup.athlete_selection import (
     roster_row_name,
     roster_row_ic_last4,
     resolve_nationality_option,
+    nationality_widget_plan,
     roster_prefill_values,
     sync_auto_full_name,
     search_roster_rows,
@@ -1583,11 +1584,41 @@ if athlete_form_visible:
             st.warning("Birth Date is required.")
 
     with c6:
-        nationality_options = [""] + (COUNTRIES or [])
-        _nat_extra = (st.session_state.get("nationality_override", "") or "").strip()
-        if _nat_extra and _nat_extra not in nationality_options:
-            nationality_options = ["", _nat_extra] + [x for x in nationality_options if x != ""]
-        nationality = st.selectbox("Nationality", nationality_options, index=0, key="nationality")
+        # Build the widget default explicitly.  Live testing showed that the
+        # previous blank selectbox state could otherwise survive the rerun after
+        # "Use selected existing athlete", even though the roster snapshot had
+        # a valid nationality.  The snapshot only seeds a blank widget; any
+        # later non-blank user choice wins.
+        _selected_existing = (
+            str(st.session_state.get("athlete_selection_status", "") or "").upper()
+            == "EXISTING"
+        )
+        _selected_snapshot = st.session_state.get("selected_athlete_prefill_snapshot") or {}
+        _selected_snapshot_nat = (
+            _selected_snapshot.get("nationality")
+            or _selected_snapshot.get("nationality_override")
+            or ""
+        )
+        nationality_options, _desired_nationality, _nationality_index = nationality_widget_plan(
+            current_value=st.session_state.get("nationality", ""),
+            override_value=st.session_state.get("nationality_override", ""),
+            configured_options=(COUNTRIES or []),
+            selected_prefill_value=_selected_snapshot_nat,
+            selected_existing=_selected_existing,
+        )
+
+        # When the old widget state is blank/stale, remove it before widget
+        # construction so Streamlit honours the calculated index.
+        _current_nationality = str(st.session_state.get("nationality", "") or "").strip()
+        if _desired_nationality and _current_nationality != _desired_nationality:
+            st.session_state.pop("nationality", None)
+
+        nationality = st.selectbox(
+            "Nationality",
+            nationality_options,
+            index=_nationality_index,
+            key="nationality",
+        )
         nationality_ok = bool(str(nationality or "").strip())
         if not nationality_ok:
             st.warning("Nationality is required.")

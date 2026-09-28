@@ -158,6 +158,49 @@ def resolve_nationality_option(value: Any, options: Iterable[Any]) -> str:
 
 
 
+def nationality_widget_plan(
+    *,
+    current_value: Any,
+    override_value: Any,
+    configured_options: Iterable[Any],
+    selected_prefill_value: Any = "",
+    selected_existing: bool = False,
+) -> tuple[list[str], str, int]:
+    """Return deterministic options/default for the Nationality selectbox.
+
+    Streamlit can retain the previous blank widget value across a rerun even
+    after an existing athlete has been selected.  The selected-athlete snapshot
+    is therefore allowed to seed the widget only when the current widget value
+    is blank.  A non-blank current value always wins so a user's later edit is
+    preserved.
+    """
+    configured = []
+    for option in configured_options or []:
+        text = _text(option)
+        if text and text not in configured:
+            configured.append(text)
+
+    current = _text(current_value)
+    override = _text(override_value)
+    selected_prefill = _text(selected_prefill_value)
+
+    seed_raw = current
+    if not seed_raw and selected_existing and selected_prefill:
+        seed_raw = selected_prefill
+    if not seed_raw and override:
+        seed_raw = override
+
+    desired = resolve_nationality_option(seed_raw, configured) if seed_raw else ""
+
+    options = [""] + configured
+    for extra in (override, desired):
+        if extra and extra not in options:
+            options.insert(1, extra)
+
+    index = options.index(desired) if desired in options else 0
+    return options, desired, index
+
+
 def roster_prefill_values(row: Mapping[str, Any], nationality_options: Iterable[Any]) -> dict[str, Any]:
     """Build the canonical one-time form prefill for a selected roster athlete.
 
