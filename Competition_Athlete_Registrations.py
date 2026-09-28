@@ -1046,26 +1046,25 @@ def _queue_roster_row_for_autofill(row: dict) -> None:
     """
     prefill = roster_prefill_values(row, (COUNTRIES or []))
 
-    # Keep the roster row itself authoritative for nationality.  The candidate
-    # label is built directly from NATIONALITY, so a value can be visible in the
-    # search result even if an older/partial prefill transformation returns a
-    # blank nationality.  Normalise the raw roster value against COUNTRIES and
-    # carry it into both the pending widget state and the one-time snapshot.
-    if not str(prefill.get("nationality", "") or "").strip():
-        _raw_roster_nationality = str(row.get("NATIONALITY", "") or "").strip()
-        if _raw_roster_nationality:
-            _resolved_roster_nationality = resolve_nationality_option(
-                _raw_roster_nationality,
-                (COUNTRIES or []),
-            )
-            prefill["nationality"] = (
-                _resolved_roster_nationality or _raw_roster_nationality
-            )
-            prefill["nationality_override"] = (
-                ""
-                if _resolved_roster_nationality in (COUNTRIES or [])
-                else _raw_roster_nationality
-            )
+    # The selected roster row is the authoritative nationality source.  Resolve
+    # it here before creating either pending widget state or the prefill
+    # snapshot.  This deliberately does not depend on roster_prefill_values()
+    # having retained NATIONALITY.
+    _raw_roster_nationality = str(row.get("NATIONALITY", "") or "").strip()
+    if _raw_roster_nationality:
+        _resolved_roster_nationality = resolve_nationality_option(
+            _raw_roster_nationality,
+            (COUNTRIES or []),
+        )
+        _prefill_nationality = (
+            _resolved_roster_nationality or _raw_roster_nationality
+        )
+        prefill["nationality"] = _prefill_nationality
+        prefill["nationality_override"] = (
+            ""
+            if _prefill_nationality in (COUNTRIES or [])
+            else _raw_roster_nationality
+        )
 
     dob = parse_dob(prefill.get("dob_raw"))
 
@@ -1629,29 +1628,15 @@ if athlete_form_visible:
             selected_existing=_selected_existing,
         )
 
-        # When the old widget state is blank/stale, remove it before widget
-        # construction so Streamlit honours the calculated index.
+        # Seed a blank keyed widget directly from the resolved selected-athlete
+        # value.  Once the user makes a non-blank choice, preserve that choice.
         _current_nationality = str(st.session_state.get("nationality", "") or "").strip()
-        if _desired_nationality and _current_nationality != _desired_nationality:
-            st.session_state.pop("nationality", None)
-
-        st.write(
-            "NATIONALITY DEBUG:",
-            {
-                "session_nationality": st.session_state.get("nationality"),
-                "session_override": st.session_state.get("nationality_override"),
-                "snapshot_nationality": _selected_snapshot.get("nationality"),
-                "snapshot_override": _selected_snapshot.get("nationality_override"),
-                "desired": _desired_nationality,
-                "index": _nationality_index,
-                "options": nationality_options,
-            },
-        )
+        if _desired_nationality and not _current_nationality:
+            st.session_state["nationality"] = _desired_nationality
 
         nationality = st.selectbox(
             "Nationality",
             nationality_options,
-            index=_nationality_index,
             key="nationality",
         )
         nationality_ok = bool(str(nationality or "").strip())
