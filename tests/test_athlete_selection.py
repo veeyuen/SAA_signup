@@ -4,6 +4,9 @@ from signup.athlete_selection import (
     normalize_ui_mode,
     roster_row_name,
     search_roster_rows,
+    find_new_athlete_identity_matches,
+    IDENTITY_STRONG_MATCH,
+    IDENTITY_REVIEW,
 )
 
 
@@ -89,3 +92,137 @@ def test_unicode_name_search_is_supported():
     ]
     matches = search_roster_rows(rows, "josé")
     assert matches[0]["LAST_NAME"] == "García"
+
+
+
+def test_new_athlete_exact_canonical_identity_is_strong_match():
+    rows = [
+        {
+            "FIRST_NAME": "Wei Ming",
+            "OTHER_NAME": "John",
+            "LAST_NAME": "Tan",
+            "FULL_NAME": "Wei Ming John Tan",
+            "DOB": "2008-04-15",
+            "NRIC": "S123123A",
+            "GENDER": "Male",
+            "UNIQUE_ID": "W123A08",
+        }
+    ]
+    matches = find_new_athlete_identity_matches(
+        rows,
+        first_name="Tan",
+        other_name="John Wei Ming",
+        last_name="",
+        name_passport="Tan John Wei Ming",
+        birth_date="15/04/2008",
+        ic_last4="123A",
+        gender="Male",
+    )
+    assert len(matches) == 1
+    assert matches[0].classification == IDENTITY_STRONG_MATCH
+    assert set(matches[0].reasons) >= {"NAME_MATCH", "DOB_MATCH", "IC_LAST4_MATCH"}
+
+
+def test_new_athlete_name_and_dob_only_requires_review_not_auto_merge():
+    rows = [
+        {
+            "FULL_NAME": "Sarah Wong",
+            "DOB": "2007-09-22",
+            "NRIC": "T999456H",
+            "GENDER": "Female",
+        }
+    ]
+    matches = find_new_athlete_identity_matches(
+        rows,
+        first_name="Sarah",
+        last_name="Wong",
+        birth_date="2007-09-22",
+        ic_last4="111A",
+        gender="Female",
+    )
+    assert len(matches) == 1
+    assert matches[0].classification == IDENTITY_REVIEW
+    assert "NAME_MATCH" in matches[0].reasons
+    assert "DOB_MATCH" in matches[0].reasons
+    assert "IC_LAST4_MATCH" not in matches[0].reasons
+
+
+def test_new_athlete_ic4_and_dob_only_requires_review():
+    rows = [
+        {
+            "FULL_NAME": "Different Person",
+            "DOB": "2008-04-15",
+            "NRIC": "S123123A",
+        }
+    ]
+    matches = find_new_athlete_identity_matches(
+        rows,
+        first_name="Wei Ming",
+        last_name="Tan",
+        birth_date="2008-04-15",
+        ic_last4="123A",
+    )
+    assert len(matches) == 1
+    assert matches[0].classification == IDENTITY_REVIEW
+
+
+def test_new_athlete_single_name_signal_does_not_block_creation():
+    rows = [
+        {
+            "FULL_NAME": "Alex Tan",
+            "DOB": "2001-01-01",
+            "NRIC": "S111111A",
+        }
+    ]
+    matches = find_new_athlete_identity_matches(
+        rows,
+        first_name="Alex",
+        last_name="Tan",
+        birth_date="2005-05-05",
+        ic_last4="999Z",
+    )
+    assert matches == []
+
+
+def test_new_athlete_exact_legacy_id_is_review_signal_not_silent_merge():
+    rows = [
+        {
+            "FULL_NAME": "Existing Athlete",
+            "DOB": "2008-04-15",
+            "NRIC": "S123123A",
+            "UNIQUE_ID": "E123A08",
+        }
+    ]
+    matches = find_new_athlete_identity_matches(
+        rows,
+        first_name="Different",
+        last_name="Name",
+        birth_date="2001-01-01",
+        ic_last4="999Z",
+        derived_unique_id="E123A08",
+    )
+    assert len(matches) == 1
+    assert matches[0].classification == IDENTITY_REVIEW
+    assert "CURRENT_ID_MATCH" in matches[0].reasons
+
+
+def test_gender_conflict_downgrades_full_identity_match_to_review():
+    rows = [
+        {
+            "FULL_NAME": "Wei Ming Tan",
+            "DOB": "2008-04-15",
+            "NRIC": "S123123A",
+            "GENDER": "Female",
+        }
+    ]
+    matches = find_new_athlete_identity_matches(
+        rows,
+        first_name="Wei Ming",
+        last_name="Tan",
+        birth_date="2008-04-15",
+        ic_last4="123A",
+        gender="Male",
+    )
+    assert len(matches) == 1
+    assert matches[0].classification == IDENTITY_REVIEW
+    assert "GENDER_CONFLICT" in matches[0].reasons

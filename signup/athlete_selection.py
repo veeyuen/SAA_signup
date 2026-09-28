@@ -152,3 +152,224 @@ def search_roster_rows(
     if limit is None or limit <= 0:
         return [row for _score, _index, row in scored]
     return [row for _score, _index, row in scored[:limit]]
+
+# ---------------------------------------------------------------------------
+# New-athlete duplicate prevention
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+
+IDENTITY_STRONG_MATCH = "STRONG_MATCH"
+IDENTITY_REVIEW = "REVIEW"
+
+
+@dataclass(frozen=True)
+class AthleteIdentityMatch:
+    """One existing roster row that may represent a proposed new athlete."""
+
+    classification: str
+    row: Mapping[str, Any]
+    reasons: tuple[str, ...]
+    score: int
+
+
+def _canonical_name_key(value: Any) -> str:
+    """Return a name key that is insensitive to token order.
+
+    This deliberately does not do fuzzy spelling. It only removes punctuation,
+    case and field-order differences so ``Tan Wei Ming`` and ``Wei Ming Tan``
+    compare as the same exact token set.
+    """
+    normalized = _normalise_search(value)
+    if not normalized:
+        return ""
+    return " ".join(sorted(token for token in normalized.split(" ") if token))
+
+
+def _candidate_name_keys(
+    *,
+    first_name: Any = "",
+    other_name: Any = "",
+    last_name: Any = "",
+    name_passport: Any = "",
+) -> set[str]:
+    values = []
+    passport = _text(name_passport)
+    if passport:
+        values.append(passport)
+    structured = " ".join(
+        part
+        for part in [_text(first_name), _text(other_name), _text(last_name)]
+        if part
+    ).strip()
+    if structured:
+        values.append(structured)
+    return {key for key in (_canonical_name_key(value) for value in values) if key}
+
+
+def _row_name_keys(row: Mapping[str, Any]) -> set[str]:
+    values = [
+        _text(row.get("NAME_PASSPORT")),
+        _text(row.get("NAME_AS_PER_NRIC_PASSPORT")),
+        _text(row.get("NAME AS PER NRIC/PASSPORT")),
+        _text(row.get("FULL_NAME")),
+        roster_row_name(row),
+    ]
+    return {key for key in (_canonical_name_key(value) for value in values) if key}
+
+
+def _date_key(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, (int, float)) and value > 0:
+        # Google Sheets / Excel serial date, matching the roster loader.
+        if value < 60000:
+            return (date(1899, 12, 30) + timedelta(days=int(value))).isoformat()
+
+    raw = _text(value)
+    if not raw:
+        return ""
+
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        pass
+
+    # Prefer unambiguous ISO, then the common day-first formats used by the app.
+    for fmt in (
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d.%m.%Y",
+        "%Y-%m-%d %H:%M:%S",
+    ):
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            pass
+    return ""
+
+
+def _gender_key(value: Any) -> str:
+    normalized = _normalise_search(value)
+    if normalized in {"m", "male"}:
+        return "M"
+    if normalized in {"f", "female"}:
+        return "F"
+    return ""
+
+
+def find_new_athlete_identity_matches(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    first_name: Any = "",
+    other_name: Any = "",
+    last_name: Any = "",
+    name_passport: Any = "",
+    birth_date: Any = None,
+    ic_last4: Any = "",
+    gender: Any = "",
+    derived_unique_id: Any = "",
+    limit: int = 5,
+) -> list[AthleteIdentityMatch]:
+    """Find existing athletes that make a proposed *new* athlete unsafe to create.
+
+    Matching is intentionally conservative:
+
+    * STRONG_MATCH requires exact canonical name + full DOB + NRIC last four.
+    * REVIEW requires any two of those three identity signals, or an exact
+      current/legacy ID match.
+    * A single common signal (for example name alone) never blocks creation.
+
+    A gender conflict downgrades what would otherwise be a strong match to
+    REVIEW rather than silently deciding that either record is correct.
+    """
+    candidate_names = _candidate_name_keys(
+        first_name=first_name,
+        other_name=other_name,
+        last_name=last_name,
+        name_passport=name_passport,
+    )
+    candidate_dob = _date_key(birth_date)
+    candidate_ic4 = _normalise_search(_last4(ic_last4))
+    candidate_gender = _gender_key(gender)
+    candidate_id = _normalise_search(derived_unique_id)
+
+    matches: list[tuple[int, int, AthleteIdentityMatch]] = []
+
+    for index, row in enumerate(rows or []):
+        row_names = _row_name_keys(row)
+        row_dob = _date_key(row.get("DOB"))
+        row_ic4 = _normalise_search(
+            _last4(
+                row.get("NRIC")
+                or row.get("IC_LAST4")
+                or row.get("NRIC_LAST4")
+                or ""
+            )
+        )
+        row_gender = _gender_key(row.get("GENDER"))
+        row_ids = {
+            _normalise_search(row.get(field))
+            for field in ("ATHLETE_ID", "UNIQUE_ID", "LEGACY_UNIQUE_ID")
+            if _normalise_search(row.get(field))
+        }
+
+        name_match = bool(candidate_names and row_names and candidate_names & row_names)
+        dob_match = bool(candidate_dob and row_dob and candidate_dob == row_dob)
+        ic_match = bool(candidate_ic4 and row_ic4 and candidate_ic4 == row_ic4)
+        id_match = bool(candidate_id and candidate_id in row_ids)
+        gender_conflict = bool(
+            candidate_gender and row_gender and candidate_gender != row_gender
+        )
+
+        core_count = sum((name_match, dob_match, ic_match))
+        classification = ""
+        score = 0
+
+        if core_count == 3 and not gender_conflict:
+            classification = IDENTITY_STRONG_MATCH
+            score = 100
+        elif core_count >= 2 or id_match:
+            classification = IDENTITY_REVIEW
+            score = 60 + core_count * 10 + (10 if id_match else 0)
+
+        if not classification:
+            continue
+
+        reasons = []
+        if name_match:
+            reasons.append("NAME_MATCH")
+        if dob_match:
+            reasons.append("DOB_MATCH")
+        if ic_match:
+            reasons.append("IC_LAST4_MATCH")
+        if id_match:
+            reasons.append("CURRENT_ID_MATCH")
+        if gender_conflict:
+            reasons.append("GENDER_CONFLICT")
+
+        matches.append(
+            (
+                score,
+                index,
+                AthleteIdentityMatch(
+                    classification=classification,
+                    row=row,
+                    reasons=tuple(reasons),
+                    score=score,
+                ),
+            )
+        )
+
+    matches.sort(key=lambda item: (-item[0], item[1]))
+    resolved = [match for _score, _index, match in matches]
+    if limit is None or limit <= 0:
+        return resolved
+    return resolved[:limit]

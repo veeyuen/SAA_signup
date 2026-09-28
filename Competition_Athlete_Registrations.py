@@ -71,6 +71,9 @@ from signup.athlete_selection import (
     normalize_ui_mode as normalize_athlete_ui_mode,
     roster_row_name,
     search_roster_rows,
+    find_new_athlete_identity_matches,
+    IDENTITY_STRONG_MATCH,
+    IDENTITY_REVIEW,
 )
 from signup.cart import (
     add_item as add_cart_item,
@@ -1118,6 +1121,8 @@ def _clear_for_new_or_changed_athlete() -> None:
 
 
 athlete_form_visible = True
+new_athlete_identity_blocked = False
+new_athlete_identity_matches = []
 if athlete_ui_mode == ATHLETE_UI_SEARCH_FIRST:
     st.markdown("#### Find athlete")
     _selection_status = str(
@@ -1618,6 +1623,125 @@ if athlete_form_visible:
             if not ic_ok:
                 st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
 
+    # Search-first duplicate-prevention checkpoint for a proposed new athlete.
+    # Choosing "Create new athlete" is not proof that the athlete does not
+    # already exist. Before allowing the manual/new route to continue, compare
+    # the entered canonical identity signals against the roster master.
+    _is_search_first_new_athlete = (
+        athlete_ui_mode == ATHLETE_UI_SEARCH_FIRST
+        and str(st.session_state.get("athlete_selection_status", "") or "").strip().upper()
+        == "NEW"
+    )
+    if _is_search_first_new_athlete:
+        try:
+            _identity_roster_rows = _load_roster_rows_for_selection()
+            new_athlete_identity_matches = find_new_athlete_identity_matches(
+                _identity_roster_rows,
+                first_name=first_name,
+                other_name=other_name,
+                last_name=last_name,
+                name_passport=passport_name,
+                birth_date=birth_date,
+                ic_last4=ic_last4_norm,
+                gender=gender,
+                derived_unique_id=unique_id,
+                limit=5,
+            )
+        except Exception as exc:
+            new_athlete_identity_blocked = True
+            st.error(
+                "Unable to verify whether this athlete already exists in the "
+                "roster. A new athlete cannot be created until the identity "
+                "check succeeds. Please retry. "
+                f"({type(exc).__name__}: {exc})"
+            )
+        else:
+            if new_athlete_identity_matches:
+                new_athlete_identity_blocked = True
+                _strong_identity_match = any(
+                    match.classification == IDENTITY_STRONG_MATCH
+                    for match in new_athlete_identity_matches
+                )
+                if _strong_identity_match:
+                    st.error(
+                        "This athlete appears to already exist. Please use the "
+                        "existing athlete record instead of creating another one."
+                    )
+                else:
+                    st.error(
+                        "A possible existing athlete was found. The new athlete "
+                        "entry is paused because the identity is ambiguous and "
+                        "must not create a duplicate record."
+                    )
+
+                _identity_match_labels = [
+                    _roster_candidate_label(dict(match.row))
+                    for match in new_athlete_identity_matches
+                ]
+                _identity_match_index = st.radio(
+                    "Existing athlete candidate(s)",
+                    options=list(range(len(new_athlete_identity_matches))),
+                    key="new_athlete_identity_match",
+                    format_func=lambda idx: _identity_match_labels[int(idx)],
+                )
+                _chosen_identity_match = new_athlete_identity_matches[
+                    int(_identity_match_index)
+                ]
+                _reason_labels = {
+                    "NAME_MATCH": "name",
+                    "DOB_MATCH": "full date of birth",
+                    "IC_LAST4_MATCH": "IC last 4",
+                    "CURRENT_ID_MATCH": "current/legacy athlete ID",
+                    "GENDER_CONFLICT": "gender conflict",
+                }
+                _reasons = [
+                    _reason_labels.get(reason, reason)
+                    for reason in _chosen_identity_match.reasons
+                ]
+                if _reasons:
+                    st.caption("Matched on: " + ", ".join(_reasons) + ".")
+
+                _identity_action_col, _identity_search_col = st.columns(2)
+                with _identity_action_col:
+                    if st.button(
+                        "Use selected existing athlete",
+                        type="primary",
+                        key="use_duplicate_guard_existing_athlete",
+                        use_container_width=True,
+                    ):
+                        _queue_clear_athlete_fields()
+                        _queue_roster_row_for_autofill(
+                            dict(_chosen_identity_match.row)
+                        )
+                        st.session_state[
+                            "athlete_selection_status__pending"
+                        ] = "EXISTING"
+                        st.session_state[
+                            "athlete_search_first_query__pending"
+                        ] = ""
+                        st.rerun()
+                with _identity_search_col:
+                    if st.button(
+                        "Search existing athlete instead",
+                        key="duplicate_guard_return_to_search",
+                        use_container_width=True,
+                    ):
+                        _clear_for_new_or_changed_athlete()
+                        st.rerun()
+
+                if current_user.role == "SAA_ADMIN":
+                    st.caption(
+                        "If none of the candidates is the same person, review the "
+                        "identity in the athlete master before creating a separate "
+                        "athlete. This screen intentionally has no 'create anyway' "
+                        "override."
+                    )
+                else:
+                    st.caption(
+                        "If none of these candidates is the same person, contact "
+                        "SA Events for identity review before continuing."
+                    )
+
     c7, c8 = st.columns(2)
     contact_number = c7.text_input("Contact Number", key="contact_number")
 
@@ -1795,6 +1919,7 @@ if athlete_form_visible:
         and bool(nationality_ok)
         and bool(event_ok)
         and bool(season_best_ok)
+        and not bool(new_athlete_identity_blocked)
     )
 
 
@@ -2454,62 +2579,104 @@ if athlete_form_visible:
         elif not selected_events:
             st.error("Please select at least one event.")
         else:
-            cart_item = _build_current_athlete_cart_item()
+            # Defensive second identity check at the action boundary. The UI
+            # already disables Add-to-cart when a duplicate candidate is visible,
+            # but repeat the pure match decision here so a stale widget state or
+            # rerun cannot bypass the new-athlete guard.
+            _final_identity_matches = []
+            _final_identity_check_failed = False
+            if (
+                athlete_ui_mode == ATHLETE_UI_SEARCH_FIRST
+                and str(
+                    st.session_state.get("athlete_selection_status", "") or ""
+                ).strip().upper() == "NEW"
+            ):
+                try:
+                    _final_identity_rows = _load_roster_rows_for_selection()
+                    _final_identity_matches = find_new_athlete_identity_matches(
+                        _final_identity_rows,
+                        first_name=first_name,
+                        other_name=other_name,
+                        last_name=last_name,
+                        name_passport=passport_name,
+                        birth_date=birth_date,
+                        ic_last4=ic_last4_norm,
+                        gender=gender,
+                        derived_unique_id=unique_id,
+                        limit=5,
+                    )
+                except Exception as exc:
+                    _final_identity_check_failed = True
+                    st.error(
+                        "Unable to recheck the athlete master before adding this "
+                        "new athlete. Nothing was added to the cart. Please retry. "
+                        f"({type(exc).__name__}: {exc})"
+                    )
 
-            # One athlete should appear only once in a single order/cart. If the
-            # user wants additional events for an athlete already in the cart,
-            # remove that athlete and re-add them with all desired events selected.
-            new_candidate = candidate_from_cart_item(cart_item)
-            same_athlete_in_cart = any(
-                _same_cart_athlete(
-                    new_candidate, candidate_from_cart_item(existing_item)
-                )
-                for existing_item in get_cart()
-            )
-
-            if same_athlete_in_cart:
+            if _final_identity_check_failed:
+                pass
+            elif _final_identity_matches:
                 st.error(
-                    "This athlete is already in the current cart. Remove the "
-                    "existing athlete and re-add them with all required events "
-                    "selected so the order contains one athlete record."
+                    "This new athlete can no longer be added because an existing "
+                    "or ambiguous athlete identity match is present. Please use "
+                    "the existing athlete or return to athlete search."
                 )
             else:
-                rules_ok = _validate_cart_against_competition_rules(
-                    [cart_item],
-                    fresh=False,
-                    stage="cart-add check",
-                )
-                if rules_ok:
-                    try:
-                        integrity_result = _check_cart_item_against_transactions(
-                            cart_item,
-                            ignore_order_id=str(
-                                st.session_state.get("draft_order_id", "") or ""
-                            ).strip(),
-                            stage="cart-add check",
-                        )
-                    except Exception as exc:
-                        st.error(
-                            "Unable to verify existing competition registrations. "
-                            "The athlete was not added to the cart. Please retry. "
-                            f"({type(exc).__name__}: {exc})"
-                        )
-                    else:
-                        if integrity_result.blocked:
-                            _render_integrity_conflicts(integrity_result)
-                        else:
-                            try:
-                                add_cart_item(
-                                    cart_item,
-                                    competition_id=selected_competition_id,
-                                )
-                            except ValueError as exc:
-                                st.error(str(exc))
-                            else:
-                                _queue_clear_athlete_form()
-                                st.toast("Athlete added to cart.")
-                                st.rerun()
+                cart_item = _build_current_athlete_cart_item()
 
+                # One athlete should appear only once in a single order/cart. If the
+                # user wants additional events for an athlete already in the cart,
+                # remove that athlete and re-add them with all desired events selected.
+                new_candidate = candidate_from_cart_item(cart_item)
+                same_athlete_in_cart = any(
+                    _same_cart_athlete(
+                        new_candidate, candidate_from_cart_item(existing_item)
+                    )
+                    for existing_item in get_cart()
+                )
+
+                if same_athlete_in_cart:
+                    st.error(
+                        "This athlete is already in the current cart. Remove the "
+                        "existing athlete and re-add them with all required events "
+                        "selected so the order contains one athlete record."
+                    )
+                else:
+                    rules_ok = _validate_cart_against_competition_rules(
+                        [cart_item],
+                        fresh=False,
+                        stage="cart-add check",
+                    )
+                    if rules_ok:
+                        try:
+                            integrity_result = _check_cart_item_against_transactions(
+                                cart_item,
+                                ignore_order_id=str(
+                                    st.session_state.get("draft_order_id", "") or ""
+                                ).strip(),
+                                stage="cart-add check",
+                            )
+                        except Exception as exc:
+                            st.error(
+                                "Unable to verify existing competition registrations. "
+                                "The athlete was not added to the cart. Please retry. "
+                                f"({type(exc).__name__}: {exc})"
+                            )
+                        else:
+                            if integrity_result.blocked:
+                                _render_integrity_conflicts(integrity_result)
+                            else:
+                                try:
+                                    add_cart_item(
+                                        cart_item,
+                                        competition_id=selected_competition_id,
+                                    )
+                                except ValueError as exc:
+                                    st.error(str(exc))
+                                else:
+                                    _queue_clear_athlete_form()
+                                    st.toast("Athlete added to cart.")
+                                    st.rerun()
 
 st.divider()
 st.subheader("Order Cart")
