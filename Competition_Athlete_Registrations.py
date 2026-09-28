@@ -1635,6 +1635,19 @@ if athlete_form_visible:
         if _desired_nationality and _current_nationality != _desired_nationality:
             st.session_state.pop("nationality", None)
 
+        st.write(
+            "NATIONALITY DEBUG:",
+            {
+                "session_nationality": st.session_state.get("nationality"),
+                "session_override": st.session_state.get("nationality_override"),
+                "snapshot_nationality": _selected_snapshot.get("nationality"),
+                "snapshot_override": _selected_snapshot.get("nationality_override"),
+                "desired": _desired_nationality,
+                "index": _nationality_index,
+                "options": nationality_options,
+            },
+        )
+
         nationality = st.selectbox(
             "Nationality",
             nationality_options,
