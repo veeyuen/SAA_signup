@@ -330,6 +330,23 @@ def test_roster_prefill_normalises_veronica_recall_fields():
     assert prefill["unique_id"] == "V852E96"
 
 
+def test_roster_prefill_does_not_infer_nationality_from_singapore_team():
+    from signup.athlete_selection import roster_prefill_values
+
+    prefill = roster_prefill_values(
+        {
+            "FIRST_NAME": "VERONICA SHANTI",
+            "LAST_NAME": "PEREIRA",
+            "NATIONALITY": "",
+            "TEAM_CODE": "SGP",
+            "TEAM_NAME": "Singapore",
+        },
+        ["Singapore", "Malaysia", "Japan"],
+    )
+    assert prefill["nationality"] == ""
+    assert prefill["nationality_override"] == ""
+
+
 def test_roster_prefill_preserves_unconfigured_nationality_as_override():
     from signup.athlete_selection import roster_prefill_values
 
