@@ -1045,6 +1045,28 @@ def _queue_roster_row_for_autofill(row: dict) -> None:
     selected roster row contained valid data.
     """
     prefill = roster_prefill_values(row, (COUNTRIES or []))
+
+    # Keep the roster row itself authoritative for nationality.  The candidate
+    # label is built directly from NATIONALITY, so a value can be visible in the
+    # search result even if an older/partial prefill transformation returns a
+    # blank nationality.  Normalise the raw roster value against COUNTRIES and
+    # carry it into both the pending widget state and the one-time snapshot.
+    if not str(prefill.get("nationality", "") or "").strip():
+        _raw_roster_nationality = str(row.get("NATIONALITY", "") or "").strip()
+        if _raw_roster_nationality:
+            _resolved_roster_nationality = resolve_nationality_option(
+                _raw_roster_nationality,
+                (COUNTRIES or []),
+            )
+            prefill["nationality"] = (
+                _resolved_roster_nationality or _raw_roster_nationality
+            )
+            prefill["nationality_override"] = (
+                ""
+                if _resolved_roster_nationality in (COUNTRIES or [])
+                else _raw_roster_nationality
+            )
+
     dob = parse_dob(prefill.get("dob_raw"))
 
     st.session_state["first_name__pending"] = prefill.get("first_name", "")
