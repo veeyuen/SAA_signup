@@ -65,6 +65,13 @@ from signup.pilot_config import (
     clear_config_cache,
     require_configured_user,
 )
+from signup.athlete_selection import (
+    LEGACY as ATHLETE_UI_LEGACY,
+    SEARCH_FIRST as ATHLETE_UI_SEARCH_FIRST,
+    normalize_ui_mode as normalize_athlete_ui_mode,
+    roster_row_name,
+    search_roster_rows,
+)
 from signup.cart import (
     add_item as add_cart_item,
     cart_competition_id,
@@ -220,6 +227,37 @@ if current_user.role == "SAA_ADMIN":
             st.toast("Configuration cache cleared. Reloading master data...")
             st.rerun()
 
+_configured_athlete_ui_mode = normalize_athlete_ui_mode(
+    pilot_config.system_value(
+        "ATHLETE_REGISTRATION_UI_MODE",
+        ATHLETE_UI_SEARCH_FIRST,
+    )
+)
+athlete_ui_mode = _configured_athlete_ui_mode
+
+# During rollout, SAA Admin can compare/revert the athlete-selection UI without
+# changing code or redeploying. Ordinary users always receive SYSTEM_CONFIG.
+if current_user.role == "SAA_ADMIN":
+    with st.sidebar:
+        st.divider()
+        _athlete_ui_preview = st.selectbox(
+            "Athlete selection interface (admin preview)",
+            options=["Configured default", "Search-first", "Legacy"],
+            key="athlete_ui_admin_preview",
+            help=(
+                "Temporary session-only preview. Set SYSTEM_CONFIG "
+                "ATHLETE_REGISTRATION_UI_MODE to SEARCH_FIRST or LEGACY for the "
+                "default seen by all registration users."
+            ),
+        )
+        if _athlete_ui_preview == "Search-first":
+            athlete_ui_mode = ATHLETE_UI_SEARCH_FIRST
+        elif _athlete_ui_preview == "Legacy":
+            athlete_ui_mode = ATHLETE_UI_LEGACY
+        st.caption(
+            f"Configured default: {_configured_athlete_ui_mode.replace('_', '-').title()}"
+        )
+
 st.title(APP_TITLE)
 
 
@@ -236,6 +274,11 @@ def _queue_clear_athlete_fields() -> None:
         "full_name_signature": "",
         "athlete_roster_match": "(keep typed)",
         "unique_id_override": "",
+        "athlete_selection_status": "",
+        "selected_athlete_roster_uid": "",
+        "selected_athlete_label": "",
+        "athlete_search_first_query": "",
+        "athlete_search_first_match": 0,
         "nationality": "",
         "nationality_override": "",
         "singapore_pr": False,
@@ -898,568 +941,841 @@ with st.sidebar:
 # Defensive: ensure billing fields are bound even if sidebar UI is modified
 po_to_be_sent = st.session_state.get("po_to_be_sent", "No")
 charge_code = st.session_state.get("charge_code", "")
-st.subheader("Athlete Entry Form")
-
-# Athlete fields (no form, so dependent dropdowns update immediately)
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    st.text_input("Last Name", key="last_name")
-with c2:
-    st.text_input("First Name", key="first_name")
-with c3:
-    st.text_input("Other Name (optional)", key="other_name")
-with c4:
-    gender = st.selectbox("Gender", ["", "Male", "Female"], index=0, key="gender")
-
-# Name as per NRIC/Passport is a separate required field.
-# It is intentionally NOT auto-filled from First Name / Last Name / Full Name.
-passport_name = st.text_input("Name as per NRIC/Passport", key="name_passport")
-passport_ok = bool((passport_name or "").strip())
-if not passport_ok:
-    st.warning("Name as per NRIC/Passport is required.")
-
-# Live validation: gender (mandatory)
-gender_ok = gender in ('Male','Female')
-if not gender_ok:
-    st.warning("Gender is required (select Male or Female).")
 
 
-last_name = st.session_state.get("last_name", "")
-first_name = st.session_state.get("first_name", "")
-other_name = st.session_state.get("other_name", "")
+def _load_roster_rows_for_selection() -> list[dict]:
+    """Return the session-cached roster, reloading once when the cache is empty."""
+    if not bool(st.session_state.get("use_roster")):
+        return []
+    roster_url = (st.session_state.get("roster_sheet_url") or "").strip()
+    if not roster_url:
+        return []
 
-# If user edits any name fields after selecting from roster, clear roster-derived FULL_NAME and UNIQUE_ID
-current_name_sig = "|".join([
-    (st.session_state.get("first_name", "") or "").strip(),
-    (st.session_state.get("other_name", "") or "").strip(),
-    (st.session_state.get("last_name", "") or "").strip(),
-])
-prev_sig = (st.session_state.get("full_name_signature", "") or "").strip()
-if prev_sig and current_name_sig != prev_sig:
-    # User typed a new name; clear roster-derived fields so they don't persist
-    st.session_state["full_name__pending"] = ""
-    st.session_state["unique_id_override__pending"] = ""
-    st.session_state["db_name_override__pending"] = ""
-    st.session_state["full_name_signature__pending"] = ""
-    st.rerun()
+    rows = st.session_state.get("roster_cache_rows")
+    if (
+        isinstance(rows, list)
+        and len(rows) == 0
+        and not st.session_state.get("roster_cache_reloaded_once")
+    ):
+        st.session_state["roster_cache_reloaded_once"] = True
+        rows = load_roster(
+            roster_url,
+            worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
+        )
+        st.session_state["roster_cache_rows"] = rows
+    elif not isinstance(rows, list):
+        rows = load_roster(
+            roster_url,
+            worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
+        )
+        st.session_state["roster_cache_rows"] = rows
+    return rows if isinstance(rows, list) else []
 
 
-# Roster match selector (Google Sheet) — selecting a row fills fields (no splitting)
-search_text = (" ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()])).strip()
+def _roster_candidate_label(row: dict) -> str:
+    """Privacy-conscious candidate label for search-first athlete selection."""
+    first_name_label = str(row.get("FIRST_NAME", "") or "").strip()
+    last_name_label = str(row.get("LAST_NAME", "") or "").strip()
+    if not first_name_label:
+        full = roster_row_name(row)
+        first_name_label = full.split()[0] if full else "Athlete"
 
-_roster_enabled = bool(st.session_state.get("use_roster"))
-_roster_url = (st.session_state.get("roster_sheet_url") or "").strip()
+    label = first_name_label + (" *" if last_name_label else "")
+    details = []
+    dob = parse_dob(row.get("DOB"))
+    if dob is not None:
+        details.append(str(dob.year))
+    gender_label = str(row.get("GENDER", "") or "").strip()
+    if gender_label:
+        details.append(gender_label)
+    nationality_label = str(row.get("NATIONALITY", "") or "").strip()
+    if nationality_label:
+        details.append(nationality_label)
+    team_label = " ".join(
+        part
+        for part in [
+            str(row.get("TEAM_CODE", "") or "").strip(),
+            str(row.get("TEAM_NAME", "") or "").strip(),
+        ]
+        if part
+    ).strip()
+    if team_label:
+        details.append(team_label)
+    return label + (" | " + " | ".join(details) if details else "")
 
-# Small inline hints so you can see why the dropdown may not appear
-if not _roster_enabled:
-    st.caption("Roster search is OFF (check configuration).")
-elif not _roster_url:
-    st.caption("Roster sheet URL is empty (set ROSTER_SHEET_URL in secrets).")
-elif len(search_text) < 2:
-    st.caption("Type at least 2 characters in First/Other/Last name to search the roster.")
 
-matches = []
-roster_rows = []
-if _roster_enabled and _roster_url and len(search_text) >= 2:
-    try:
-        roster_rows = st.session_state.get("roster_cache_rows")
-        # If cache exists but is empty, try one reload per session (handles first-run load glitches)
-        if isinstance(roster_rows, list) and (len(roster_rows) == 0) and (not st.session_state.get("roster_cache_reloaded_once")):
-            st.session_state["roster_cache_reloaded_once"] = True
-            roster_rows = load_roster(
-                st.session_state.get("roster_sheet_url", ""),
-                worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
+def _queue_roster_row_for_autofill(row: dict) -> None:
+    """Queue one roster row into the existing registration widgets."""
+    full_name_sel = roster_row_name(row)
+    first_name_sel = str(row.get("FIRST_NAME", "") or "").strip()
+    last_name_sel = str(row.get("LAST_NAME", "") or "").strip()
+    other_name_sel = str(row.get("OTHER_NAME", "") or "").strip()
+    nric = str(row.get("NRIC", "") or "").strip()
+    dob = parse_dob(row.get("DOB"))
+    gender_raw = str(row.get("GENDER", "") or "").strip().upper()
+    nationality_raw = str(row.get("NATIONALITY", "") or "").strip()
+    sgpr_raw = str(
+        row.get("SINGAPORE_PR", "")
+        or row.get("SG_PR", "")
+        or row.get("PR_STATUS", "")
+        or ""
+    ).strip()
+    unique_id_sel = str(
+        row.get("ATHLETE_ID", "")
+        or row.get("UNIQUE_ID", "")
+        or row.get("LEGACY_UNIQUE_ID", "")
+        or ""
+    ).strip()
+
+    st.session_state["first_name__pending"] = first_name_sel or other_name_sel
+    st.session_state["last_name__pending"] = last_name_sel
+    st.session_state["other_name__pending"] = other_name_sel
+    st.session_state["full_name__pending"] = full_name_sel
+    roster_name_passport = str(
+        row.get("NAME_PASSPORT", "")
+        or row.get("NAME_AS_PER_NRIC_PASSPORT", "")
+        or row.get("NAME AS PER NRIC/PASSPORT", "")
+        or ""
+    ).strip()
+    if roster_name_passport:
+        st.session_state["name_passport__pending"] = roster_name_passport
+    st.session_state["full_name_signature__pending"] = "|".join(
+        [first_name_sel or other_name_sel, other_name_sel, last_name_sel]
+    )
+
+    st.session_state["ic_last4__pending"] = last4_from_nric(nric)
+    st.session_state["birth_date__pending"] = dob
+    if gender_raw in ("M", "F", "MALE", "FEMALE"):
+        st.session_state["gender__pending"] = (
+            "Male" if gender_raw.startswith("M") else "Female"
+        )
+    else:
+        st.session_state["gender__pending"] = ""
+
+    nationality_pick = _match_option_case_insensitive(
+        nationality_raw, (COUNTRIES or [])
+    )
+    if nationality_pick:
+        st.session_state["nationality__pending"] = nationality_pick
+        st.session_state["nationality_override__pending"] = ""
+    else:
+        st.session_state["nationality__pending"] = nationality_raw
+        st.session_state["nationality_override__pending"] = nationality_raw
+
+    nationality_cf = nationality_raw.casefold()
+    sgpr_cf = sgpr_raw.casefold()
+    roster_is_sg_pr = (
+        sgpr_cf in ("yes", "y", "true", "1", "pr", "singapore pr", "sg pr")
+        or nationality_cf in ("singapore pr", "sg pr")
+    )
+    st.session_state["singapore_pr__pending"] = bool(roster_is_sg_pr)
+    if roster_is_sg_pr and not nationality_pick:
+        st.session_state["nationality__pending"] = "SGP"
+        st.session_state["nationality_override__pending"] = ""
+
+    st.session_state["unique_id_override__pending"] = unique_id_sel
+
+    roster_email = str(row.get("EMAIL", "") or row.get("Email", "") or "").strip()
+    roster_contact = str(
+        row.get("CONTACT_NUMBER", "")
+        or row.get("CONTACT", "")
+        or row.get("MOBILE", "")
+        or row.get("PHONE", "")
+        or ""
+    ).strip()
+    if roster_email:
+        st.session_state["email__pending"] = roster_email
+    if roster_contact:
+        st.session_state["contact_number__pending"] = roster_contact
+
+    st.session_state["selected_athlete_roster_uid__pending"] = unique_id_sel
+    st.session_state["selected_athlete_label__pending"] = _roster_candidate_label(row)
+
+
+def _clear_for_new_or_changed_athlete() -> None:
+    _queue_clear_athlete_fields()
+    st.session_state["athlete_search_first_match__pending"] = 0
+
+
+athlete_form_visible = True
+if athlete_ui_mode == ATHLETE_UI_SEARCH_FIRST:
+    st.markdown("#### Find athlete")
+    _selection_status = str(
+        st.session_state.get("athlete_selection_status", "") or ""
+    ).strip().upper()
+
+    if _selection_status == "EXISTING":
+        selected_label = str(
+            st.session_state.get("selected_athlete_label", "") or ""
+        ).strip()
+        selected_uid = str(
+            st.session_state.get("selected_athlete_roster_uid", "") or ""
+        ).strip()
+        with st.container(border=True):
+            st.success("Existing athlete selected")
+            if selected_label:
+                st.write(selected_label)
+            if selected_uid:
+                st.caption(f"Current athlete reference: {selected_uid}")
+            if st.button("Change athlete", key="change_search_first_athlete"):
+                _clear_for_new_or_changed_athlete()
+                st.rerun()
+
+    elif _selection_status == "NEW":
+        with st.container(border=True):
+            st.info("Entering details for a new/manual athlete")
+            st.caption(
+                "The system will still run the existing duplicate and identity "
+                "checks before the athlete can be added to the cart."
             )
-            st.session_state["roster_cache_rows"] = roster_rows
-        if not isinstance(roster_rows, list):
-            roster_rows = load_roster(
-                st.session_state.get("roster_sheet_url", ""),
-                worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
-            )
-            st.session_state["roster_cache_rows"] = roster_rows
-    except Exception as e:
-        st.error(f"Roster load error: {type(e).__name__}: {repr(e)}")
+            if st.button(
+                "Search existing athlete instead",
+                key="return_to_search_first_selector",
+            ):
+                _clear_for_new_or_changed_athlete()
+                st.rerun()
+
+    else:
+        athlete_form_visible = False
+        query = st.text_input(
+            "Search existing athlete",
+            key="athlete_search_first_query",
+            placeholder="Type name, current Unique ID, team or NRIC last 4...",
+        )
         roster_rows = []
+        try:
+            roster_rows = _load_roster_rows_for_selection()
+        except Exception as exc:
+            st.error(f"Roster load error: {type(exc).__name__}: {exc}")
 
-    st.caption(f"Roster loaded: {len(roster_rows)} rows")
-    q = search_text.casefold()
-    for r in roster_rows:
-        full_name = str(r.get("FULL_NAME", "") or "")
-        fn = str(r.get("FIRST_NAME", "") or "")
-        ln = str(r.get("LAST_NAME", "") or "")
-        on = str(r.get("OTHER_NAME", "") or "")
-        team = str(r.get("TEAM_NAME", "") or "")
-        uid = str(r.get("UNIQUE_ID", "") or "")
-        nric = str(r.get("NRIC", "") or "")
-        # Match on tokens across ALL name fields (FIRST/LAST/OTHER/FULL), plus team/uid/nric(last4)
-        full_name = str(r.get("FULL_NAME", "") or "")
-        name_hay = " ".join([full_name, fn, on, ln]).casefold()
-        tokens = [t.casefold() for t in search_text.split() if t.strip()]
-        extra_hay = " ".join([team, uid, last4_from_nric(nric)]).casefold()
-        # Scored OR-matching: show suggestions even if only part of the name is typed
-        score = 0
-        if tokens:
-            score += sum(1 for t in tokens if t in name_hay)
-        if q and q in name_hay:
-            score += 2  # boost full-query name hits
-        if q and q in extra_hay:
-            score += 1
-        if score > 0:
-            matches.append((score, r))
-
-    if matches:
-        matches = [r for _, r in sorted(matches, key=lambda x: x[0], reverse=True)]
-    st.caption(f"Matches found: {len(matches)}")
-
-    if roster_rows and not matches:
-        st.info(f"No roster matches for: '{search_text}'. You can refine the search (try first name, last name, team, UID, or NRIC last-4).")
-
-    # Optional browse mode (helps confirm data is loading)
-    browse_mode = st.toggle("Browse roster (show first 25)", value=False, key="browse_roster_mode")
-    if browse_mode and roster_rows:
-        matches = roster_rows[:25]
-
-    if matches:
-        labels = []
-        for r in matches[:25]:
-            fn = str(r.get("FIRST_NAME", "") or "").strip()
-            fn_raw = str(r.get("FIRST_NAME", "") or "").strip()
-            ln = str(r.get("LAST_NAME", "") or "").strip()
-            on = str(r.get("OTHER_NAME", "") or "").strip()
-            nric = str(r.get("NRIC", "") or "").strip()
-            dob_val = parse_dob(r.get("DOB"))
-            # Privacy: only show birth year in roster match/browse labels, not full DOB.
-            if hasattr(dob_val, "strftime") and dob_val:
-                dob_str = dob_val.strftime("%Y")
-            else:
-                _dob_raw = str(r.get("DOB", "") or "").strip()
-                _year_match = re.search(r"(?:19|20)\d{2}", _dob_raw)
-                dob_str = _year_match.group(0) if _year_match else ""
-            gen = str(r.get("GENDER", "") or "").strip()
-            nat = str(r.get("NATIONALITY", "") or "").strip()
-            uid = str(r.get("UNIQUE_ID", "") or "").strip()
-            tcode = str(r.get("TEAM_CODE", "") or "").strip()
-            team = str(r.get("TEAM_NAME", "") or "").strip()
-
-            # Privacy: roster dropdown labels show first name only and redact last name.
-            # Underlying roster row still contains full details for autofill after selection.
-            first_for_label = fn or str(r.get("FIRST_NAME", "") or "").strip()
-            last_for_label = ln or str(r.get("LAST_NAME", "") or "").strip()
-            label_parts = []
-            if first_for_label:
-                label_parts.append(first_for_label)
-            if last_for_label:
-                label_parts.append("*")
-            label = " ".join(label_parts).strip() or "(unnamed roster entry)"
-            parts = []
-            n4 = last4_from_nric(nric)
-            if n4:
-                parts.append(f"NRIC(last4): {n4}")
-            if dob_str:
-                parts.append(f"{dob_str}")
-            if gen:
-                parts.append(f"{gen}")
-            if nat:
-                parts.append(f"{nat}")
-            team_piece = " ".join([p for p in [tcode, team] if p]).strip()
-            if team_piece:
-                parts.append(f"{team_piece}")
-            if parts:
-                label = label + " | " + " | ".join(parts)
-            labels.append(label)
-
-        sel_key = "athlete_roster_match"
-        options = ["(keep typed)"] + list(range(len(labels)))
-        chosen = st.selectbox(
-            "Select From List of Matches :",
-            options=options,
-            key=sel_key,
-            format_func=lambda x: "(keep typed)" if x == "(keep typed)" else labels[int(x)],
+        candidates = (
+            search_roster_rows(roster_rows, query, limit=8)
+            if len(str(query or "").strip()) >= 2
+            else []
         )
 
-        if chosen != "(keep typed)":
-            idx = int(chosen)
-            r = matches[idx]
-
-            full_name_sel = str(r.get("FULL_NAME", "") or "").strip()
-            if not full_name_sel:
-                fn_tmp = str(r.get("FIRST_NAME", "") or "").strip()
-                on_tmp = str(r.get("OTHER_NAME", "") or "").strip()
-                ln_tmp = str(r.get("LAST_NAME", "") or "").strip()
-                full_name_sel = " ".join([p for p in [fn_tmp, on_tmp, ln_tmp] if p]).strip()
-
-            fn = str(r.get("FIRST_NAME", "") or "").strip()
-            fn_raw = str(r.get("FIRST_NAME", "") or "").strip()
-            ln = str(r.get("LAST_NAME", "") or "").strip()
-            on = str(r.get("OTHER_NAME", "") or "").strip()
-            nric = str(r.get("NRIC", "") or "").strip()
-            dob = parse_dob(r.get("DOB"))
-            gender_raw = str(r.get("GENDER", "") or "").strip().upper()
-            nat_raw = str(r.get("NATIONALITY", "") or "").strip()
-            sgpr_raw = str(r.get("SINGAPORE_PR", "") or r.get("SG_PR", "") or r.get("PR_STATUS", "") or "").strip()
-            uid = str(r.get("UNIQUE_ID", "") or "").strip()
-            tname = str(r.get("TEAM_NAME", "") or "").strip()
-            tcode_raw = str(r.get("TEAM_CODE", "") or "").strip()
-
-            # Populate name fields
-            st.session_state["first_name__pending"] = fn_raw or on
-            st.session_state["last_name__pending"] = ln
-            st.session_state["other_name__pending"] = on
-            st.session_state["full_name__pending"] = full_name_sel
-            roster_name_passport = str(
-                r.get("NAME_PASSPORT", "")
-                or r.get("NAME_AS_PER_NRIC_PASSPORT", "")
-                or r.get("NAME AS PER NRIC/PASSPORT", "")
-                or ""
-            ).strip()
-            if roster_name_passport:
-                st.session_state["name_passport__pending"] = roster_name_passport
-            st.session_state["full_name_signature__pending"] = "|".join([
-                (st.session_state.get("first_name__pending", "") or "").strip(),
-                (st.session_state.get("other_name__pending", "") or "").strip(),
-                (st.session_state.get("last_name__pending", "") or "").strip(),
-            ])
-
-            # Populate other fields
-            st.session_state["ic_last4__pending"] = last4_from_nric(nric)
-            st.session_state["birth_date__pending"] = dob
-            # Gender from roster (may be blank; still mandatory to submit)
-            if gender_raw in ("M","F","MALE","FEMALE"):
-                st.session_state["gender__pending"] = ("Male" if gender_raw.startswith("M") else "Female")
-            else:
-                st.session_state["gender__pending"] = ""
-
-            # Nationality: if not in list, store as override so it still appears in the dropdown
-            nat_pick = _match_option_case_insensitive(nat_raw, (COUNTRIES or []))
-            if nat_pick:
-                st.session_state["nationality__pending"] = nat_pick
-                st.session_state["nationality_override__pending"] = ""
-            else:
-                st.session_state["nationality__pending"] = nat_raw
-                st.session_state["nationality_override__pending"] = nat_raw
-
-            _nat_cf = nat_raw.casefold()
-            _sgpr_cf = sgpr_raw.casefold()
-            roster_is_sg_pr = (
-                _sgpr_cf in ("yes", "y", "true", "1", "pr", "singapore pr", "sg pr")
-                or _nat_cf in ("singapore pr", "sg pr")
+        if len(str(query or "").strip()) < 2:
+            st.caption(
+                "Type at least 2 characters. You can search by athlete name, "
+                "current Unique ID, team or NRIC last 4."
             )
-            st.session_state["singapore_pr__pending"] = bool(roster_is_sg_pr)
-            if roster_is_sg_pr and not nat_pick:
-                # Keep nationality as an IOC/WA code while using the checkbox for PR status.
-                st.session_state["nationality__pending"] = "SGP"
-                st.session_state["nationality_override__pending"] = ""
+        elif candidates:
+            st.caption(
+                f"Showing {len(candidates)} likely match(es). Select the athlete "
+                "before continuing."
+            )
+            labels = [_roster_candidate_label(row) for row in candidates]
+            chosen_index = st.radio(
+                "Possible matches",
+                options=list(range(len(candidates))),
+                key="athlete_search_first_match",
+                format_func=lambda idx: labels[int(idx)],
+            )
+            if st.button(
+                "Use selected athlete",
+                type="primary",
+                key="use_search_first_athlete",
+            ):
+                chosen_row = candidates[int(chosen_index)]
+                _queue_roster_row_for_autofill(chosen_row)
+                st.session_state["athlete_selection_status__pending"] = "EXISTING"
+                st.session_state["athlete_search_first_query__pending"] = ""
+                st.session_state["athlete_search_first_match__pending"] = 0
+                st.rerun()
+        else:
+            st.info(
+                "No matching athlete was found. Refine the search or create a "
+                "new athlete entry."
+            )
 
-            # Unique ID override from roster
-            st.session_state["unique_id_override__pending"] = uid
-            # Optional roster fields, if available
-            roster_email = str(r.get("EMAIL", "") or r.get("Email", "") or "").strip()
-            roster_contact = str(
-                r.get("CONTACT_NUMBER", "")
-                or r.get("CONTACT", "")
-                or r.get("MOBILE", "")
-                or r.get("PHONE", "")
-                or ""
-            ).strip()
-            if roster_email:
-                st.session_state["email__pending"] = roster_email
-            if roster_contact:
-                st.session_state["contact_number__pending"] = roster_contact
-
-
-            # Team fields:
-            # The form now uses Team Name as the selected widget and shows Team Code automatically.
-            # Therefore we must set BOTH the code-related state and the team_name_selected widget key.
-            tcode_pick = _match_option_case_insensitive(tcode_raw, TEAM_CODES)
-            resolved_team_code = tcode_pick or tcode_raw
-            resolved_team_name = tname or (get_team_name(resolved_team_code) if resolved_team_code else "")
-
-            if tcode_pick:
-                st.session_state["team_code__pending"] = tcode_pick
-                st.session_state["team_code_override__pending"] = ""
-            else:
-                st.session_state["team_code__pending"] = tcode_raw
-                st.session_state["team_code_override__pending"] = tcode_raw
-
-            if resolved_team_name:
-                st.session_state["team_name_selected__pending"] = resolved_team_name
-                st.session_state["team_name_override__pending"] = resolved_team_name
-            else:
-                st.session_state["team_name_selected__pending"] = ""
-                st.session_state["team_name_override__pending"] = ""
-
-            st.session_state["athlete_roster_match__pending"] = "(keep typed)"
+        if st.button(
+            "+ Create new athlete",
+            key="create_new_search_first_athlete",
+        ):
+            _clear_for_new_or_changed_athlete()
+            st.session_state["athlete_selection_status__pending"] = "NEW"
             st.rerun()
 
+        if cart_has_items():
+            st.caption(
+                "Your existing cart remains available below; you do not need to "
+                "select another athlete before reviewing or submitting it."
+            )
 
-# Combined name (display)
-typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
-db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
+if athlete_form_visible:
+    st.subheader("Athlete Entry Form")
 
-# Full Name (auto) — editable
-full_name_display = (st.session_state.get("full_name", "") or "").strip()
-if (not full_name_display) and typed_full_name:
-    # Pre-fill from typed First/Other/Last (user can edit)
-    st.session_state["full_name"] = typed_full_name
-    full_name_display = typed_full_name
-st.text_input("Full Name (auto)", key="full_name")
+    # Athlete fields (no form, so dependent dropdowns update immediately)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.text_input("Last Name", key="last_name")
+    with c2:
+        st.text_input("First Name", key="first_name")
+    with c3:
+        st.text_input("Other Name (optional)", key="other_name")
+    with c4:
+        gender = st.selectbox("Gender", ["", "Male", "Female"], index=0, key="gender")
 
-# Live validation: name presence
-selected_from_roster = bool((st.session_state.get("unique_id_override", "") or "").strip() or (db_name_override or "").strip())
-first_last_ok = selected_from_roster or (bool((first_name or "").strip()) and bool((last_name or "").strip()))
-name_ok = passport_ok and first_last_ok
-if not first_last_ok:
-    st.warning("First Name and Last Name are required unless you selected the athlete from the roster.")
+    # Name as per NRIC/Passport is a separate required field.
+    # It is intentionally NOT auto-filled from First Name / Last Name / Full Name.
+    passport_name = st.text_input("Name as per NRIC/Passport", key="name_passport")
+    passport_ok = bool((passport_name or "").strip())
+    if not passport_ok:
+        st.warning("Name as per NRIC/Passport is required.")
 
-
-c4, c5, c6 = st.columns(3)
-with c4:
-    # Birth Date input (allow rendering even if a preloaded value is later than today)
-    _birth_cur = st.session_state.get("birth_date")
-    _birth_max = dt.date.today()
-    if isinstance(_birth_cur, dt.date) and _birth_cur > _birth_max:
-        _birth_max = _birth_cur
-    birth_date = st.date_input(
-        "Birth Date",
-        value=_birth_cur if isinstance(_birth_cur, dt.date) else None,
-        min_value=dt.date(1900, 1, 1),
-        max_value=_birth_max,
-        key="birth_date",
-        format="DD-MM-YYYY",
-    )
-    # Live validation: birth date
-    birth_ok = (st.session_state.get("birth_date") is not None) and (st.session_state.get("birth_date") <= dt.date.today())
-    if st.session_state.get("birth_date") and st.session_state.get("birth_date") > dt.date.today():
-        st.warning("Birth Date cannot be in the future.")
-    elif not birth_ok:
-        st.warning("Birth Date is required.")
-
-with c6:
-    nationality_options = [""] + (COUNTRIES or [])
-    _nat_extra = (st.session_state.get("nationality_override", "") or "").strip()
-    if _nat_extra and _nat_extra not in nationality_options:
-        nationality_options = ["", _nat_extra] + [x for x in nationality_options if x != ""]
-    nationality = st.selectbox("Nationality", nationality_options, index=0, key="nationality")
-    nationality_ok = bool(str(nationality or "").strip())
-    if not nationality_ok:
-        st.warning("Nationality is required.")
-    is_singapore = (str(nationality or '').strip().upper() in ('SGP','SIN','SG','SINGAPORE'))
-    # Singapore PR status (separate from nationality code)
-    singapore_pr = st.checkbox('Singapore PR?', key='singapore_pr')
+    # Live validation: gender (mandatory)
+    gender_ok = gender in ('Male','Female')
+    if not gender_ok:
+        st.warning("Gender is required (select Male or Female).")
 
 
+    last_name = st.session_state.get("last_name", "")
+    first_name = st.session_state.get("first_name", "")
+    other_name = st.session_state.get("other_name", "")
 
-# Unique ID (display) — placed under Birth Date / IC row
-unique_id_override = (st.session_state.get("unique_id_override", "") or "").strip()
-_ic_for_uid = normalize_ic_last4(st.session_state.get("ic_last4", "") or "")
-unique_id = unique_id_override or (compute_unique_id(first_name, _ic_for_uid, birth_date) if birth_date else "")
-uid_from_roster = unique_id_override
-if uid_from_roster:
-    st.text_input("Unique ID (from roster)", value=uid_from_roster, disabled=True)
-else:
-    st.text_input("Unique ID (auto)", value=(unique_id or ""), disabled=True)
+    # If user edits any name fields after selecting from roster, clear roster-derived FULL_NAME and UNIQUE_ID
+    current_name_sig = "|".join([
+        (st.session_state.get("first_name", "") or "").strip(),
+        (st.session_state.get("other_name", "") or "").strip(),
+        (st.session_state.get("last_name", "") or "").strip(),
+    ])
+    prev_sig = (st.session_state.get("full_name_signature", "") or "").strip()
+    if prev_sig and current_name_sig != prev_sig:
+        # User typed a new name; clear roster-derived fields so they don't persist.
+        # In search-first mode this also unlinks the selected roster identity and
+        # treats the edited details as a manual/new-athlete entry.
+        st.session_state["full_name__pending"] = ""
+        st.session_state["unique_id_override__pending"] = ""
+        st.session_state["db_name_override__pending"] = ""
+        st.session_state["full_name_signature__pending"] = ""
+        if (
+            athlete_ui_mode == ATHLETE_UI_SEARCH_FIRST
+            and str(st.session_state.get("athlete_selection_status", "")).upper()
+            == "EXISTING"
+        ):
+            st.session_state["athlete_selection_status__pending"] = "NEW"
+            st.session_state["selected_athlete_roster_uid__pending"] = ""
+            st.session_state["selected_athlete_label__pending"] = ""
+        st.rerun()
 
 
-with c5:
-    ic_last4 = st.text_input("IC Number (last 4)", key="ic_last4")
-    # Live validation: IC last-4 (3 digits + 1 letter)
-    ic_last4_norm = normalize_ic_last4(ic_last4)  # ALWAYS define
-    # IC last-4 is required if Singapore PR is ticked, or if Singapore athlete has no UNIQUE_ID
-    unique_id_present_for_ic = bool((st.session_state.get("unique_id_override", "") or "").strip() or (st.session_state.get("unique_id", "") or "").strip())
-    ic_required = bool(singapore_pr) or (bool(is_singapore) and (not unique_id_present_for_ic))
-    ic_ok = True
-    if ic_required and not ic_last4_norm:
-        ic_ok = False
-        st.warning("IC format: 3 digits + 1 letter (e.g., 123A) — required when Singapore PR is ticked, or when a Singapore athlete has no UNIQUE_ID.")
-    elif (not ic_last4_norm):
-        # Not required and not provided
-        ic_ok = True
-    elif len(ic_last4_norm) < 4:
-        ic_ok = False
-        st.warning("IC last 4 is incomplete (e.g., 123A).")
+    if athlete_ui_mode == ATHLETE_UI_LEGACY:
+        # Roster match selector (Google Sheet) — selecting a row fills fields (no splitting)
+        search_text = (" ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()])).strip()
+
+        _roster_enabled = bool(st.session_state.get("use_roster"))
+        _roster_url = (st.session_state.get("roster_sheet_url") or "").strip()
+
+        # Small inline hints so you can see why the dropdown may not appear
+        if not _roster_enabled:
+            st.caption("Roster search is OFF (check configuration).")
+        elif not _roster_url:
+            st.caption("Roster sheet URL is empty (set ROSTER_SHEET_URL in secrets).")
+        elif len(search_text) < 2:
+            st.caption("Type at least 2 characters in First/Other/Last name to search the roster.")
+
+        matches = []
+        roster_rows = []
+        if _roster_enabled and _roster_url and len(search_text) >= 2:
+            try:
+                roster_rows = st.session_state.get("roster_cache_rows")
+                # If cache exists but is empty, try one reload per session (handles first-run load glitches)
+                if isinstance(roster_rows, list) and (len(roster_rows) == 0) and (not st.session_state.get("roster_cache_reloaded_once")):
+                    st.session_state["roster_cache_reloaded_once"] = True
+                    roster_rows = load_roster(
+                        st.session_state.get("roster_sheet_url", ""),
+                        worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
+                    )
+                    st.session_state["roster_cache_rows"] = roster_rows
+                if not isinstance(roster_rows, list):
+                    roster_rows = load_roster(
+                        st.session_state.get("roster_sheet_url", ""),
+                        worksheet=((st.session_state.get("roster_worksheet") or "").strip() or None),
+                    )
+                    st.session_state["roster_cache_rows"] = roster_rows
+            except Exception as e:
+                st.error(f"Roster load error: {type(e).__name__}: {repr(e)}")
+                roster_rows = []
+
+            st.caption(f"Roster loaded: {len(roster_rows)} rows")
+            q = search_text.casefold()
+            for r in roster_rows:
+                full_name = str(r.get("FULL_NAME", "") or "")
+                fn = str(r.get("FIRST_NAME", "") or "")
+                ln = str(r.get("LAST_NAME", "") or "")
+                on = str(r.get("OTHER_NAME", "") or "")
+                team = str(r.get("TEAM_NAME", "") or "")
+                uid = str(r.get("UNIQUE_ID", "") or "")
+                nric = str(r.get("NRIC", "") or "")
+                # Match on tokens across ALL name fields (FIRST/LAST/OTHER/FULL), plus team/uid/nric(last4)
+                full_name = str(r.get("FULL_NAME", "") or "")
+                name_hay = " ".join([full_name, fn, on, ln]).casefold()
+                tokens = [t.casefold() for t in search_text.split() if t.strip()]
+                extra_hay = " ".join([team, uid, last4_from_nric(nric)]).casefold()
+                # Scored OR-matching: show suggestions even if only part of the name is typed
+                score = 0
+                if tokens:
+                    score += sum(1 for t in tokens if t in name_hay)
+                if q and q in name_hay:
+                    score += 2  # boost full-query name hits
+                if q and q in extra_hay:
+                    score += 1
+                if score > 0:
+                    matches.append((score, r))
+
+            if matches:
+                matches = [r for _, r in sorted(matches, key=lambda x: x[0], reverse=True)]
+            st.caption(f"Matches found: {len(matches)}")
+
+            if roster_rows and not matches:
+                st.info(f"No roster matches for: '{search_text}'. You can refine the search (try first name, last name, team, UID, or NRIC last-4).")
+
+            # Optional browse mode (helps confirm data is loading)
+            browse_mode = st.toggle("Browse roster (show first 25)", value=False, key="browse_roster_mode")
+            if browse_mode and roster_rows:
+                matches = roster_rows[:25]
+
+            if matches:
+                labels = []
+                for r in matches[:25]:
+                    fn = str(r.get("FIRST_NAME", "") or "").strip()
+                    fn_raw = str(r.get("FIRST_NAME", "") or "").strip()
+                    ln = str(r.get("LAST_NAME", "") or "").strip()
+                    on = str(r.get("OTHER_NAME", "") or "").strip()
+                    nric = str(r.get("NRIC", "") or "").strip()
+                    dob_val = parse_dob(r.get("DOB"))
+                    # Privacy: only show birth year in roster match/browse labels, not full DOB.
+                    if hasattr(dob_val, "strftime") and dob_val:
+                        dob_str = dob_val.strftime("%Y")
+                    else:
+                        _dob_raw = str(r.get("DOB", "") or "").strip()
+                        _year_match = re.search(r"(?:19|20)\d{2}", _dob_raw)
+                        dob_str = _year_match.group(0) if _year_match else ""
+                    gen = str(r.get("GENDER", "") or "").strip()
+                    nat = str(r.get("NATIONALITY", "") or "").strip()
+                    uid = str(r.get("UNIQUE_ID", "") or "").strip()
+                    tcode = str(r.get("TEAM_CODE", "") or "").strip()
+                    team = str(r.get("TEAM_NAME", "") or "").strip()
+
+                    # Privacy: roster dropdown labels show first name only and redact last name.
+                    # Underlying roster row still contains full details for autofill after selection.
+                    first_for_label = fn or str(r.get("FIRST_NAME", "") or "").strip()
+                    last_for_label = ln or str(r.get("LAST_NAME", "") or "").strip()
+                    label_parts = []
+                    if first_for_label:
+                        label_parts.append(first_for_label)
+                    if last_for_label:
+                        label_parts.append("*")
+                    label = " ".join(label_parts).strip() or "(unnamed roster entry)"
+                    parts = []
+                    n4 = last4_from_nric(nric)
+                    if n4:
+                        parts.append(f"NRIC(last4): {n4}")
+                    if dob_str:
+                        parts.append(f"{dob_str}")
+                    if gen:
+                        parts.append(f"{gen}")
+                    if nat:
+                        parts.append(f"{nat}")
+                    team_piece = " ".join([p for p in [tcode, team] if p]).strip()
+                    if team_piece:
+                        parts.append(f"{team_piece}")
+                    if parts:
+                        label = label + " | " + " | ".join(parts)
+                    labels.append(label)
+
+                sel_key = "athlete_roster_match"
+                options = ["(keep typed)"] + list(range(len(labels)))
+                chosen = st.selectbox(
+                    "Select From List of Matches :",
+                    options=options,
+                    key=sel_key,
+                    format_func=lambda x: "(keep typed)" if x == "(keep typed)" else labels[int(x)],
+                )
+
+                if chosen != "(keep typed)":
+                    idx = int(chosen)
+                    r = matches[idx]
+
+                    full_name_sel = str(r.get("FULL_NAME", "") or "").strip()
+                    if not full_name_sel:
+                        fn_tmp = str(r.get("FIRST_NAME", "") or "").strip()
+                        on_tmp = str(r.get("OTHER_NAME", "") or "").strip()
+                        ln_tmp = str(r.get("LAST_NAME", "") or "").strip()
+                        full_name_sel = " ".join([p for p in [fn_tmp, on_tmp, ln_tmp] if p]).strip()
+
+                    fn = str(r.get("FIRST_NAME", "") or "").strip()
+                    fn_raw = str(r.get("FIRST_NAME", "") or "").strip()
+                    ln = str(r.get("LAST_NAME", "") or "").strip()
+                    on = str(r.get("OTHER_NAME", "") or "").strip()
+                    nric = str(r.get("NRIC", "") or "").strip()
+                    dob = parse_dob(r.get("DOB"))
+                    gender_raw = str(r.get("GENDER", "") or "").strip().upper()
+                    nat_raw = str(r.get("NATIONALITY", "") or "").strip()
+                    sgpr_raw = str(r.get("SINGAPORE_PR", "") or r.get("SG_PR", "") or r.get("PR_STATUS", "") or "").strip()
+                    uid = str(r.get("UNIQUE_ID", "") or "").strip()
+                    tname = str(r.get("TEAM_NAME", "") or "").strip()
+                    tcode_raw = str(r.get("TEAM_CODE", "") or "").strip()
+
+                    # Populate name fields
+                    st.session_state["first_name__pending"] = fn_raw or on
+                    st.session_state["last_name__pending"] = ln
+                    st.session_state["other_name__pending"] = on
+                    st.session_state["full_name__pending"] = full_name_sel
+                    roster_name_passport = str(
+                        r.get("NAME_PASSPORT", "")
+                        or r.get("NAME_AS_PER_NRIC_PASSPORT", "")
+                        or r.get("NAME AS PER NRIC/PASSPORT", "")
+                        or ""
+                    ).strip()
+                    if roster_name_passport:
+                        st.session_state["name_passport__pending"] = roster_name_passport
+                    st.session_state["full_name_signature__pending"] = "|".join([
+                        (st.session_state.get("first_name__pending", "") or "").strip(),
+                        (st.session_state.get("other_name__pending", "") or "").strip(),
+                        (st.session_state.get("last_name__pending", "") or "").strip(),
+                    ])
+
+                    # Populate other fields
+                    st.session_state["ic_last4__pending"] = last4_from_nric(nric)
+                    st.session_state["birth_date__pending"] = dob
+                    # Gender from roster (may be blank; still mandatory to submit)
+                    if gender_raw in ("M","F","MALE","FEMALE"):
+                        st.session_state["gender__pending"] = ("Male" if gender_raw.startswith("M") else "Female")
+                    else:
+                        st.session_state["gender__pending"] = ""
+
+                    # Nationality: if not in list, store as override so it still appears in the dropdown
+                    nat_pick = _match_option_case_insensitive(nat_raw, (COUNTRIES or []))
+                    if nat_pick:
+                        st.session_state["nationality__pending"] = nat_pick
+                        st.session_state["nationality_override__pending"] = ""
+                    else:
+                        st.session_state["nationality__pending"] = nat_raw
+                        st.session_state["nationality_override__pending"] = nat_raw
+
+                    _nat_cf = nat_raw.casefold()
+                    _sgpr_cf = sgpr_raw.casefold()
+                    roster_is_sg_pr = (
+                        _sgpr_cf in ("yes", "y", "true", "1", "pr", "singapore pr", "sg pr")
+                        or _nat_cf in ("singapore pr", "sg pr")
+                    )
+                    st.session_state["singapore_pr__pending"] = bool(roster_is_sg_pr)
+                    if roster_is_sg_pr and not nat_pick:
+                        # Keep nationality as an IOC/WA code while using the checkbox for PR status.
+                        st.session_state["nationality__pending"] = "SGP"
+                        st.session_state["nationality_override__pending"] = ""
+
+                    # Unique ID override from roster
+                    st.session_state["unique_id_override__pending"] = uid
+                    # Optional roster fields, if available
+                    roster_email = str(r.get("EMAIL", "") or r.get("Email", "") or "").strip()
+                    roster_contact = str(
+                        r.get("CONTACT_NUMBER", "")
+                        or r.get("CONTACT", "")
+                        or r.get("MOBILE", "")
+                        or r.get("PHONE", "")
+                        or ""
+                    ).strip()
+                    if roster_email:
+                        st.session_state["email__pending"] = roster_email
+                    if roster_contact:
+                        st.session_state["contact_number__pending"] = roster_contact
+
+
+                    # Team fields:
+                    # The form now uses Team Name as the selected widget and shows Team Code automatically.
+                    # Therefore we must set BOTH the code-related state and the team_name_selected widget key.
+                    tcode_pick = _match_option_case_insensitive(tcode_raw, TEAM_CODES)
+                    resolved_team_code = tcode_pick or tcode_raw
+                    resolved_team_name = tname or (get_team_name(resolved_team_code) if resolved_team_code else "")
+
+                    if tcode_pick:
+                        st.session_state["team_code__pending"] = tcode_pick
+                        st.session_state["team_code_override__pending"] = ""
+                    else:
+                        st.session_state["team_code__pending"] = tcode_raw
+                        st.session_state["team_code_override__pending"] = tcode_raw
+
+                    if resolved_team_name:
+                        st.session_state["team_name_selected__pending"] = resolved_team_name
+                        st.session_state["team_name_override__pending"] = resolved_team_name
+                    else:
+                        st.session_state["team_name_selected__pending"] = ""
+                        st.session_state["team_name_override__pending"] = ""
+
+                    st.session_state["athlete_roster_match__pending"] = "(keep typed)"
+                    st.rerun()
+
+
+    # Combined name (display)
+    typed_full_name = " ".join([p for p in [first_name, other_name, last_name] if (p or "").strip()]).strip()
+    db_name_override = (st.session_state.get("db_name_override", "") or "").strip()
+
+    # Full Name (auto) — editable
+    full_name_display = (st.session_state.get("full_name", "") or "").strip()
+    if (not full_name_display) and typed_full_name:
+        # Pre-fill from typed First/Other/Last (user can edit)
+        st.session_state["full_name"] = typed_full_name
+        full_name_display = typed_full_name
+    st.text_input("Full Name (auto)", key="full_name")
+
+    # Live validation: name presence
+    selected_from_roster = bool((st.session_state.get("unique_id_override", "") or "").strip() or (db_name_override or "").strip())
+    first_last_ok = selected_from_roster or (bool((first_name or "").strip()) and bool((last_name or "").strip()))
+    name_ok = passport_ok and first_last_ok
+    if not first_last_ok:
+        st.warning("First Name and Last Name are required unless you selected the athlete from the roster.")
+
+
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        # Birth Date input (allow rendering even if a preloaded value is later than today)
+        _birth_cur = st.session_state.get("birth_date")
+        _birth_max = dt.date.today()
+        if isinstance(_birth_cur, dt.date) and _birth_cur > _birth_max:
+            _birth_max = _birth_cur
+        birth_date = st.date_input(
+            "Birth Date",
+            value=_birth_cur if isinstance(_birth_cur, dt.date) else None,
+            min_value=dt.date(1900, 1, 1),
+            max_value=_birth_max,
+            key="birth_date",
+            format="DD-MM-YYYY",
+        )
+        # Live validation: birth date
+        birth_ok = (st.session_state.get("birth_date") is not None) and (st.session_state.get("birth_date") <= dt.date.today())
+        if st.session_state.get("birth_date") and st.session_state.get("birth_date") > dt.date.today():
+            st.warning("Birth Date cannot be in the future.")
+        elif not birth_ok:
+            st.warning("Birth Date is required.")
+
+    with c6:
+        nationality_options = [""] + (COUNTRIES or [])
+        _nat_extra = (st.session_state.get("nationality_override", "") or "").strip()
+        if _nat_extra and _nat_extra not in nationality_options:
+            nationality_options = ["", _nat_extra] + [x for x in nationality_options if x != ""]
+        nationality = st.selectbox("Nationality", nationality_options, index=0, key="nationality")
+        nationality_ok = bool(str(nationality or "").strip())
+        if not nationality_ok:
+            st.warning("Nationality is required.")
+        is_singapore = (str(nationality or '').strip().upper() in ('SGP','SIN','SG','SINGAPORE'))
+        # Singapore PR status (separate from nationality code)
+        singapore_pr = st.checkbox('Singapore PR?', key='singapore_pr')
+
+
+
+    # Unique ID (display) — placed under Birth Date / IC row
+    unique_id_override = (st.session_state.get("unique_id_override", "") or "").strip()
+    _ic_for_uid = normalize_ic_last4(st.session_state.get("ic_last4", "") or "")
+    unique_id = unique_id_override or (compute_unique_id(first_name, _ic_for_uid, birth_date) if birth_date else "")
+    uid_from_roster = unique_id_override
+    if uid_from_roster:
+        st.text_input("Unique ID (from roster)", value=uid_from_roster, disabled=True)
     else:
-        ic_ok = is_valid_ic_last4(ic_last4_norm)
-        if not ic_ok:
-            st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
-
-c7, c8 = st.columns(2)
-contact_number = c7.text_input("Contact Number", key="contact_number")
-
-# Live validation: contact number
-contact_ok = bool((contact_number or '').strip())
-if not contact_ok:
-    st.warning("Contact Number is required.")
-
-email = c8.text_input("Email", key="email")
-
-# Live validation: email
-email_norm = normalize_email(email)
-email_ok = True
-if email_norm:
-    email_ok = is_valid_email(email_norm)
-
-email_present = bool(email_norm)
-if not email_present:
-    st.warning("Email is required.")
-    if not email_ok:
-        st.error("Please enter a valid email address (e.g., name@example.com).")
+        st.text_input("Unique ID (auto)", value=(unique_id or ""), disabled=True)
 
 
-c9, c10 = st.columns(2)
+    with c5:
+        ic_last4 = st.text_input("IC Number (last 4)", key="ic_last4")
+        # Live validation: IC last-4 (3 digits + 1 letter)
+        ic_last4_norm = normalize_ic_last4(ic_last4)  # ALWAYS define
+        # IC last-4 is required if Singapore PR is ticked, or if Singapore athlete has no UNIQUE_ID
+        unique_id_present_for_ic = bool((st.session_state.get("unique_id_override", "") or "").strip() or (st.session_state.get("unique_id", "") or "").strip())
+        ic_required = bool(singapore_pr) or (bool(is_singapore) and (not unique_id_present_for_ic))
+        ic_ok = True
+        if ic_required and not ic_last4_norm:
+            ic_ok = False
+            st.warning("IC format: 3 digits + 1 letter (e.g., 123A) — required when Singapore PR is ticked, or when a Singapore athlete has no UNIQUE_ID.")
+        elif (not ic_last4_norm):
+            # Not required and not provided
+            ic_ok = True
+        elif len(ic_last4_norm) < 4:
+            ic_ok = False
+            st.warning("IC last 4 is incomplete (e.g., 123A).")
+        else:
+            ic_ok = is_valid_ic_last4(ic_last4_norm)
+            if not ic_ok:
+                st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
 
-team_name_row = current_organization.organization_name
-team_code = current_organization.team_code
-st.session_state["team_code"] = team_code
-c9.text_input("Team Name", value=team_name_row, disabled=True)
-c10.text_input("Team Code", value=team_code, disabled=True)
+    c7, c8 = st.columns(2)
+    contact_number = c7.text_input("Contact Number", key="contact_number")
 
-# Divisions and events are driven by the competition configuration worksheets.
-c11, c12 = st.columns(2)
-try:
-    _division_rows = pilot_config.division_rows(
-        competition_id=selected_competition_id,
-        gender=gender,
-        birth_date=birth_date if birth_ok else None,
-        competition_start_at=selected_competition.competition_start_at,
-    )
-except PilotConfigError as exc:
-    st.error(f"Configuration error: {exc}")
-    st.stop()
+    # Live validation: contact number
+    contact_ok = bool((contact_number or '').strip())
+    if not contact_ok:
+        st.warning("Contact Number is required.")
 
-_active_division_keys = [row["code"] for row in _division_rows]
-_division_labels = {
-    row["code"]: row["label"] for row in _division_rows
-}
+    email = c8.text_input("Email", key="email")
 
-if _active_division_keys:
-    if st.session_state.get("event_division") not in _active_division_keys:
-        st.session_state["event_division"] = _active_division_keys[0]
+    # Live validation: email
+    email_norm = normalize_email(email)
+    email_ok = True
+    if email_norm:
+        email_ok = is_valid_email(email_norm)
 
-event_division = c11.selectbox(
-    "Event Division",
-    options=_active_division_keys,
-    format_func=lambda code: (
-        f"{code} - {_division_labels.get(code, code)}"
-        if _division_labels.get(code, code) != code
-        else code
-    ),
-    key="event_division",
-    disabled=(not _active_division_keys),
-)
+    email_present = bool(email_norm)
+    if not email_present:
+        st.warning("Email is required.")
+        if not email_ok:
+            st.error("Please enter a valid email address (e.g., name@example.com).")
 
-try:
-    event_opts_raw = (
-        pilot_config.event_options(
+
+    c9, c10 = st.columns(2)
+
+    team_name_row = current_organization.organization_name
+    team_code = current_organization.team_code
+    st.session_state["team_code"] = team_code
+    c9.text_input("Team Name", value=team_name_row, disabled=True)
+    c10.text_input("Team Code", value=team_code, disabled=True)
+
+    # Divisions and events are driven by the competition configuration worksheets.
+    c11, c12 = st.columns(2)
+    try:
+        _division_rows = pilot_config.division_rows(
             competition_id=selected_competition_id,
             gender=gender,
-            division_code=event_division if _active_division_keys else "",
+            birth_date=birth_date if birth_ok else None,
+            competition_start_at=selected_competition.competition_start_at,
         )
-        if gender_ok and _active_division_keys
-        else []
+    except PilotConfigError as exc:
+        st.error(f"Configuration error: {exc}")
+        st.stop()
+
+    _active_division_keys = [row["code"] for row in _division_rows]
+    _division_labels = {
+        row["code"]: row["label"] for row in _division_rows
+    }
+
+    if _active_division_keys:
+        if st.session_state.get("event_division") not in _active_division_keys:
+            st.session_state["event_division"] = _active_division_keys[0]
+
+    event_division = c11.selectbox(
+        "Event Division",
+        options=_active_division_keys,
+        format_func=lambda code: (
+            f"{code} - {_division_labels.get(code, code)}"
+            if _division_labels.get(code, code) != code
+            else code
+        ),
+        key="event_division",
+        disabled=(not _active_division_keys),
     )
-except PilotConfigError as exc:
-    st.error(f"Configuration error: {exc}")
-    st.stop()
 
-event_opts = sorted(event_opts_raw, key=lambda _x: _event_sort_key(_x[0]))
-event_names = [name for name, _code in event_opts]
-
-prev_selected = st.session_state.get("events_selected", [])
-if not isinstance(prev_selected, list):
-    prev_selected = []
-prev_selected_valid = [e for e in prev_selected if e in event_names]
-if prev_selected_valid != prev_selected:
-    st.session_state["events_selected"] = prev_selected_valid
-
-selected_events = c12.multiselect(
-    "Select event(s)",
-    options=event_names,
-    default=prev_selected_valid,
-    key="events_selected",
-    disabled=(not event_names),
-)
-
-# Live validation: DOB first determines age-eligible divisions; gender + division
-# then determine the configured event list.
-event_ok = bool(event_opts) and len(selected_events) > 0
-
-if not gender_ok:
-    st.info("Select Gender to load the available events.")
-elif birth_ok and not _active_division_keys:
-    athlete_age = pilot_config.age_on_date(
-        birth_date,
-        selected_competition.competition_start_at,
-    )
-    competition_date = (
-        selected_competition.competition_start_at.date()
-        if selected_competition.competition_start_at is not None
-        else None
-    )
-    age_text = f"age {athlete_age}" if athlete_age is not None else "this age"
-    date_text = (
-        f" on {competition_date.strftime('%d-%m-%Y')}"
-        if competition_date is not None
-        else ""
-    )
-    st.warning(
-        "No eligible divisions with configured events are available for "
-        f"{age_text}{date_text}."
-    )
-elif _active_division_keys and not event_names:
-    st.warning(
-        "No active events are configured for "
-        f"{gender} / {event_division} in {selected_competition.competition_name}."
-    )
-elif not selected_events:
-    st.warning("Please select at least one event for the selected division.")
-
-
-def _season_best_state_key(event_name: str) -> str:
-    safe = re.sub(r"[^a-zA-Z0-9]+", "_", str(event_name or "")).strip("_")
-    return f"season_best_event__{safe}"
-
-
-season_best_by_event = {}
-if selected_events:
-    st.markdown("**Season Best by event**")
-    st.caption("Enter one Season Best for each selected event.")
-    _sb_columns = st.columns(min(3, max(1, len(selected_events))))
-    for _sb_index, _sb_event in enumerate(selected_events):
-        with _sb_columns[_sb_index % len(_sb_columns)]:
-            _sb_value = st.text_input(
-                f"{_sb_event} Season Best",
-                key=_season_best_state_key(_sb_event),
+    try:
+        event_opts_raw = (
+            pilot_config.event_options(
+                competition_id=selected_competition_id,
+                gender=gender,
+                division_code=event_division if _active_division_keys else "",
             )
-        season_best_by_event[_sb_event] = str(_sb_value or "").strip()
+            if gender_ok and _active_division_keys
+            else []
+        )
+    except PilotConfigError as exc:
+        st.error(f"Configuration error: {exc}")
+        st.stop()
 
-season_best_ok = bool(selected_events) and all(
-    season_best_by_event.get(event_name, "")
-    for event_name in selected_events
-)
-if selected_events and not season_best_ok:
-    st.warning("Season Best is required for every selected event.")
-emergency_contact_name = st.text_input("Emergency Contact Name", key="emergency_contact_name")
-emergency_contact_number = st.text_input("Emergency Contact Number", key="emergency_contact_number")
-coach_full_name = st.text_input("Coach Full Name", key="coach_full_name")
-parq = st.selectbox("PAR-Q completed?", ["Y", "N"], key="parq")
+    event_opts = sorted(event_opts_raw, key=lambda _x: _event_sort_key(_x[0]))
+    event_names = [name for name, _code in event_opts]
 
-ic_last4_norm = normalize_ic_last4(ic_last4)
-email_norm = normalize_email(email)
+    prev_selected = st.session_state.get("events_selected", [])
+    if not isinstance(prev_selected, list):
+        prev_selected = []
+    prev_selected_valid = [e for e in prev_selected if e in event_names]
+    if prev_selected_valid != prev_selected:
+        st.session_state["events_selected"] = prev_selected_valid
 
-# The waiver is accepted once for the whole order at cart review, rather than
-# once for each athlete added to the same order.
-ready_to_add = (
-    bool(email_present)
-    and bool(email_ok)
-    and bool(ic_ok)
-    and bool(birth_ok)
-    and bool(contact_ok)
-    and bool(name_ok)
-    and bool(gender_ok)
-    and bool(nationality_ok)
-    and bool(event_ok)
-    and bool(season_best_ok)
-)
+    selected_events = c12.multiselect(
+        "Select event(s)",
+        options=event_names,
+        default=prev_selected_valid,
+        key="events_selected",
+        disabled=(not event_names),
+    )
+
+    # Live validation: DOB first determines age-eligible divisions; gender + division
+    # then determine the configured event list.
+    event_ok = bool(event_opts) and len(selected_events) > 0
+
+    if not gender_ok:
+        st.info("Select Gender to load the available events.")
+    elif birth_ok and not _active_division_keys:
+        athlete_age = pilot_config.age_on_date(
+            birth_date,
+            selected_competition.competition_start_at,
+        )
+        competition_date = (
+            selected_competition.competition_start_at.date()
+            if selected_competition.competition_start_at is not None
+            else None
+        )
+        age_text = f"age {athlete_age}" if athlete_age is not None else "this age"
+        date_text = (
+            f" on {competition_date.strftime('%d-%m-%Y')}"
+            if competition_date is not None
+            else ""
+        )
+        st.warning(
+            "No eligible divisions with configured events are available for "
+            f"{age_text}{date_text}."
+        )
+    elif _active_division_keys and not event_names:
+        st.warning(
+            "No active events are configured for "
+            f"{gender} / {event_division} in {selected_competition.competition_name}."
+        )
+    elif not selected_events:
+        st.warning("Please select at least one event for the selected division.")
+
+
+    def _season_best_state_key(event_name: str) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9]+", "_", str(event_name or "")).strip("_")
+        return f"season_best_event__{safe}"
+
+
+    season_best_by_event = {}
+    if selected_events:
+        st.markdown("**Season Best by event**")
+        st.caption("Enter one Season Best for each selected event.")
+        _sb_columns = st.columns(min(3, max(1, len(selected_events))))
+        for _sb_index, _sb_event in enumerate(selected_events):
+            with _sb_columns[_sb_index % len(_sb_columns)]:
+                _sb_value = st.text_input(
+                    f"{_sb_event} Season Best",
+                    key=_season_best_state_key(_sb_event),
+                )
+            season_best_by_event[_sb_event] = str(_sb_value or "").strip()
+
+    season_best_ok = bool(selected_events) and all(
+        season_best_by_event.get(event_name, "")
+        for event_name in selected_events
+    )
+    if selected_events and not season_best_ok:
+        st.warning("Season Best is required for every selected event.")
+    emergency_contact_name = st.text_input("Emergency Contact Name", key="emergency_contact_name")
+    emergency_contact_number = st.text_input("Emergency Contact Number", key="emergency_contact_number")
+    coach_full_name = st.text_input("Coach Full Name", key="coach_full_name")
+    parq = st.selectbox("PAR-Q completed?", ["Y", "N"], key="parq")
+
+    ic_last4_norm = normalize_ic_last4(ic_last4)
+    email_norm = normalize_email(email)
+
+    # The waiver is accepted once for the whole order at cart review, rather than
+    # once for each athlete added to the same order.
+    ready_to_add = (
+        bool(email_present)
+        and bool(email_ok)
+        and bool(ic_ok)
+        and bool(birth_ok)
+        and bool(contact_ok)
+        and bool(name_ok)
+        and bool(gender_ok)
+        and bool(nationality_ok)
+        and bool(event_ok)
+        and bool(season_best_ok)
+    )
 
 
 
@@ -2057,121 +2373,122 @@ def _build_current_athlete_cart_item() -> dict:
     }
 
 
-# ---------------- Multi-athlete cart ----------------
-_add_col, _cart_hint_col = st.columns([1, 2])
-with _add_col:
-    add_to_cart_clicked = st.button(
-        "Add athlete to cart",
-        type="primary",
-        disabled=not ready_to_add,
-        use_container_width=True,
-    )
-with _cart_hint_col:
-    st.caption(
-        "Add one or more athletes, then review the combined order below before "
-        "payment or submission."
-    )
-
-if add_to_cart_clicked:
-    _uid_present = bool((unique_id or "").strip())
-    _is_sgp_local = (
-        str(nationality or "").strip().upper()
-        in ("SGP", "SIN", "SG", "SINGAPORE")
-    )
-    _pr_local = bool(st.session_state.get("singapore_pr", False))
-    ic_required = bool(_pr_local) or (
-        bool(_is_sgp_local) and (not _uid_present)
-    )
-
-    missing_checks = [
-        ("Name as per NRIC/Passport", (st.session_state.get("name_passport", "") or "").strip()),
-        ("Birth Date", birth_date),
-        ("Nationality", nationality),
-        ("Email", email),
-        ("Contact Number", contact_number),
-    ]
-    for _event_name in selected_events:
-        missing_checks.append(
-            (
-                f"Season Best ({_event_name})",
-                season_best_by_event.get(_event_name, ""),
-            )
+if athlete_form_visible:
+    # ---------------- Multi-athlete cart ----------------
+    _add_col, _cart_hint_col = st.columns([1, 2])
+    with _add_col:
+        add_to_cart_clicked = st.button(
+            "Add athlete to cart",
+            type="primary",
+            disabled=not ready_to_add,
+            use_container_width=True,
         )
-    if ic_required:
-        missing_checks.insert(1, ("IC last 4", ic_last4))
-
-    missing = [
-        field_name
-        for field_name, field_value in missing_checks
-        if not field_value
-    ]
-
-    if missing:
-        st.error("Missing: " + ", ".join(missing))
-    elif not gender_ok:
-        st.error("Please select Gender (Male or Female).")
-    elif not is_valid_email(email_norm):
-        st.error("Please enter a valid email address.")
-    elif ic_required and not is_valid_ic_last4(ic_last4_norm):
-        st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
-    elif not selected_events:
-        st.error("Please select at least one event.")
-    else:
-        cart_item = _build_current_athlete_cart_item()
-
-        # One athlete should appear only once in a single order/cart. If the
-        # user wants additional events for an athlete already in the cart,
-        # remove that athlete and re-add them with all desired events selected.
-        new_candidate = candidate_from_cart_item(cart_item)
-        same_athlete_in_cart = any(
-            _same_cart_athlete(
-                new_candidate, candidate_from_cart_item(existing_item)
-            )
-            for existing_item in get_cart()
+    with _cart_hint_col:
+        st.caption(
+            "Add one or more athletes, then review the combined order below before "
+            "payment or submission."
         )
 
-        if same_athlete_in_cart:
-            st.error(
-                "This athlete is already in the current cart. Remove the "
-                "existing athlete and re-add them with all required events "
-                "selected so the order contains one athlete record."
+    if add_to_cart_clicked:
+        _uid_present = bool((unique_id or "").strip())
+        _is_sgp_local = (
+            str(nationality or "").strip().upper()
+            in ("SGP", "SIN", "SG", "SINGAPORE")
+        )
+        _pr_local = bool(st.session_state.get("singapore_pr", False))
+        ic_required = bool(_pr_local) or (
+            bool(_is_sgp_local) and (not _uid_present)
+        )
+
+        missing_checks = [
+            ("Name as per NRIC/Passport", (st.session_state.get("name_passport", "") or "").strip()),
+            ("Birth Date", birth_date),
+            ("Nationality", nationality),
+            ("Email", email),
+            ("Contact Number", contact_number),
+        ]
+        for _event_name in selected_events:
+            missing_checks.append(
+                (
+                    f"Season Best ({_event_name})",
+                    season_best_by_event.get(_event_name, ""),
+                )
             )
+        if ic_required:
+            missing_checks.insert(1, ("IC last 4", ic_last4))
+
+        missing = [
+            field_name
+            for field_name, field_value in missing_checks
+            if not field_value
+        ]
+
+        if missing:
+            st.error("Missing: " + ", ".join(missing))
+        elif not gender_ok:
+            st.error("Please select Gender (Male or Female).")
+        elif not is_valid_email(email_norm):
+            st.error("Please enter a valid email address.")
+        elif ic_required and not is_valid_ic_last4(ic_last4_norm):
+            st.error("IC last 4 must be 3 digits followed by 1 letter (e.g., 123A).")
+        elif not selected_events:
+            st.error("Please select at least one event.")
         else:
-            rules_ok = _validate_cart_against_competition_rules(
-                [cart_item],
-                fresh=False,
-                stage="cart-add check",
+            cart_item = _build_current_athlete_cart_item()
+
+            # One athlete should appear only once in a single order/cart. If the
+            # user wants additional events for an athlete already in the cart,
+            # remove that athlete and re-add them with all desired events selected.
+            new_candidate = candidate_from_cart_item(cart_item)
+            same_athlete_in_cart = any(
+                _same_cart_athlete(
+                    new_candidate, candidate_from_cart_item(existing_item)
+                )
+                for existing_item in get_cart()
             )
-            if rules_ok:
-                try:
-                    integrity_result = _check_cart_item_against_transactions(
-                        cart_item,
-                        ignore_order_id=str(
-                            st.session_state.get("draft_order_id", "") or ""
-                        ).strip(),
-                        stage="cart-add check",
-                    )
-                except Exception as exc:
-                    st.error(
-                        "Unable to verify existing competition registrations. "
-                        "The athlete was not added to the cart. Please retry. "
-                        f"({type(exc).__name__}: {exc})"
-                    )
-                else:
-                    if integrity_result.blocked:
-                        _render_integrity_conflicts(integrity_result)
+
+            if same_athlete_in_cart:
+                st.error(
+                    "This athlete is already in the current cart. Remove the "
+                    "existing athlete and re-add them with all required events "
+                    "selected so the order contains one athlete record."
+                )
+            else:
+                rules_ok = _validate_cart_against_competition_rules(
+                    [cart_item],
+                    fresh=False,
+                    stage="cart-add check",
+                )
+                if rules_ok:
+                    try:
+                        integrity_result = _check_cart_item_against_transactions(
+                            cart_item,
+                            ignore_order_id=str(
+                                st.session_state.get("draft_order_id", "") or ""
+                            ).strip(),
+                            stage="cart-add check",
+                        )
+                    except Exception as exc:
+                        st.error(
+                            "Unable to verify existing competition registrations. "
+                            "The athlete was not added to the cart. Please retry. "
+                            f"({type(exc).__name__}: {exc})"
+                        )
                     else:
-                        try:
-                            add_cart_item(
-                                cart_item,
-                                competition_id=selected_competition_id,
-                            )
-                        except ValueError as exc:
-                            st.error(str(exc))
+                        if integrity_result.blocked:
+                            _render_integrity_conflicts(integrity_result)
                         else:
-                            _queue_clear_athlete_form()
-                            st.toast("Athlete added to cart.")
-                            st.rerun()
+                            try:
+                                add_cart_item(
+                                    cart_item,
+                                    competition_id=selected_competition_id,
+                                )
+                            except ValueError as exc:
+                                st.error(str(exc))
+                            else:
+                                _queue_clear_athlete_form()
+                                st.toast("Athlete added to cart.")
+                                st.rerun()
 
 
 st.divider()
