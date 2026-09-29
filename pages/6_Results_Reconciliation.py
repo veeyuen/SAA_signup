@@ -19,6 +19,7 @@ from signup.results_reconciliation import (
     ResultsSchemaError,
     apply_admin_result_edits,
     manual_match_result,
+    normalise_dob,
     reconcile_results_to_registrations,
     registration_resolution_candidates,
     set_admin_review_decision,
@@ -487,12 +488,126 @@ else:
             key=f"phase6c_candidate_{selected_idx}",
         )
         match_col, unmatch_col = st.columns(2)
-        if match_col.button("Match result", type="primary", key=f"phase6c_match_{selected_idx}"):
-            updated = manual_match_result(selected_row, candidates[candidate_pos])
-            report.loc[selected_idx, list(updated.keys())] = list(updated.values())
-            st.session_state["phase6c_reconciliation_rows"] = report
-            st.success("Result manually matched in this reconciliation session.")
-            st.rerun()
+        pending_match_key = f"phase6c_pending_match_{selected_idx}"
+
+        if match_col.button(
+            "Match result",
+            type="primary",
+            key=f"phase6c_match_{selected_idx}",
+        ):
+            candidate = dict(candidates[candidate_pos])
+            st.session_state[pending_match_key] = candidate
+
+        pending_match = st.session_state.get(pending_match_key)
+        if pending_match:
+            st.markdown("#### Confirm manual match")
+            st.caption(
+                "The reconciliation row has not been changed yet. "
+                "Review the incoming result and proposed registration link."
+            )
+
+            incoming_dob = normalise_dob(selected_row.get("DOB", ""))
+            candidate_dob = normalise_dob(pending_match.get("DOB", ""))
+
+            comparison = pd.DataFrame([
+                {
+                    "Field": "Athlete name",
+                    "Incoming result": selected_row.get("NAME", ""),
+                    "Selected registration": pending_match.get("ATHLETE_NAME", ""),
+                },
+                {
+                    "Field": "DOB",
+                    "Incoming result": incoming_dob or selected_row.get("DOB", ""),
+                    "Selected registration": candidate_dob or pending_match.get("DOB", ""),
+                },
+                {
+                    "Field": "Unique / Athlete ID",
+                    "Incoming result": selected_row.get("UNIQUE_ID", ""),
+                    "Selected registration": pending_match.get("ATHLETE_ID", ""),
+                },
+                {
+                    "Field": "Event",
+                    "Incoming result": selected_row.get("EVENT", ""),
+                    "Selected registration": pending_match.get("EVENT", ""),
+                },
+                {
+                    "Field": "Division",
+                    "Incoming result": selected_row.get("DIVISION", ""),
+                    "Selected registration": pending_match.get("DIVISION", ""),
+                },
+                {
+                    "Field": "Registration ID",
+                    "Incoming result": selected_row.get("REGISTRATION_ID", ""),
+                    "Selected registration": pending_match.get("REGISTRATION_ID", ""),
+                },
+                {
+                    "Field": "Entry ID",
+                    "Incoming result": selected_row.get("ENTRY_ID", ""),
+                    "Selected registration": pending_match.get("ENTRY_ID", ""),
+                },
+            ])
+            st.dataframe(comparison, hide_index=True, width="stretch")
+
+            identity_mismatches = []
+            incoming_name = str(selected_row.get("NAME", "") or "").strip().casefold()
+            candidate_name = str(pending_match.get("ATHLETE_NAME", "") or "").strip().casefold()
+            if incoming_name and candidate_name and incoming_name != candidate_name:
+                identity_mismatches.append("name")
+
+            if incoming_dob and candidate_dob and incoming_dob != candidate_dob:
+                identity_mismatches.append("DOB")
+
+            incoming_uid = str(selected_row.get("UNIQUE_ID", "") or "").strip().casefold()
+            candidate_uid = str(pending_match.get("ATHLETE_ID", "") or "").strip().casefold()
+            if incoming_uid and candidate_uid and incoming_uid != candidate_uid:
+                identity_mismatches.append("Unique ID / Athlete ID")
+
+            if identity_mismatches:
+                st.warning(
+                    "Identity discrepancy: "
+                    + ", ".join(identity_mismatches)
+                    + " differ between the incoming result and selected registration. "
+                    "Confirm only if SA Events intentionally wants this manual linkage."
+                )
+
+            cancel_match_col, confirm_match_col = st.columns(2)
+
+            if cancel_match_col.button(
+                "Cancel match",
+                key=f"phase6c_cancel_match_{selected_idx}",
+                use_container_width=True,
+            ):
+                st.session_state.pop(pending_match_key, None)
+                st.rerun()
+
+            if confirm_match_col.button(
+                "Confirm match",
+                type="primary",
+                key=f"phase6c_confirm_match_{selected_idx}",
+                use_container_width=True,
+            ):
+                updated = manual_match_result(selected_row, pending_match)
+                try:
+                    _audit_result_change(
+                        before=selected_row,
+                        after=updated,
+                        action="RESULT_RECONCILIATION_MATCH",
+                        reason="SA Events Admin confirmed a manual result-to-registration match.",
+                    )
+                except Exception as exc:
+                    st.error(
+                        "The match was not applied because the audit record could not be written: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                else:
+                    report.loc[selected_idx, list(updated.keys())] = list(updated.values())
+                    st.session_state["phase6c_reconciliation_rows"] = report
+                    st.session_state.pop(pending_match_key, None)
+                    st.success(
+                        "Manual match confirmed and written to the immutable AUDIT_LOG worksheet."
+                    )
+                    st.rerun()
+
         if unmatch_col.button("Unmatch result", key=f"phase6c_unmatch_{selected_idx}"):
             updated = unmatch_result(selected_row)
             report.loc[selected_idx, list(updated.keys())] = list(updated.values())
