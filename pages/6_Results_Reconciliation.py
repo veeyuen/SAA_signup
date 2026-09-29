@@ -772,12 +772,85 @@ else:
                 )
                 st.rerun()
 
-    if remove_col.button("Remove duplicate", key=f"phase6c_remove_{selected_idx}"):
-        updated = set_admin_review_decision(selected_row, "REMOVED")
-        report.loc[selected_idx, list(updated.keys())] = list(updated.values())
-        st.session_state["phase6c_reconciliation_rows"] = report
-        st.warning("Result marked REMOVED in this reconciliation session.")
-        st.rerun()
+    pending_remove_key = f"phase6c_pending_remove_{selected_idx}"
+
+    def _stage_duplicate_removal():
+        st.session_state[pending_remove_key] = True
+
+    remove_col.button(
+        "Remove duplicate",
+        key=f"phase6c_remove_{selected_idx}",
+        on_click=_stage_duplicate_removal,
+    )
+
+    if st.session_state.get(pending_remove_key):
+        st.markdown("#### Confirm duplicate removal")
+        st.caption(
+            "The reconciliation row has not been changed yet. Confirming marks this row "
+            "REMOVED so it is excluded from further processing, while retaining the "
+            "imported result and its audit history."
+        )
+        st.dataframe(
+            pd.DataFrame([{
+                "Name": selected_row.get("NAME", ""),
+                "DOB": selected_row.get("DOB", ""),
+                "Team": selected_row.get("TEAM", ""),
+                "Competition": selected_row.get("COMPETITION", ""),
+                "Event": selected_row.get("EVENT", ""),
+                "Division": selected_row.get("DIVISION", ""),
+                "Result": selected_row.get("RESULT", ""),
+                "Match status": selected_row.get("MATCH_STATUS", ""),
+                "Review status": selected_row.get("REVIEW_STATUS", ""),
+                "Registration": selected_row.get("REGISTRATION_ID", ""),
+                "Entry": selected_row.get("ENTRY_ID", ""),
+            }]),
+            hide_index=True,
+            width="stretch",
+        )
+        st.warning(
+            "Use this action only when this imported row is a duplicate result. "
+            "This is a soft administrative removal; the underlying imported evidence is retained."
+        )
+
+        cancel_remove_col, confirm_remove_col = st.columns(2)
+
+        if cancel_remove_col.button(
+            "Cancel removal",
+            key=f"phase6c_cancel_remove_{selected_idx}",
+            use_container_width=True,
+        ):
+            st.session_state.pop(pending_remove_key, None)
+            st.rerun()
+
+        if confirm_remove_col.button(
+            "Confirm removal",
+            type="primary",
+            key=f"phase6c_confirm_remove_{selected_idx}",
+            use_container_width=True,
+        ):
+            updated = set_admin_review_decision(selected_row, "REMOVED")
+            try:
+                _audit_result_change(
+                    before=selected_row,
+                    after=updated,
+                    action="RESULT_RECONCILIATION_REMOVE_DUPLICATE",
+                    reason="SA Events Admin confirmed this imported result row is a duplicate.",
+                )
+            except Exception as exc:
+                st.error(
+                    "The duplicate removal was not applied because the audit record "
+                    "could not be written: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                report.loc[selected_idx, list(updated.keys())] = list(updated.values())
+                st.session_state["phase6c_reconciliation_rows"] = report
+                st.session_state.pop(pending_remove_key, None)
+                st.success(
+                    "Duplicate result marked REMOVED and written to the immutable AUDIT_LOG worksheet."
+                )
+                st.rerun()
+
 
 with st.expander("Matched rows", expanded=False):
     matched = report[report["MATCH_STATUS"] == "MATCHED"][review_columns]
