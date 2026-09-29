@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import io
+import json
+import secrets
 from pathlib import Path
 
 import pandas as pd
@@ -107,6 +110,35 @@ except Exception as exc:
 def _competition_label(competition_id: str) -> str:
     name = competition_names.get(competition_id, "")
     return f"{competition_id} — {name}" if name else competition_id
+
+
+def _now_utc() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def _new_audit_id() -> str:
+    token = secrets.token_urlsafe(9).replace("-", "").replace("_", "").upper()
+    return f"AUD-{token}"
+
+
+def _audit_result_change(*, before: dict, after: dict, action: str, reason: str) -> None:
+    # Reuse the application's existing immutable AUDIT_LOG worksheet.  Write the
+    # audit record before mutating Streamlit reconciliation state: if Google
+    # Sheets rejects the append, the admin change is not presented as complete.
+    entity_id = str(before.get("RESULT_FINGERPRINT", "") or before.get("RESULT_ROW_NUMBER", "")).strip()
+    store.append_audit_log({
+        "AUDIT_ID": _new_audit_id(),
+        "TIMESTAMP": _now_utc(),
+        "USER_ID": user.user_id,
+        "USER_EMAIL": user_email,
+        "ACTION": action,
+        "ENTITY_TYPE": "RESULT_RECONCILIATION",
+        "ENTITY_ID": entity_id,
+        "ORDER_ID": str(after.get("ORDER_ID", "") or before.get("ORDER_ID", "")).strip(),
+        "BEFORE_JSON": json.dumps(before, ensure_ascii=False, sort_keys=True, default=str),
+        "AFTER_JSON": json.dumps(after, ensure_ascii=False, sort_keys=True, default=str),
+        "REASON": reason,
+    })
 
 
 selected_competition_id = st.selectbox(
@@ -300,8 +332,8 @@ else:
 
 st.subheader("SA Events Admin resolution workspace")
 st.caption(
-    "Select a result row to review. Phase 6C2 changes are deliberately in-memory only; "
-    "the next phase adds the Confirm changes screen and immutable audit persistence."
+    "Select a result row to review. Confirmed field edits are written to the immutable "
+    "AUDIT_LOG worksheet before the reconciliation-session change is applied."
 )
 
 admin_rows = report[
@@ -408,11 +440,26 @@ else:
             ):
                 updated = apply_admin_result_edits(selected_row, pending_edit["edits"])
                 updated["ADMIN_ACTION"] = "EDIT"
-                report.loc[selected_idx, list(updated.keys())] = list(updated.values())
-                st.session_state["phase6c_reconciliation_rows"] = report
-                st.session_state.pop(pending_key, None)
-                st.success("Changes confirmed for this reconciliation session. Persistent audit storage is added in the next 6C3 step.")
-                st.rerun()
+                try:
+                    _audit_result_change(
+                        before=selected_row,
+                        after=updated,
+                        action="RESULT_RECONCILIATION_EDIT",
+                        reason="SA Events Admin confirmed staged result reconciliation edits.",
+                    )
+                except Exception as exc:
+                    st.error(
+                        "The change was not applied because the audit record could not be written: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                else:
+                    report.loc[selected_idx, list(updated.keys())] = list(updated.values())
+                    st.session_state["phase6c_reconciliation_rows"] = report
+                    st.session_state.pop(pending_key, None)
+                    for field in ADMIN_EDITABLE_RESULT_FIELDS:
+                        st.session_state.pop(f"phase6c_edit_{selected_idx}_{field}", None)
+                    st.success("Changes confirmed and written to the immutable AUDIT_LOG worksheet.")
+                    st.rerun()
 
     candidates = registration_resolution_candidates(
         selected_registrations,
