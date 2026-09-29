@@ -331,6 +331,8 @@ def _base_match_fields(result: Mapping[str, Any], row_number: int) -> dict[str, 
         "REGISTRATION_DOB": "",
         "REGISTERED_EVENT": "",
         "REGISTERED_DIVISION": "",
+        "REVIEW_STATUS": "PENDING",
+        "ADMIN_ACTION": "",
     }
 
 
@@ -358,6 +360,120 @@ def _finalize(
         fields["REGISTERED_EVENT"] = _clean(entry.get("EVENT_NAME"))
         fields["REGISTERED_DIVISION"] = _clean(entry.get("DIVISION"))
     return fields
+
+
+
+
+ADMIN_EDITABLE_RESULT_FIELDS: tuple[str, ...] = (
+    "NAME", "DOB", "UNIQUE_ID", "TEAM", "COMPETITION", "EVENT", "DIVISION", "RESULT",
+)
+
+
+def registration_resolution_candidates(
+    registrations: Iterable[Mapping[str, Any]],
+    event_entries: Iterable[Mapping[str, Any]],
+    *,
+    competition_id: str,
+) -> list[dict[str, str]]:
+    """Return deterministic active registration/event choices for manual admin matching."""
+    regs = {
+        _clean(row.get("REGISTRATION_ID")): dict(row)
+        for row in registrations
+        if _clean(row.get("COMPETITION_ID")) == _clean(competition_id)
+        and _active_confirmed(row)
+        and _clean(row.get("REGISTRATION_ID"))
+    }
+    choices: list[dict[str, str]] = []
+    for entry in event_entries:
+        if _clean(entry.get("COMPETITION_ID")) != _clean(competition_id) or not _active_confirmed(entry):
+            continue
+        reg_id = _clean(entry.get("REGISTRATION_ID"))
+        reg = regs.get(reg_id)
+        if not reg:
+            continue
+        choices.append({
+            "REGISTRATION_ID": reg_id,
+            "ENTRY_ID": _clean(entry.get("ENTRY_ID")),
+            "ORDER_ID": _clean(entry.get("ORDER_ID")) or _clean(reg.get("ORDER_ID")),
+            "ATHLETE_ID": _clean(reg.get("ATHLETE_ID")),
+            "ATHLETE_NAME": _registration_name(reg),
+            "DOB": normalise_dob(reg.get("DOB")),
+            "TEAM_CODE": _clean(reg.get("TEAM_CODE")),
+            "TEAM_NAME": _clean(reg.get("TEAM_NAME")),
+            "EVENT": _clean(entry.get("EVENT_NAME")),
+            "DIVISION": _clean(entry.get("DIVISION")),
+        })
+    return sorted(
+        choices,
+        key=lambda row: (
+            _normalise_simple(row["ATHLETE_NAME"]),
+            _normalise_simple(row["EVENT"]),
+            row["ENTRY_ID"],
+        ),
+    )
+
+
+def apply_admin_result_edits(row: Mapping[str, Any], edits: Mapping[str, Any]) -> dict[str, Any]:
+    """Return an in-memory result row with only approved admin-editable fields changed."""
+    updated = dict(row)
+    for field in ADMIN_EDITABLE_RESULT_FIELDS:
+        if field in edits:
+            updated[field] = edits[field]
+    updated["RESULT_FINGERPRINT"] = _result_fingerprint(updated)
+    return updated
+
+
+def manual_match_result(
+    row: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Link one reconciliation row to an explicit active registration/event choice."""
+    updated = dict(row)
+    updated.update({
+        "MATCH_STATUS": "MATCHED",
+        "MATCH_REASON": "MANUAL_ADMIN_MATCH",
+        "MATCH_DETAILS": "SA Events Admin manually linked this result to a registration/event entry.",
+        "REGISTRATION_ID": _clean(candidate.get("REGISTRATION_ID")),
+        "ENTRY_ID": _clean(candidate.get("ENTRY_ID")),
+        "ORDER_ID": _clean(candidate.get("ORDER_ID")),
+        "REGISTRATION_ATHLETE_ID": _clean(candidate.get("ATHLETE_ID")),
+        "REGISTRATION_ATHLETE_NAME": _clean(candidate.get("ATHLETE_NAME")),
+        "REGISTRATION_DOB": normalise_dob(candidate.get("DOB")),
+        "REGISTERED_EVENT": _clean(candidate.get("EVENT")),
+        "REGISTERED_DIVISION": _clean(candidate.get("DIVISION")),
+        "REVIEW_STATUS": "PENDING",
+        "ADMIN_ACTION": "MANUAL_MATCH",
+    })
+    return updated
+
+
+def unmatch_result(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove a manual/automatic registration link without discarding the result."""
+    updated = dict(row)
+    for field in (
+        "REGISTRATION_ID", "ENTRY_ID", "ORDER_ID", "REGISTRATION_ATHLETE_ID",
+        "REGISTRATION_ATHLETE_NAME", "REGISTRATION_DOB", "REGISTERED_EVENT", "REGISTERED_DIVISION",
+    ):
+        updated[field] = ""
+    updated.update({
+        "MATCH_STATUS": "UNMATCHED",
+        "MATCH_REASON": "MANUALLY_UNMATCHED",
+        "MATCH_DETAILS": "SA Events Admin removed the registration link.",
+        "REVIEW_STATUS": "PENDING",
+        "ADMIN_ACTION": "UNMATCH",
+    })
+    return updated
+
+
+def set_admin_review_decision(row: Mapping[str, Any], decision: str) -> dict[str, Any]:
+    """Apply the Phase 6C2 review decision in memory; persistence is Phase 6C3/6C4."""
+    normalized = _clean(decision).upper()
+    if normalized not in {"APPROVED", "REMOVED"}:
+        raise ValueError("decision must be APPROVED or REMOVED")
+    updated = dict(row)
+    updated["REVIEW_STATUS"] = normalized
+    updated["ADMIN_ACTION"] = "APPROVE" if normalized == "APPROVED" else "REMOVE_DUPLICATE"
+    return updated
 
 
 def reconcile_results_to_registrations(

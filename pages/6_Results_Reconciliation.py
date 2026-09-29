@@ -11,8 +11,14 @@ from payment_store import create_google_client
 from signup.multi_payment_transaction_store import TransactionSheetStore
 from signup.pilot_config import PilotConfigRepository, require_configured_user
 from signup.results_reconciliation import (
+    ADMIN_EDITABLE_RESULT_FIELDS,
     ResultsSchemaError,
+    apply_admin_result_edits,
+    manual_match_result,
     reconcile_results_to_registrations,
+    registration_resolution_candidates,
+    set_admin_review_decision,
+    unmatch_result,
     validate_canonical_results,
 )
 
@@ -24,8 +30,9 @@ st.caption(
     "reconcile each result against confirmed competition registrations."
 )
 st.info(
-    "Preview only: this phase does not write result matches back to Google Sheets or BigQuery. "
-    "Persistence and admin resolution actions are added later in Phase 6C."
+    "Phase 6C2 admin resolution is enabled. Review/edit/match/unmatch/approve/remove actions are "
+    "held in this reconciliation session only. Phase 6C3 adds confirmation + audit persistence; "
+    "Phase 6C4 publishes approved results to the results database."
 )
 
 CONFIG_SHEET_URL = str(st.secrets.get("CONFIG_SHEET_URL", "") or "").strip()
@@ -264,6 +271,8 @@ review_columns = [
     "MATCH_STATUS",
     "MATCH_REASON",
     "MATCH_DETAILS",
+    "REVIEW_STATUS",
+    "ADMIN_ACTION",
     "UNIQUE_ID",
     "DOB",
     "NAME",
@@ -286,6 +295,151 @@ if attention.empty:
     st.success("Every uploaded result row reconciled automatically.")
 else:
     st.dataframe(attention, width="stretch", hide_index=True)
+
+
+st.subheader("SA Events Admin resolution workspace")
+st.caption(
+    "Select a result row to review. Phase 6C2 changes are deliberately in-memory only; "
+    "the next phase adds the Confirm changes screen and immutable audit persistence."
+)
+
+admin_rows = report[
+    (report["MATCH_STATUS"].isin(["REVIEW", "UNMATCHED", "MATCHED"]))
+    & (report.get("REVIEW_STATUS", pd.Series("PENDING", index=report.index)) != "REMOVED")
+]
+if admin_rows.empty:
+    st.info("There are no result rows available for admin resolution.")
+else:
+    row_indexes = list(admin_rows.index)
+
+    def _admin_row_label(idx):
+        row = report.loc[idx]
+        return (
+            f"Row {row.get('RESULT_ROW_NUMBER', idx)} · {row.get('NAME', '')} · "
+            f"{row.get('EVENT', '')} · {row.get('RESULT', '')} · "
+            f"{row.get('MATCH_STATUS', '')}/{row.get('REVIEW_STATUS', 'PENDING')}"
+        )
+
+    selected_idx = st.selectbox(
+        "Result to review",
+        options=row_indexes,
+        format_func=_admin_row_label,
+        key="phase6c_admin_row_index",
+    )
+    selected_row = report.loc[selected_idx].to_dict()
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Incoming / current result**")
+        st.dataframe(
+            pd.DataFrame([{
+                "Name": selected_row.get("NAME", ""),
+                "DOB": selected_row.get("DOB", ""),
+                "Unique ID": selected_row.get("UNIQUE_ID", ""),
+                "Team": selected_row.get("TEAM", ""),
+                "Competition": selected_row.get("COMPETITION", ""),
+                "Event": selected_row.get("EVENT", ""),
+                "Division": selected_row.get("DIVISION", ""),
+                "Result": selected_row.get("RESULT", ""),
+            }]),
+            hide_index=True,
+            width="stretch",
+        )
+    with right:
+        st.markdown("**Current registration link**")
+        st.dataframe(
+            pd.DataFrame([{
+                "Registration": selected_row.get("REGISTRATION_ID", ""),
+                "Entry": selected_row.get("ENTRY_ID", ""),
+                "Athlete": selected_row.get("REGISTRATION_ATHLETE_NAME", ""),
+                "DOB": selected_row.get("REGISTRATION_DOB", ""),
+                "Event": selected_row.get("REGISTERED_EVENT", ""),
+                "Division": selected_row.get("REGISTERED_DIVISION", ""),
+            }]),
+            hide_index=True,
+            width="stretch",
+        )
+
+    with st.expander("Edit result fields", expanded=True):
+        with st.form(f"phase6c_edit_{selected_idx}"):
+            e1, e2 = st.columns(2)
+            edits = {}
+            for pos, field in enumerate(ADMIN_EDITABLE_RESULT_FIELDS):
+                target = e1 if pos % 2 == 0 else e2
+                edits[field] = target.text_input(
+                    field.replace("_", " ").title(),
+                    value=str(selected_row.get(field, "") or ""),
+                    key=f"phase6c_edit_{selected_idx}_{field}",
+                )
+            save_edits = st.form_submit_button("Stage edits", use_container_width=True)
+        if save_edits:
+            updated = apply_admin_result_edits(selected_row, edits)
+            updated["ADMIN_ACTION"] = "EDIT"
+            report.loc[selected_idx, list(updated.keys())] = list(updated.values())
+            st.session_state["phase6c_reconciliation_rows"] = report
+            st.success("Edits staged in this reconciliation session. They are not yet persisted.")
+            st.rerun()
+
+    candidates = registration_resolution_candidates(
+        selected_registrations,
+        selected_entries,
+        competition_id=selected_competition_id,
+    )
+    st.markdown("**Manual registration match**")
+    if candidates:
+        candidate_indexes = list(range(len(candidates)))
+
+        def _candidate_label(pos):
+            candidate = candidates[pos]
+            team = " ".join(x for x in (candidate.get("TEAM_CODE"), candidate.get("TEAM_NAME")) if x)
+            return (
+                f"{candidate.get('ATHLETE_NAME', '')} · DOB {candidate.get('DOB', '')} · "
+                f"{candidate.get('EVENT', '')} · {candidate.get('DIVISION', '')}"
+                + (f" · Team {team}" if team else "")
+                + f" · {candidate.get('ENTRY_ID', '')}"
+            )
+
+        candidate_pos = st.selectbox(
+            "Registration/event entry",
+            candidate_indexes,
+            format_func=_candidate_label,
+            key=f"phase6c_candidate_{selected_idx}",
+        )
+        match_col, unmatch_col = st.columns(2)
+        if match_col.button("Match result", type="primary", key=f"phase6c_match_{selected_idx}"):
+            updated = manual_match_result(selected_row, candidates[candidate_pos])
+            report.loc[selected_idx, list(updated.keys())] = list(updated.values())
+            st.session_state["phase6c_reconciliation_rows"] = report
+            st.success("Result manually matched in this reconciliation session.")
+            st.rerun()
+        if unmatch_col.button("Unmatch result", key=f"phase6c_unmatch_{selected_idx}"):
+            updated = unmatch_result(selected_row)
+            report.loc[selected_idx, list(updated.keys())] = list(updated.values())
+            st.session_state["phase6c_reconciliation_rows"] = report
+            st.success("Registration link removed in this reconciliation session.")
+            st.rerun()
+    else:
+        st.warning("No active confirmed registration/event entries are available for manual matching.")
+
+    st.markdown("**Admin decision**")
+    st.caption(
+        "Approve means SA Events has confirmed this is the correct result. An UNMATCHED result may be "
+        "approved as a legitimate competition result without a registration. Remove duplicate excludes "
+        "the row from further processing while retaining it for the later audit trail."
+    )
+    approve_col, remove_col = st.columns(2)
+    if approve_col.button("Approve result", type="primary", key=f"phase6c_approve_{selected_idx}"):
+        updated = set_admin_review_decision(selected_row, "APPROVED")
+        report.loc[selected_idx, list(updated.keys())] = list(updated.values())
+        st.session_state["phase6c_reconciliation_rows"] = report
+        st.success("Result approved in this reconciliation session. Database publishing is not enabled until Phase 6C4.")
+        st.rerun()
+    if remove_col.button("Remove duplicate", key=f"phase6c_remove_{selected_idx}"):
+        updated = set_admin_review_decision(selected_row, "REMOVED")
+        report.loc[selected_idx, list(updated.keys())] = list(updated.values())
+        st.session_state["phase6c_reconciliation_rows"] = report
+        st.warning("Result marked REMOVED in this reconciliation session.")
+        st.rerun()
 
 with st.expander("Matched rows", expanded=False):
     matched = report[report["MATCH_STATUS"] == "MATCHED"][review_columns]

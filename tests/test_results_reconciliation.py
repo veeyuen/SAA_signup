@@ -246,3 +246,66 @@ def test_reconciliation_preserves_original_result_columns_and_adds_fingerprint()
     assert row["INDOOR"] == True
     assert isinstance(row["RESULT_FINGERPRINT"], str)
     assert len(row["RESULT_FINGERPRINT"]) == 64
+
+
+def test_manual_resolution_candidates_only_include_active_confirmed_entries():
+    from signup.results_reconciliation import registration_resolution_candidates
+
+    candidates = registration_resolution_candidates(
+        [_registration(), _registration(REGISTRATION_ID="REG-002", ATHLETE_ID="X2", ATHLETE_NAME="Other Athlete")],
+        [_entry(), _entry(ENTRY_ID="ENT-002", REGISTRATION_ID="REG-002", ATHLETE_ID="X2", ATHLETE_NAME="Other Athlete", STATUS="WITHDRAWN")],
+        competition_id="COMP-001",
+    )
+    assert len(candidates) == 1
+    assert candidates[0]["REGISTRATION_ID"] == "REG-001"
+    assert candidates[0]["ENTRY_ID"] == "ENT-001"
+
+
+def test_admin_edits_are_restricted_and_refresh_result_fingerprint():
+    from signup.results_reconciliation import apply_admin_result_edits
+
+    original = _reconcile([_result()]).iloc[0].to_dict()
+    old_fingerprint = original["RESULT_FINGERPRINT"]
+    updated = apply_admin_result_edits(
+        original,
+        {"RESULT": "13.40", "NAME": "Corrected Name", "MATCH_STATUS": "UNMATCHED"},
+    )
+    assert updated["RESULT"] == "13.40"
+    assert updated["NAME"] == "Corrected Name"
+    assert updated["MATCH_STATUS"] == "MATCHED"
+    assert updated["RESULT_FINGERPRINT"] != old_fingerprint
+
+
+def test_admin_can_manually_match_then_unmatch_result():
+    from signup.results_reconciliation import manual_match_result, unmatch_result
+
+    row = _reconcile([_result(UNIQUE_ID="NO-SUCH-ID")]).iloc[0].to_dict()
+    candidate = {
+        "REGISTRATION_ID": "REG-001", "ENTRY_ID": "ENT-001", "ORDER_ID": "ORD-001",
+        "ATHLETE_ID": "G897C03", "ATHLETE_NAME": "Lee Jing Yi Gabriel", "DOB": "2003-02-23",
+        "EVENT": "Triple Jump", "DIVISION": "Open",
+    }
+    matched = manual_match_result(row, candidate)
+    assert matched["MATCH_STATUS"] == "MATCHED"
+    assert matched["MATCH_REASON"] == "MANUAL_ADMIN_MATCH"
+    assert matched["REGISTRATION_ID"] == "REG-001"
+
+    unmatched = unmatch_result(matched)
+    assert unmatched["MATCH_STATUS"] == "UNMATCHED"
+    assert unmatched["MATCH_REASON"] == "MANUALLY_UNMATCHED"
+    assert unmatched["REGISTRATION_ID"] == ""
+    assert unmatched["ENTRY_ID"] == ""
+
+
+def test_unmatched_result_can_be_approved_and_duplicate_can_be_removed():
+    from signup.results_reconciliation import set_admin_review_decision
+
+    row = _reconcile([_result(UNIQUE_ID="NO-SUCH-ID")]).iloc[0].to_dict()
+    approved = set_admin_review_decision(row, "APPROVED")
+    assert approved["MATCH_STATUS"] == "UNMATCHED"
+    assert approved["REVIEW_STATUS"] == "APPROVED"
+    assert approved["ADMIN_ACTION"] == "APPROVE"
+
+    removed = set_admin_review_decision(row, "REMOVED")
+    assert removed["REVIEW_STATUS"] == "REMOVED"
+    assert removed["ADMIN_ACTION"] == "REMOVE_DUPLICATE"
