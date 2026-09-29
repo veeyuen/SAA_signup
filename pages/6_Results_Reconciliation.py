@@ -608,12 +608,86 @@ else:
                     )
                     st.rerun()
 
-        if unmatch_col.button("Unmatch result", key=f"phase6c_unmatch_{selected_idx}"):
-            updated = unmatch_result(selected_row)
-            report.loc[selected_idx, list(updated.keys())] = list(updated.values())
-            st.session_state["phase6c_reconciliation_rows"] = report
-            st.success("Registration link removed in this reconciliation session.")
-            st.rerun()
+        pending_unmatch_key = f"phase6c_pending_unmatch_{selected_idx}"
+
+        if unmatch_col.button(
+            "Unmatch result",
+            key=f"phase6c_unmatch_{selected_idx}",
+        ):
+            if not str(selected_row.get("REGISTRATION_ID", "") or "").strip():
+                st.info("This result is not currently linked to a registration.")
+                st.session_state.pop(pending_unmatch_key, None)
+            else:
+                st.session_state[pending_unmatch_key] = True
+
+        if st.session_state.get(pending_unmatch_key):
+            st.markdown("#### Confirm unmatch")
+            st.caption(
+                "The reconciliation row has not been changed yet. Confirming will remove "
+                "the registration/event linkage but retain the result."
+            )
+
+            st.dataframe(
+                pd.DataFrame([{
+                    "Registration": selected_row.get("REGISTRATION_ID", ""),
+                    "Entry": selected_row.get("ENTRY_ID", ""),
+                    "Athlete": selected_row.get("REGISTRATION_ATHLETE_NAME", ""),
+                    "DOB": selected_row.get("REGISTRATION_DOB", ""),
+                    "Event": selected_row.get("REGISTERED_EVENT", ""),
+                    "Division": selected_row.get("REGISTERED_DIVISION", ""),
+                }]),
+                hide_index=True,
+                width="stretch",
+            )
+
+            cancel_unmatch_col, confirm_unmatch_col = st.columns(2)
+
+            if cancel_unmatch_col.button(
+                "Cancel unmatch",
+                key=f"phase6c_cancel_unmatch_{selected_idx}",
+                use_container_width=True,
+            ):
+                st.session_state.pop(pending_unmatch_key, None)
+                st.rerun()
+
+            if confirm_unmatch_col.button(
+                "Confirm unmatch",
+                type="primary",
+                key=f"phase6c_confirm_unmatch_{selected_idx}",
+                use_container_width=True,
+            ):
+                updated = unmatch_result(selected_row)
+
+                try:
+                    _audit_result_change(
+                        before=selected_row,
+                        after=updated,
+                        action="RESULT_RECONCILIATION_UNMATCH",
+                        reason=(
+                            "SA Events Admin confirmed removal of the "
+                            "result-to-registration link."
+                        ),
+                    )
+                except Exception as exc:
+                    st.error(
+                        "The unmatch was not applied because the audit record "
+                        "could not be written: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                else:
+                    report.loc[
+                        selected_idx,
+                        list(updated.keys()),
+                    ] = list(updated.values())
+
+                    st.session_state["phase6c_reconciliation_rows"] = report
+                    st.session_state.pop(pending_unmatch_key, None)
+
+                    st.success(
+                        "Registration link removed and written to the "
+                        "immutable AUDIT_LOG worksheet."
+                    )
+                    st.rerun()
     else:
         st.warning("No active confirmed registration/event entries are available for manual matching.")
 
