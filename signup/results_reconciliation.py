@@ -413,6 +413,19 @@ def registration_resolution_candidates(
     )
 
 
+def admin_result_edit_changes(row: Mapping[str, Any], edits: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Return editable fields whose proposed value differs from the current row."""
+    changes: list[dict[str, str]] = []
+    for field in ADMIN_EDITABLE_RESULT_FIELDS:
+        if field not in edits:
+            continue
+        current = _clean(row.get(field))
+        proposed = _clean(edits.get(field))
+        if current != proposed:
+            changes.append({"FIELD": field, "CURRENT": current, "PROPOSED": proposed})
+    return changes
+
+
 def apply_admin_result_edits(row: Mapping[str, Any], edits: Mapping[str, Any]) -> dict[str, Any]:
     """Return an in-memory result row with only approved admin-editable fields changed."""
     updated = dict(row)

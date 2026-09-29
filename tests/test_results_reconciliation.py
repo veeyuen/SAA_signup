@@ -309,3 +309,24 @@ def test_unmatched_result_can_be_approved_and_duplicate_can_be_removed():
     removed = set_admin_review_decision(row, "REMOVED")
     assert removed["REVIEW_STATUS"] == "REMOVED"
     assert removed["ADMIN_ACTION"] == "REMOVE_DUPLICATE"
+
+
+def test_admin_edit_changes_show_before_after_without_mutating_row():
+    from signup.results_reconciliation import admin_result_edit_changes
+
+    original = _reconcile([_result(RESULT="11.52")]).iloc[0].to_dict()
+    changes = admin_result_edit_changes(original, {"RESULT": "11.48"})
+
+    assert changes == [{"FIELD": "RESULT", "CURRENT": "11.52", "PROPOSED": "11.48"}]
+    assert original["RESULT"] == "11.52"
+
+
+def test_admin_edit_changes_ignore_unchanged_and_non_editable_fields():
+    from signup.results_reconciliation import admin_result_edit_changes
+
+    original = _reconcile([_result(RESULT="11.52")]).iloc[0].to_dict()
+    changes = admin_result_edit_changes(
+        original,
+        {"RESULT": "11.52", "MATCH_STATUS": "UNMATCHED"},
+    )
+    assert changes == []

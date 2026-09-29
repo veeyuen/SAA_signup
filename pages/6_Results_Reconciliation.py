@@ -12,6 +12,7 @@ from signup.multi_payment_transaction_store import TransactionSheetStore
 from signup.pilot_config import PilotConfigRepository, require_configured_user
 from signup.results_reconciliation import (
     ADMIN_EDITABLE_RESULT_FIELDS,
+    admin_result_edit_changes,
     ResultsSchemaError,
     apply_admin_result_edits,
     manual_match_result,
@@ -372,13 +373,40 @@ else:
                     key=f"phase6c_edit_{selected_idx}_{field}",
                 )
             save_edits = st.form_submit_button("Stage edits", use_container_width=True)
+        pending_key = f"phase6c_pending_edit_{selected_idx}"
         if save_edits:
-            updated = apply_admin_result_edits(selected_row, edits)
-            updated["ADMIN_ACTION"] = "EDIT"
-            report.loc[selected_idx, list(updated.keys())] = list(updated.values())
-            st.session_state["phase6c_reconciliation_rows"] = report
-            st.success("Edits staged in this reconciliation session. They are not yet persisted.")
-            st.rerun()
+            changes = admin_result_edit_changes(selected_row, edits)
+            if not changes:
+                st.info("No changes to stage.")
+                st.session_state.pop(pending_key, None)
+            else:
+                st.session_state[pending_key] = {
+                    "edits": {field: edits[field] for field in ADMIN_EDITABLE_RESULT_FIELDS},
+                    "changes": changes,
+                }
+
+        pending_edit = st.session_state.get(pending_key)
+        if pending_edit:
+            st.markdown("#### Confirm changes")
+            st.caption("The reconciliation row has not been changed yet.")
+            st.dataframe(pd.DataFrame(pending_edit["changes"]), hide_index=True, width="stretch")
+            cancel_col, confirm_col = st.columns(2)
+            if cancel_col.button("Cancel", key=f"phase6c_cancel_edit_{selected_idx}", use_container_width=True):
+                st.session_state.pop(pending_key, None)
+                st.rerun()
+            if confirm_col.button(
+                "Confirm changes",
+                type="primary",
+                key=f"phase6c_confirm_edit_{selected_idx}",
+                use_container_width=True,
+            ):
+                updated = apply_admin_result_edits(selected_row, pending_edit["edits"])
+                updated["ADMIN_ACTION"] = "EDIT"
+                report.loc[selected_idx, list(updated.keys())] = list(updated.values())
+                st.session_state["phase6c_reconciliation_rows"] = report
+                st.session_state.pop(pending_key, None)
+                st.success("Changes confirmed for this reconciliation session. Persistent audit storage is added in the next 6C3 step.")
+                st.rerun()
 
     candidates = registration_resolution_candidates(
         selected_registrations,
