@@ -700,12 +700,15 @@ else:
     approve_col, remove_col = st.columns(2)
     pending_approve_key = f"phase6c_pending_approve_{selected_idx}"
 
-    if approve_col.button(
+    def _stage_approval():
+        st.session_state[pending_approve_key] = True
+
+    approve_col.button(
         "Approve result",
         type="primary",
         key=f"phase6c_approve_{selected_idx}",
-    ):
-        st.session_state[pending_approve_key] = True
+        on_click=_stage_approval,
+    )
 
     if st.session_state.get(pending_approve_key):
         st.markdown("#### Confirm approval")
