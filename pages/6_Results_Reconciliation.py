@@ -392,7 +392,13 @@ else:
             st.dataframe(pd.DataFrame(pending_edit["changes"]), hide_index=True, width="stretch")
             cancel_col, confirm_col = st.columns(2)
             if cancel_col.button("Cancel", key=f"phase6c_cancel_edit_{selected_idx}", use_container_width=True):
+                # Discard both the staged proposal and the edit-widget values.
+                # On rerun each widget is rebuilt from the authoritative reconciliation row,
+                # so Cancel visibly restores the current values rather than leaving the
+                # abandoned proposal in Streamlit session state.
                 st.session_state.pop(pending_key, None)
+                for field in ADMIN_EDITABLE_RESULT_FIELDS:
+                    st.session_state.pop(f"phase6c_edit_{selected_idx}_{field}", None)
                 st.rerun()
             if confirm_col.button(
                 "Confirm changes",
