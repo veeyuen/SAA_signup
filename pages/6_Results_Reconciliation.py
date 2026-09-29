@@ -698,12 +698,77 @@ else:
         "the row from further processing while retaining it for the later audit trail."
     )
     approve_col, remove_col = st.columns(2)
-    if approve_col.button("Approve result", type="primary", key=f"phase6c_approve_{selected_idx}"):
-        updated = set_admin_review_decision(selected_row, "APPROVED")
-        report.loc[selected_idx, list(updated.keys())] = list(updated.values())
-        st.session_state["phase6c_reconciliation_rows"] = report
-        st.success("Result approved in this reconciliation session. Database publishing is not enabled until Phase 6C4.")
-        st.rerun()
+    pending_approve_key = f"phase6c_pending_approve_{selected_idx}"
+
+    if approve_col.button(
+        "Approve result",
+        type="primary",
+        key=f"phase6c_approve_{selected_idx}",
+    ):
+        st.session_state[pending_approve_key] = True
+
+    if st.session_state.get(pending_approve_key):
+        st.markdown("#### Confirm approval")
+        st.caption(
+            "The reconciliation row has not been changed yet. Confirming records that "
+            "SA Events has reviewed and accepted this result. Database publishing remains "
+            "disabled until Phase 6C4."
+        )
+        st.dataframe(
+            pd.DataFrame([{
+                "Name": selected_row.get("NAME", ""),
+                "DOB": selected_row.get("DOB", ""),
+                "Team": selected_row.get("TEAM", ""),
+                "Competition": selected_row.get("COMPETITION", ""),
+                "Event": selected_row.get("EVENT", ""),
+                "Division": selected_row.get("DIVISION", ""),
+                "Result": selected_row.get("RESULT", ""),
+                "Match status": selected_row.get("MATCH_STATUS", ""),
+                "Registration": selected_row.get("REGISTRATION_ID", ""),
+                "Entry": selected_row.get("ENTRY_ID", ""),
+            }]),
+            hide_index=True,
+            width="stretch",
+        )
+
+        cancel_approve_col, confirm_approve_col = st.columns(2)
+        if cancel_approve_col.button(
+            "Cancel approval",
+            key=f"phase6c_cancel_approve_{selected_idx}",
+            use_container_width=True,
+        ):
+            st.session_state.pop(pending_approve_key, None)
+            st.rerun()
+
+        if confirm_approve_col.button(
+            "Confirm approval",
+            type="primary",
+            key=f"phase6c_confirm_approve_{selected_idx}",
+            use_container_width=True,
+        ):
+            updated = set_admin_review_decision(selected_row, "APPROVED")
+            try:
+                _audit_result_change(
+                    before=selected_row,
+                    after=updated,
+                    action="RESULT_RECONCILIATION_APPROVE",
+                    reason="SA Events Admin confirmed approval of the reconciled result.",
+                )
+            except Exception as exc:
+                st.error(
+                    "The approval was not applied because the audit record could not be written: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                report.loc[selected_idx, list(updated.keys())] = list(updated.values())
+                st.session_state["phase6c_reconciliation_rows"] = report
+                st.session_state.pop(pending_approve_key, None)
+                st.success(
+                    "Result approved and written to the immutable AUDIT_LOG worksheet. "
+                    "Database publishing is not enabled until Phase 6C4."
+                )
+                st.rerun()
+
     if remove_col.button("Remove duplicate", key=f"phase6c_remove_{selected_idx}"):
         updated = set_admin_review_decision(selected_row, "REMOVED")
         report.loc[selected_idx, list(updated.keys())] = list(updated.values())
