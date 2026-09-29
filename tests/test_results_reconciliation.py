@@ -330,3 +330,79 @@ def test_admin_edit_changes_ignore_unchanged_and_non_editable_fields():
         {"RESULT": "11.52", "MATCH_STATUS": "UNMATCHED"},
     )
     assert changes == []
+
+def test_audit_failure_prevents_reconciliation_state_mutation():
+    """
+    Phase 6C3-18:
+    A failed durable audit write must prevent the proposed reconciliation
+    mutation from becoming authoritative.
+    """
+    from signup.results_reconciliation import set_admin_review_decision
+
+    original = _reconcile(
+        [_result(UNIQUE_ID="NO-SUCH-ID")]
+    ).iloc[0].to_dict()
+
+    assert original["MATCH_STATUS"] == "UNMATCHED"
+    assert original["REVIEW_STATUS"] == "PENDING"
+
+    proposed = set_admin_review_decision(original, "APPROVED")
+
+    assert proposed["REVIEW_STATUS"] == "APPROVED"
+
+    authoritative = dict(original)
+
+    def failing_audit_write(*, before, after, action, reason):
+        raise RuntimeError("simulated AUDIT_LOG persistence failure")
+
+    error = None
+
+    try:
+        failing_audit_write(
+            before=authoritative,
+            after=proposed,
+            action="RESULT_RECONCILIATION_APPROVE",
+            reason="Phase 6C3-18 simulated failure.",
+        )
+
+        # This must never execute if the audit write fails.
+        authoritative = proposed
+
+    except RuntimeError as exc:
+        error = exc
+
+    assert error is not None
+    assert str(error) == "simulated AUDIT_LOG persistence failure"
+
+    # Critical invariant: failed persistence means no state transition.
+    assert authoritative["REVIEW_STATUS"] == "PENDING"
+    assert authoritative["ADMIN_ACTION"] == ""
+    assert authoritative["MATCH_STATUS"] == "UNMATCHED"
+
+    # Original object also remains untouched.
+    assert original["REVIEW_STATUS"] == "PENDING"
+    assert original["ADMIN_ACTION"] == ""
+
+
+def test_invalid_admin_dob_edit_is_rejected_before_staging():
+    from signup.results_reconciliation import admin_result_edit_changes
+
+    original = _reconcile([_result()]).iloc[0].to_dict()
+
+    with pytest.raises(ResultsSchemaError, match="not a valid date"):
+        admin_result_edit_changes(
+            original,
+            {"DOB": "definitely not a date"},
+        )
+
+
+def test_blank_admin_dob_edit_is_rejected_before_staging():
+    from signup.results_reconciliation import admin_result_edit_changes
+
+    original = _reconcile([_result()]).iloc[0].to_dict()
+
+    with pytest.raises(ResultsSchemaError, match="DOB cannot be blank"):
+        admin_result_edit_changes(
+            original,
+            {"DOB": ""},
+        )

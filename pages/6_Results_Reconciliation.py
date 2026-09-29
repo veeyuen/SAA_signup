@@ -408,15 +408,20 @@ else:
             save_edits = st.form_submit_button("Stage edits", use_container_width=True)
         pending_key = f"phase6c_pending_edit_{selected_idx}"
         if save_edits:
-            changes = admin_result_edit_changes(selected_row, edits)
-            if not changes:
-                st.info("No changes to stage.")
+            try:
+                changes = admin_result_edit_changes(selected_row, edits)
+            except ResultsSchemaError as exc:
+                st.error(f"Cannot stage changes: {exc}")
                 st.session_state.pop(pending_key, None)
             else:
-                st.session_state[pending_key] = {
-                    "edits": {field: edits[field] for field in ADMIN_EDITABLE_RESULT_FIELDS},
-                    "changes": changes,
-                }
+                if not changes:
+                    st.info("No changes to stage.")
+                    st.session_state.pop(pending_key, None)
+                else:
+                    st.session_state[pending_key] = {
+                        "edits": {field: edits[field] for field in ADMIN_EDITABLE_RESULT_FIELDS},
+                        "changes": changes,
+                    }
 
         pending_edit = st.session_state.get(pending_key)
         if pending_edit:

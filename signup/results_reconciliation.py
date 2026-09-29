@@ -413,8 +413,27 @@ def registration_resolution_candidates(
     )
 
 
+def validate_admin_result_edits(
+    row: Mapping[str, Any],
+    edits: Mapping[str, Any],
+) -> None:
+    """Validate proposed Phase 6C admin edits before they may be staged."""
+
+    if "DOB" in edits:
+        proposed_dob = _clean(edits.get("DOB"))
+
+        if not proposed_dob:
+            raise ResultsSchemaError("DOB cannot be blank.")
+
+        if not normalise_dob(proposed_dob):
+            raise ResultsSchemaError(
+                f"DOB {proposed_dob!r} is not a valid date."
+            )
+
+
 def admin_result_edit_changes(row: Mapping[str, Any], edits: Mapping[str, Any]) -> list[dict[str, str]]:
     """Return editable fields whose proposed value differs from the current row."""
+    validate_admin_result_edits(row, edits)
     changes: list[dict[str, str]] = []
     for field in ADMIN_EDITABLE_RESULT_FIELDS:
         if field not in edits:
