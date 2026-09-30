@@ -120,6 +120,39 @@ def test_registration_page_persists_selected_competition_across_reruns():
     assert '_remember_competition_context(selected_competition_id)' in source
 
 
+def test_competition_context_helper_does_not_mutate_widget_state_after_instantiation():
+    """Persistence must not assign to the selectbox-backed key after widget creation."""
+    app_path = Path(__file__).resolve().parents[1] / "Competition_Athlete_Registrations.py"
+    tree = ast.parse(app_path.read_text(encoding="utf-8"))
+
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_remember_competition_context"
+    )
+
+    # The helper may update URL query params, but must never assign to
+    # st.session_state["selected_competition_id"]. Streamlit raises
+    # StreamlitWidgetAlreadyInstantiatedError if that happens after the
+    # selectbox with the same key has been created.
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Subscript):
+                continue
+            if not (
+                isinstance(target.value, ast.Attribute)
+                and isinstance(target.value.value, ast.Name)
+                and target.value.value.id == "st"
+                and target.value.attr == "session_state"
+            ):
+                continue
+            slice_node = target.slice
+            if isinstance(slice_node, ast.Constant):
+                assert slice_node.value != "selected_competition_id"
+
+
 def test_stripe_return_restores_competition_context_before_registration_rerun():
     app_path = Path(__file__).resolve().parents[1] / "Competition_Athlete_Registrations.py"
     tree = ast.parse(app_path.read_text(encoding="utf-8"))

@@ -328,10 +328,18 @@ def _query_param_text(name: str) -> str:
 
 
 def _remember_competition_context(competition_id: str) -> None:
+    """Persist competition context in the URL without mutating widget state.
+
+    ``selected_competition_id`` is the key of the Competition selectbox.
+    Streamlit forbids assigning to a widget-backed session-state key after
+    that widget has been instantiated in the current run.  The selectbox
+    itself already owns the session-state value, so persistence only needs
+    to update the query parameter here.  On a fresh run the query parameter
+    is copied into session state *before* the widget is created.
+    """
     competition_id = str(competition_id or "").strip()
     if not competition_id:
         return
-    st.session_state["selected_competition_id"] = competition_id
     st.query_params["competition_id"] = competition_id
 
 
