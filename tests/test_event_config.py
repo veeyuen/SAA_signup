@@ -128,14 +128,69 @@ def test_event_config_division_must_exist_in_divisions_master():
         repo(df).event_config_rows(COMP_ID)
 
 
-def test_event_config_division_case_mismatch_reports_canonical_code():
+def test_event_config_division_case_and_whitespace_variants_are_canonicalized():
     df = event_config_df()
-    df.loc[df["DIVISION"].eq("OPEN"), "DIVISION"] = "Open"
-    with pytest.raises(
-        PilotConfigError,
-        match=r"canonical DIVISIONS\.DIVISION_CODE is 'OPEN'",
-    ):
+    df.loc[df["DIVISION"].eq("OPEN"), "DIVISION"] = "  Open  "
+    rows = repo(df).event_config_rows("  acm5_2026  ")
+    assert rows is not None
+    assert set(rows.loc[rows["DIVISION"].eq("OPEN"), "DIVISION"]) == {"OPEN"}
+    assert "100m H" in names(repo(df), " open ", " female ")
+    assert "110m H" in names(repo(df), "Open", "MALE")
+
+
+def test_event_config_competition_id_case_and_whitespace_variants_are_canonicalized():
+    df = event_config_df()
+    df["COMPETITION_ID"] = "  acm5_2026  "
+    r = repo(df)
+    rows = r.event_config_rows("ACM5_2026")
+    assert rows is not None
+    assert set(rows["COMPETITION_ID"]) == {"ACM5_2026"}
+    assert "80m H" in names(r, "U15", "Female")
+
+
+def test_event_config_gender_case_and_whitespace_variants_are_canonicalized():
+    df = event_config_df()
+    df.loc[df["GENDER"].eq("Female"), "GENDER"] = "  fEmAlE  "
+    df.loc[df["GENDER"].eq("Male"), "GENDER"] = " mAlE "
+    rows = repo(df).event_config_rows(COMP_ID)
+    assert rows is not None
+    assert set(rows["GENDER"]).issubset({"Male", "Female", "Any"})
+    assert "80m H" in names(repo(df), "u15", "FEMALE")
+    assert "110m H" in names(repo(df), " U15 ", "male")
+
+
+def test_event_config_duplicate_detection_is_case_insensitive_for_event_and_keys():
+    df = event_config_df()
+    duplicate = df.iloc[0].copy()
+    duplicate["COMPETITION_ID"] = "acm5_2026"
+    duplicate["DIVISION"] = "u15"
+    duplicate["GENDER"] = "MALE"
+    duplicate["EVENT"] = "100M"
+    df.loc[len(df)] = duplicate
+    with pytest.raises(PilotConfigError, match="duplicates"):
         repo(df).event_config_rows(COMP_ID)
+
+
+def test_master_division_codes_cannot_collide_case_insensitively():
+    r = PilotConfigRepository("test-url")
+    divs = divisions_df()
+    divs.loc[len(divs)] = {
+        "DIVISION_CODE": "Open",
+        "DIVISION_NAME": "Duplicate Open",
+        "MIN_AGE": "16",
+        "MAX_AGE": "",
+        "DISPLAY_ORDER": 999,
+        "ACTIVE": "TRUE",
+    }
+    tables = {
+        "COMPETITIONS": competitions_df(),
+        "DIVISIONS": divs,
+        "COMPETITION_EVENTS": legacy_df(),
+        "EVENT_CONFIG": event_config_df(),
+    }
+    r.table = lambda worksheet, fresh=False: tables[worksheet].copy()
+    with pytest.raises(PilotConfigError, match="case-insensitive"):
+        r.event_config_rows(COMP_ID)
 
 
 def test_inactive_special_division_master_rows_validate_but_are_not_age_eligible():
@@ -156,6 +211,35 @@ def test_legacy_competition_without_event_config_rows_uses_existing_table():
     r = repo()
     assert r.event_config_rows("LEGACY") is None
     assert r.event_options("LEGACY", "Male", "U15") == [("100m", "100")]
+
+
+
+def test_fee_lookup_configuration_keys_are_case_insensitive():
+    r = PilotConfigRepository("test-url")
+    fees = pd.DataFrame([{
+        "COMPETITION_ID": "ACM5_2026",
+        "ORGANIZATION_TYPE": "AFFILIATE",
+        "REGISTRATION_PERIOD": "NORMAL",
+        "FEE_PER_ENTRY_SGD": "12",
+        "ACTIVE": "TRUE",
+    }])
+    r.table = lambda worksheet, fresh=False: fees.copy()
+    assert str(r.fee_for(" acm5_2026 ", "affiliate", " normal ")) == "12"
+
+
+def test_organization_id_lookup_is_case_insensitive():
+    r = PilotConfigRepository("test-url")
+    organizations = pd.DataFrame([{
+        "ORGANIZATION_ID": "ORG_TEST_AFF_001",
+        "ORGANIZATION_NAME": "Test Athletics Club",
+        "TEAM_CODE": "TAC",
+        "ORGANIZATION_TYPE": "AFFILIATE",
+        "ACTIVE": "TRUE",
+    }])
+    r.table = lambda worksheet, fresh=False: organizations.copy()
+    org = r.get_organization(" org_test_aff_001 ")
+    assert org.organization_id == "ORG_TEST_AFF_001"
+    assert org.organization_type == "AFFILIATE"
 
 
 def test_event_config_is_enforced_server_side_if_ui_is_bypassed():

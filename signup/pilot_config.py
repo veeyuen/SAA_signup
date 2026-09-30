@@ -43,6 +43,38 @@ def _upper(value) -> str:
     return _clean(value).upper()
 
 
+def _config_key(value) -> str:
+    """Normalize configuration identifiers/enum-like values for comparison.
+
+    Configuration matching is intentionally whitespace- and case-insensitive.
+    The original/canonical spelling from the master sheet is preserved for
+    display and persisted values.
+    """
+    return _clean(value).casefold()
+
+
+def _canonical_config_map(values, *, label: str) -> dict[str, str]:
+    """Return normalized->canonical values and reject ambiguous masters.
+
+    Two master values such as ``OPEN`` and ``Open`` are semantically identical
+    under case-insensitive matching and therefore cannot coexist safely.
+    """
+    mapping: dict[str, str] = {}
+    for value in values:
+        canonical = _clean(value)
+        if not canonical:
+            continue
+        key = _config_key(canonical)
+        previous = mapping.get(key)
+        if previous is not None:
+            raise PilotConfigError(
+                f"{label} contains duplicate/ambiguous values {previous!r} and {canonical!r}; "
+                "configuration identifiers are case-insensitive."
+            )
+        mapping[key] = canonical
+    return mapping
+
+
 def _as_bool(value, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -279,7 +311,7 @@ class PilotConfigRepository:
         )
 
         matches = df[
-            df["ORGANIZATION_ID"].map(_clean).eq(_clean(organization_id))
+            df["ORGANIZATION_ID"].map(_config_key).eq(_config_key(organization_id))
             & df["ACTIVE"].map(lambda x: _as_bool(x, False))
         ]
         if len(matches) != 1:
@@ -386,9 +418,9 @@ class PilotConfigRepository:
         )
 
         matches = df[
-            df["COMPETITION_ID"].map(_clean).eq(_clean(competition_id))
-            & df["ORGANIZATION_TYPE"].map(_upper).eq(_upper(organization_type))
-            & df["REGISTRATION_PERIOD"].map(_upper).eq(_upper(registration_period))
+            df["COMPETITION_ID"].map(_config_key).eq(_config_key(competition_id))
+            & df["ORGANIZATION_TYPE"].map(_config_key).eq(_config_key(organization_type))
+            & df["REGISTRATION_PERIOD"].map(_config_key).eq(_config_key(registration_period))
             & df["ACTIVE"].map(lambda x: _as_bool(x, False))
         ]
 
@@ -431,12 +463,17 @@ class PilotConfigRepository:
 
 
     def event_config_rows(self, competition_id: str) -> pd.DataFrame | None:
-        """Return validated EVENT_CONFIG rows for one competition, or None for legacy fallback.
+        """Return validated/canonical EVENT_CONFIG rows for one competition.
 
-        EVENT_CONFIG is opt-in per competition. If the worksheet is absent, or it
-        contains no rows for this competition, callers continue to use the legacy
-        COMPETITION_EVENTS table. Once rows exist for a competition, the entire
-        worksheet is validated strictly because it is user-maintainable master data.
+        Configuration identifiers are compared case-insensitively and with
+        surrounding whitespace ignored. Master-sheet spelling remains
+        canonical: e.g. EVENT_CONFIG ``Open`` resolves to DIVISIONS ``OPEN``.
+
+        EVENT_CONFIG is opt-in per competition. If the worksheet is absent, or
+        it contains no rows for this competition, callers continue to use the
+        legacy COMPETITION_EVENTS table. Once rows exist for a competition, the
+        entire worksheet is validated strictly because it is user-maintainable
+        master data.
         """
         try:
             df = self.table("EVENT_CONFIG")
@@ -452,27 +489,31 @@ class PilotConfigRepository:
         required = ["ACTIVE", "COMPETITION_ID", "DIVISION", "GENDER", "EVENT"]
         _require_columns(df, "EVENT_CONFIG", required)
 
-        # Opt in only when this competition has at least one configured row.
-        scoped = df[df["COMPETITION_ID"].map(_clean).eq(_clean(competition_id))]
-        if scoped.empty:
-            return None
-
         competitions = self.table("COMPETITIONS")
         _require_columns(competitions, "COMPETITIONS", ["COMPETITION_ID"] )
-        valid_competition_ids = {_clean(v) for v in competitions["COMPETITION_ID"] if _clean(v)}
+        competition_map = _canonical_config_map(
+            competitions["COMPETITION_ID"],
+            label="COMPETITIONS.COMPETITION_ID",
+        )
 
         divisions = self.table("DIVISIONS")
         _require_columns(divisions, "DIVISIONS", ["DIVISION_CODE"])
-        valid_division_codes = {
-            _clean(v) for v in divisions["DIVISION_CODE"] if _clean(v)
-        }
-        canonical_division_by_casefold = {
-            code.casefold(): code for code in valid_division_codes
-        }
+        division_map = _canonical_config_map(
+            divisions["DIVISION_CODE"],
+            label="DIVISIONS.DIVISION_CODE",
+        )
 
+        # Opt in when this competition has at least one configured row, using
+        # normalized identifiers so ACM5_2026 / acm5_2026 are equivalent.
+        target_competition_key = _config_key(competition_id)
+        scoped_mask = df["COMPETITION_ID"].map(_config_key).eq(target_competition_key)
+        if not scoped_mask.any():
+            return None
+
+        canonical_df = df.copy()
         seen = set()
         errors = []
-        for index, row in df.iterrows():
+        for index, row in canonical_df.iterrows():
             row_no = index + 2
             values = {name: _clean(row.get(name)) for name in required}
             missing = [name for name in required if not values[name]]
@@ -480,36 +521,48 @@ class PilotConfigRepository:
                 errors.append(f"row {row_no} missing {', '.join(missing)}")
                 continue
 
-            active_raw = values["ACTIVE"].casefold()
+            active_raw = _config_key(values["ACTIVE"])
             if active_raw not in {"true", "false", "1", "0", "yes", "no", "y", "n", "active", "inactive"}:
                 errors.append(f"row {row_no} has invalid ACTIVE={values['ACTIVE']!r}")
 
-            if values["COMPETITION_ID"] not in valid_competition_ids:
-                errors.append(f"row {row_no} references unknown COMPETITION_ID={values['COMPETITION_ID']!r}")
+            competition_key = _config_key(values["COMPETITION_ID"])
+            canonical_competition = competition_map.get(competition_key)
+            if canonical_competition is None:
+                errors.append(
+                    f"row {row_no} references unknown COMPETITION_ID={values['COMPETITION_ID']!r}"
+                )
+            else:
+                canonical_df.at[index, "COMPETITION_ID"] = canonical_competition
 
-            division = values["DIVISION"]
-            if division not in valid_division_codes:
-                canonical = canonical_division_by_casefold.get(division.casefold())
-                if canonical:
-                    errors.append(
-                        f"row {row_no} uses DIVISION={division!r}; "
-                        f"canonical DIVISIONS.DIVISION_CODE is {canonical!r}"
-                    )
-                else:
-                    errors.append(
-                        f"row {row_no} references unknown DIVISION={division!r}"
-                    )
+            division_key = _config_key(values["DIVISION"])
+            canonical_division = division_map.get(division_key)
+            if canonical_division is None:
+                errors.append(
+                    f"row {row_no} references unknown DIVISION={values['DIVISION']!r}"
+                )
+            else:
+                canonical_df.at[index, "DIVISION"] = canonical_division
+
+            # Canonicalize the known gender labels while keeping matching
+            # tolerant of case/whitespace and legacy M/F abbreviations.
+            gender_key = _gender_key(values["GENDER"])
+            if gender_key == "M":
+                canonical_df.at[index, "GENDER"] = "Male"
+            elif gender_key == "F":
+                canonical_df.at[index, "GENDER"] = "Female"
+            elif _config_key(values["GENDER"]) == "any":
+                canonical_df.at[index, "GENDER"] = "Any"
 
             display_raw = _clean(row.get("DISPLAY_ORDER"))
             if display_raw and _as_int_or_none(display_raw) is None:
                 errors.append(f"row {row_no} has invalid DISPLAY_ORDER={display_raw!r}")
 
             duplicate_key = (
-                values["COMPETITION_ID"].casefold(),
-                values["DIVISION"].casefold(),
+                competition_key,
+                division_key,
                 _gender_key(values["GENDER"]),
-                values["EVENT"].casefold(),
-                _clean(row.get("EVENT_CLASS")).casefold(),
+                _config_key(values["EVENT"]),
+                _config_key(row.get("EVENT_CLASS")),
             )
             if duplicate_key in seen:
                 errors.append(f"row {row_no} duplicates an earlier EVENT_CONFIG row")
@@ -518,7 +571,11 @@ class PilotConfigRepository:
         if errors:
             raise PilotConfigError("Invalid EVENT_CONFIG: " + "; ".join(errors))
 
-        return scoped.copy()
+        # Recompute the scope after canonicalization; callers receive canonical
+        # master identifiers even when the sheet used alternate case/spacing.
+        return canonical_df[
+            canonical_df["COMPETITION_ID"].map(_config_key).eq(target_competition_key)
+        ].copy()
 
     def competition_event_rows(self, competition_id: str) -> pd.DataFrame:
         """Return the effective event table, adapting EVENT_CONFIG when opted in."""
@@ -573,20 +630,18 @@ class PilotConfigRepository:
         )
 
         mask = (
-            events["COMPETITION_ID"].map(_clean).eq(_clean(competition_id))
+            events["COMPETITION_ID"].map(_config_key).eq(_config_key(competition_id))
             & events["ACTIVE"].map(lambda x: _as_bool(x, False))
         )
         if _clean(gender):
             requested_gender = _gender_key(gender)
             mask &= events["GENDER"].map(_gender_key).isin([requested_gender, "ANY"])
 
-        offered_codes = []
-        seen = set()
-        for value in events.loc[mask, "DIVISION_CODE"]:
-            code = _clean(value)
-            if code and code not in seen:
-                offered_codes.append(code)
-                seen.add(code)
+        offered_codes_raw = [
+            _clean(value)
+            for value in events.loc[mask, "DIVISION_CODE"]
+            if _clean(value)
+        ]
 
         divs = self.table("DIVISIONS")
         _require_columns(
@@ -601,6 +656,19 @@ class PilotConfigRepository:
                 "ACTIVE",
             ],
         )
+
+        division_map = _canonical_config_map(
+            divs["DIVISION_CODE"],
+            label="DIVISIONS.DIVISION_CODE",
+        )
+        offered_codes = []
+        seen = set()
+        for raw_code in offered_codes_raw:
+            canonical = division_map.get(_config_key(raw_code), raw_code)
+            key = _config_key(canonical)
+            if canonical and key not in seen:
+                offered_codes.append(canonical)
+                seen.add(key)
 
         labels = {}
         order = {}
@@ -671,9 +739,9 @@ class PilotConfigRepository:
         requested_gender = _gender_key(gender)
 
         matches = df[
-            df["COMPETITION_ID"].map(_clean).eq(_clean(competition_id))
+            df["COMPETITION_ID"].map(_config_key).eq(_config_key(competition_id))
             & df["GENDER"].map(_gender_key).isin([requested_gender, "ANY"])
-            & df["DIVISION_CODE"].map(_clean).eq(_clean(division_code))
+            & df["DIVISION_CODE"].map(_config_key).eq(_config_key(division_code))
             & df["ACTIVE"].map(lambda x: _as_bool(x, False))
         ]
 
