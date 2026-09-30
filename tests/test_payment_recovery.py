@@ -52,6 +52,55 @@ def test_back_to_registration_clears_resumable_payment_cache_before_rerun():
     assert clear_call.lineno < rerun_call.lineno
 
 
+def test_stripe_return_tracks_order_for_webhook_grace_period():
+    """Back from Stripe must identify the just-returned order on the next rerun."""
+    app_path = Path(__file__).resolve().parents[1] / "Competition_Athlete_Registrations.py"
+    tree = ast.parse(app_path.read_text(encoding="utf-8"))
+
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "show_stripe_return_status"
+    )
+    calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+    start_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Name)
+        and call.func.id == "_start_another_registration"
+    )
+
+    keyword = next(
+        kw for kw in start_call.keywords if kw.arg == "stripe_return_order_id"
+    )
+    assert isinstance(keyword.value, ast.Name)
+    assert keyword.value.id == "order_id"
+
+
+def test_recent_stripe_return_uses_fresh_transaction_batch_read():
+    """A just-returned Stripe order must bypass the 30-second pending cache."""
+    app_path = Path(__file__).resolve().parents[1] / "Competition_Athlete_Registrations.py"
+    tree = ast.parse(app_path.read_text(encoding="utf-8"))
+
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_show_persisted_pending_payments"
+    )
+    calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+
+    assert any(
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "list_rows_many"
+        for call in calls
+    )
+    assert any(
+        isinstance(node, ast.Constant) and node.value == "recent_stripe_return"
+        for node in ast.walk(function)
+    )
+
+
 def _order(**overrides):
     row = {
         "ORDER_ID": "ORD-1",

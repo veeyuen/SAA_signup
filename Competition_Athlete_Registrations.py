@@ -320,7 +320,7 @@ def _queue_clear_athlete_fields() -> None:
             st.session_state[f"{key}__pending"] = ""
 
 
-def _start_another_registration() -> None:
+def _start_another_registration(*, stripe_return_order_id: str = "") -> None:
     """Reset order/athlete state while keeping the user logged in and competition selected."""
     clear_cart()
     st.session_state.pop("pending_checkout", None)
@@ -328,10 +328,20 @@ def _start_another_registration() -> None:
     st.session_state.pop("order_waiver_signer_name", None)
     st.session_state.pop("draft_order_id", None)
 
+    # A successful Stripe redirect can beat the webhook by a fraction of a
+    # second. Remember that specific order so the registration screen treats
+    # it as "confirmation processing" rather than immediately offering a
+    # second payment/cancellation while the webhook is still settling.
+    returned_order_id = str(stripe_return_order_id or "").strip()
+    if returned_order_id:
+        st.session_state["recent_stripe_return"] = {
+            "order_id": returned_order_id,
+            "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+
     # Stripe's webhook may confirm the order while the user is on the return
     # screen. Do not reuse a cached pre-webhook PAYMENT_STARTED snapshot when
-    # returning to registration; the next pending-payment check must re-read
-    # the authoritative transaction state.
+    # returning to registration.
     _cached_resumable_payment_orders.clear()
 
     _queue_clear_athlete_fields()
@@ -392,7 +402,7 @@ def show_stripe_return_status():
             type="primary",
             key="back_to_registration_after_stripe",
         ):
-            _start_another_registration()
+            _start_another_registration(stripe_return_order_id=order_id)
 
         st.stop()
 
@@ -800,18 +810,97 @@ def _resume_persisted_payment(candidate: dict) -> None:
 
 
 def _show_persisted_pending_payments() -> None:
+    recent_return = st.session_state.get("recent_stripe_return", {}) or {}
+    recent_order_id = str(recent_return.get("order_id", "") or "").strip()
+
     try:
-        candidates = _cached_resumable_payment_orders(
-            TRANSACTION_SHEET_URL,
-            current_user.user_id,
-            current_organization.organization_id,
-        )
+        if recent_order_id:
+            # Bypass the 30-second cache during the immediate post-Stripe
+            # webhook race. One fresh batch read lets confirmation evidence in
+            # any transaction sheet win as soon as the webhook has persisted it.
+            store = _transaction_store()
+            snapshot = store.list_rows_many(
+                ["ORDERS", "PAYMENTS", "REGISTRATIONS", "EVENT_ENTRIES"]
+            )
+            scoped_orders = [
+                order
+                for order in snapshot["ORDERS"]
+                if pending_stripe_order_in_scope(
+                    order,
+                    user_id=current_user.user_id,
+                    organization_id=current_organization.organization_id,
+                )
+            ]
+            candidates = find_resumable_payment_orders(
+                orders=scoped_orders,
+                payments=snapshot["PAYMENTS"],
+                registrations=snapshot["REGISTRATIONS"],
+                event_entries=snapshot["EVENT_ENTRIES"],
+                user_id=current_user.user_id,
+                organization_id=current_organization.organization_id,
+            )
+        else:
+            candidates = _cached_resumable_payment_orders(
+                TRANSACTION_SHEET_URL,
+                current_user.user_id,
+                current_organization.organization_id,
+            )
     except Exception as exc:
         st.warning(
             "Could not check for existing pending payments right now: "
             f"{type(exc).__name__}: {exc}"
         )
         return
+
+    if recent_order_id:
+        recent_candidate = next(
+            (row for row in candidates if str(row.get("order_id", "")).strip() == recent_order_id),
+            None,
+        )
+        if recent_candidate is None:
+            # The webhook has now supplied confirmation evidence. Remove the
+            # grace marker and make sure no pre-confirmation cache survives.
+            st.session_state.pop("recent_stripe_return", None)
+            _cached_resumable_payment_orders.clear()
+        else:
+            started_at_raw = str(recent_return.get("started_at", "") or "").strip()
+            try:
+                started_at = dt.datetime.fromisoformat(started_at_raw)
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=dt.timezone.utc)
+                age_seconds = (
+                    dt.datetime.now(dt.timezone.utc)
+                    - started_at.astimezone(dt.timezone.utc)
+                ).total_seconds()
+            except (TypeError, ValueError):
+                age_seconds = 0
+
+            if age_seconds < 60:
+                st.info(
+                    "Stripe returned successfully and payment confirmation is still "
+                    "being processed. Do not pay or cancel this order again yet."
+                )
+                st.caption(f"Order reference: {recent_order_id}")
+                if st.button(
+                    "Check payment confirmation",
+                    key=f"check_recent_stripe_return_{recent_order_id}",
+                ):
+                    _cached_resumable_payment_orders.clear()
+                    st.rerun()
+
+                # Do not mislabel this just-returned order as an unpaid/resumable
+                # payment during the webhook grace period. Other genuinely
+                # pending orders, if any, can still be displayed below.
+                candidates = [
+                    row
+                    for row in candidates
+                    if str(row.get("order_id", "")).strip() != recent_order_id
+                ]
+            else:
+                # If webhook confirmation has not appeared after the grace
+                # period, restore the normal recovery controls so the user is
+                # never stranded by a failed webhook.
+                st.session_state.pop("recent_stripe_return", None)
 
     if not candidates:
         return
