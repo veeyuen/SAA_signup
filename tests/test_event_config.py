@@ -20,7 +20,10 @@ def divisions_df():
         {"DIVISION_CODE": "U15", "DIVISION_NAME": "U15", "MIN_AGE": "13", "MAX_AGE": "15", "DISPLAY_ORDER": 10, "ACTIVE": "TRUE"},
         {"DIVISION_CODE": "U18", "DIVISION_NAME": "U18", "MIN_AGE": "16", "MAX_AGE": "17", "DISPLAY_ORDER": 20, "ACTIVE": "TRUE"},
         {"DIVISION_CODE": "U20", "DIVISION_NAME": "U20", "MIN_AGE": "18", "MAX_AGE": "19", "DISPLAY_ORDER": 30, "ACTIVE": "TRUE"},
-        {"DIVISION_CODE": "Open", "DIVISION_NAME": "Open", "MIN_AGE": "16", "MAX_AGE": "", "DISPLAY_ORDER": 40, "ACTIVE": "TRUE"},
+        {"DIVISION_CODE": "OPEN", "DIVISION_NAME": "Open", "MIN_AGE": "16", "MAX_AGE": "", "DISPLAY_ORDER": 40, "ACTIVE": "TRUE"},
+        {"DIVISION_CODE": "Novice", "DIVISION_NAME": "Novice", "MIN_AGE": "", "MAX_AGE": "", "DISPLAY_ORDER": 50, "ACTIVE": "FALSE"},
+        {"DIVISION_CODE": "Intermediate", "DIVISION_NAME": "Intermediate", "MIN_AGE": "", "MAX_AGE": "", "DISPLAY_ORDER": 60, "ACTIVE": "FALSE"},
+        {"DIVISION_CODE": "Advance", "DIVISION_NAME": "Advance", "MIN_AGE": "", "MAX_AGE": "", "DISPLAY_ORDER": 70, "ACTIVE": "FALSE"},
     ])
 
 
@@ -43,8 +46,8 @@ def event_config_df():
     add("U18", "Male", "100m", "2000m SC")
     add("U20", "Male", "100m", "3000m SC")
     add("U20", "Female", "100m", "2000m SC")
-    add("Open", "Male", "10000m Race Walk", "110m H")
-    add("Open", "Female", "10000m Race Walk", "100m H")
+    add("OPEN", "Male", "10000m Race Walk", "110m H")
+    add("OPEN", "Female", "10000m Race Walk", "100m H")
     add("Novice", "Any", "High Jump", "Pole Vault")
     add("Intermediate", "Any", "High Jump", "Pole Vault")
     add("Advance", "Any", "High Jump", "Pole Vault")
@@ -76,8 +79,8 @@ def test_acm5_resolves_event_config_and_expected_matrix():
     assert "2000m SC" in names(r, "U18", "Male")
     assert "3000m SC" in names(r, "U20", "Male")
     assert "2000m SC" in names(r, "U20", "Female")
-    assert {"10000m Race Walk", "110m H"}.issubset(names(r, "Open", "Male"))
-    assert {"10000m Race Walk", "100m H"}.issubset(names(r, "Open", "Female"))
+    assert {"10000m Race Walk", "110m H"}.issubset(names(r, "OPEN", "Male"))
+    assert {"10000m Race Walk", "100m H"}.issubset(names(r, "OPEN", "Female"))
 
 
 @pytest.mark.parametrize("division", ["Novice", "Intermediate", "Advance"])
@@ -116,6 +119,37 @@ def test_invalid_required_configuration_is_detected(field, value, match):
     df.loc[0, field] = value
     with pytest.raises(PilotConfigError, match=match):
         repo(df).event_config_rows(COMP_ID)
+
+
+def test_event_config_division_must_exist_in_divisions_master():
+    df = event_config_df()
+    df.loc[df["DIVISION"].eq("U15"), "DIVISION"] = "U15_typo"
+    with pytest.raises(PilotConfigError, match="unknown DIVISION='U15_typo'"):
+        repo(df).event_config_rows(COMP_ID)
+
+
+def test_event_config_division_case_mismatch_reports_canonical_code():
+    df = event_config_df()
+    df.loc[df["DIVISION"].eq("OPEN"), "DIVISION"] = "Open"
+    with pytest.raises(
+        PilotConfigError,
+        match=r"canonical DIVISIONS\.DIVISION_CODE is 'OPEN'",
+    ):
+        repo(df).event_config_rows(COMP_ID)
+
+
+def test_inactive_special_division_master_rows_validate_but_are_not_age_eligible():
+    r = repo()
+    # Referential integrity accepts the codes because they exist in DIVISIONS.
+    assert r.event_config_rows(COMP_ID) is not None
+    # Their inactive master rows and blank age rules keep them out of registration
+    # until SAA supplies explicit eligibility rules.
+    assert r.division_rows(
+        COMP_ID,
+        gender="Female",
+        birth_date="2000-06-15",
+        competition_start_at="2026-10-22",
+    ) == [{"code": "OPEN", "label": "Open", "age": 26}]
 
 
 def test_legacy_competition_without_event_config_rows_uses_existing_table():

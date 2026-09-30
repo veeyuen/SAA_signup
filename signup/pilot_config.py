@@ -461,6 +461,15 @@ class PilotConfigRepository:
         _require_columns(competitions, "COMPETITIONS", ["COMPETITION_ID"] )
         valid_competition_ids = {_clean(v) for v in competitions["COMPETITION_ID"] if _clean(v)}
 
+        divisions = self.table("DIVISIONS")
+        _require_columns(divisions, "DIVISIONS", ["DIVISION_CODE"])
+        valid_division_codes = {
+            _clean(v) for v in divisions["DIVISION_CODE"] if _clean(v)
+        }
+        canonical_division_by_casefold = {
+            code.casefold(): code for code in valid_division_codes
+        }
+
         seen = set()
         errors = []
         for index, row in df.iterrows():
@@ -477,6 +486,19 @@ class PilotConfigRepository:
 
             if values["COMPETITION_ID"] not in valid_competition_ids:
                 errors.append(f"row {row_no} references unknown COMPETITION_ID={values['COMPETITION_ID']!r}")
+
+            division = values["DIVISION"]
+            if division not in valid_division_codes:
+                canonical = canonical_division_by_casefold.get(division.casefold())
+                if canonical:
+                    errors.append(
+                        f"row {row_no} uses DIVISION={division!r}; "
+                        f"canonical DIVISIONS.DIVISION_CODE is {canonical!r}"
+                    )
+                else:
+                    errors.append(
+                        f"row {row_no} references unknown DIVISION={division!r}"
+                    )
 
             display_raw = _clean(row.get("DISPLAY_ORDER"))
             if display_raw and _as_int_or_none(display_raw) is None:
