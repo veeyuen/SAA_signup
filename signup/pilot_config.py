@@ -550,8 +550,13 @@ class PilotConfigRepository:
                 canonical_df.at[index, "GENDER"] = "Male"
             elif gender_key == "F":
                 canonical_df.at[index, "GENDER"] = "Female"
-            elif _config_key(values["GENDER"]) == "any":
+            elif gender_key == "ANY":
                 canonical_df.at[index, "GENDER"] = "Any"
+            else:
+                errors.append(
+                    f"row {row_no} has invalid GENDER={values['GENDER']!r}; "
+                    "expected Male, Female or Any"
+                )
 
             display_raw = _clean(row.get("DISPLAY_ORDER"))
             if display_raw and _as_int_or_none(display_raw) is None:

@@ -159,6 +159,13 @@ def test_event_config_gender_case_and_whitespace_variants_are_canonicalized():
     assert "110m H" in names(repo(df), " U15 ", "male")
 
 
+def test_event_config_invalid_gender_is_rejected_explicitly():
+    df = event_config_df()
+    df.loc[0, "GENDER"] = "MALE_BAD"
+    with pytest.raises(PilotConfigError, match="invalid GENDER='MALE_BAD'"):
+        repo(df).event_config_rows(COMP_ID)
+
+
 def test_event_config_duplicate_detection_is_case_insensitive_for_event_and_keys():
     df = event_config_df()
     duplicate = df.iloc[0].copy()
