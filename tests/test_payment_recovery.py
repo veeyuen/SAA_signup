@@ -101,6 +101,56 @@ def test_recent_stripe_return_uses_fresh_transaction_batch_read():
     )
 
 
+def test_stripe_checkout_return_urls_preserve_order_and_competition():
+    stripe_path = Path(__file__).resolve().parents[1] / "signup" / "stripe_payment.py"
+    source = stripe_path.read_text(encoding="utf-8")
+
+    assert 'competition_id: str = ""' in source
+    assert 'return_context = f"&order_id={quote(registration_id, safe=\'\')}"' in source
+    assert '"&competition_id={quote(competition_id, safe=\'\')}"' in source
+    assert 'f"{return_context}"' in source
+
+
+def test_registration_page_persists_selected_competition_across_reruns():
+    app_path = Path(__file__).resolve().parents[1] / "Competition_Athlete_Registrations.py"
+    source = app_path.read_text(encoding="utf-8")
+
+    assert '_requested_competition_id = _query_param_text("competition_id")' in source
+    assert "on_change=_sync_selected_competition_to_url" in source
+    assert '_remember_competition_context(selected_competition_id)' in source
+
+
+def test_stripe_return_restores_competition_context_before_registration_rerun():
+    app_path = Path(__file__).resolve().parents[1] / "Competition_Athlete_Registrations.py"
+    tree = ast.parse(app_path.read_text(encoding="utf-8"))
+
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "show_stripe_return_status"
+    )
+    constants = {
+        node.value
+        for node in ast.walk(function)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "competition_id" in constants
+    assert "order_id" in constants
+
+    calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+    start_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Name)
+        and call.func.id == "_start_another_registration"
+    )
+    competition_keyword = next(
+        kw for kw in start_call.keywords if kw.arg == "competition_id"
+    )
+    assert isinstance(competition_keyword.value, ast.Name)
+    assert competition_keyword.value.id == "competition_id"
+
+
 def _order(**overrides):
     row = {
         "ORDER_ID": "ORD-1",

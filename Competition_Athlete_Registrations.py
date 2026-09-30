@@ -320,8 +320,46 @@ def _queue_clear_athlete_fields() -> None:
             st.session_state[f"{key}__pending"] = ""
 
 
-def _start_another_registration(*, stripe_return_order_id: str = "") -> None:
+_PAYMENT_RETURN_QUERY_KEYS = ("payment_result", "session_id", "order_id")
+
+
+def _query_param_text(name: str) -> str:
+    return str(st.query_params.get(name, "") or "").strip()
+
+
+def _remember_competition_context(competition_id: str) -> None:
+    competition_id = str(competition_id or "").strip()
+    if not competition_id:
+        return
+    st.session_state["selected_competition_id"] = competition_id
+    st.query_params["competition_id"] = competition_id
+
+
+def _clear_payment_return_query_params(*, competition_id: str = "") -> None:
+    """Remove one-time Stripe return parameters while preserving competition context."""
+    for key in _PAYMENT_RETURN_QUERY_KEYS:
+        if key in st.query_params:
+            del st.query_params[key]
+    competition_id = str(competition_id or "").strip()
+    if competition_id:
+        st.query_params["competition_id"] = competition_id
+
+
+def _start_another_registration(
+    *,
+    stripe_return_order_id: str = "",
+    competition_id: str = "",
+) -> None:
     """Reset order/athlete state while keeping the user logged in and competition selected."""
+    competition_id = str(
+        competition_id
+        or st.session_state.get("selected_competition_id", "")
+        or _query_param_text("competition_id")
+        or ""
+    ).strip()
+    if competition_id:
+        _remember_competition_context(competition_id)
+
     clear_cart()
     st.session_state.pop("pending_checkout", None)
     st.session_state.pop("order_waiver_ok", None)
@@ -345,7 +383,7 @@ def _start_another_registration(*, stripe_return_order_id: str = "") -> None:
     _cached_resumable_payment_orders.clear()
 
     _queue_clear_athlete_fields()
-    st.query_params.clear()
+    _clear_payment_return_query_params(competition_id=competition_id)
     st.rerun()
 
 
@@ -364,8 +402,17 @@ def show_stripe_return_status():
     order_id = str(
         pending_checkout.get("order_id", "")
         or pending_checkout.get("registration_id", "")
+        or _query_param_text("order_id")
         or ""
     ).strip()
+    competition_id = str(
+        pending_checkout.get("competition_id", "")
+        or _query_param_text("competition_id")
+        or st.session_state.get("selected_competition_id", "")
+        or ""
+    ).strip()
+    if competition_id:
+        _remember_competition_context(competition_id)
 
     if payment_result == "cancelled":
         st.warning("Payment was cancelled. Your registration has not been confirmed.")
@@ -374,7 +421,7 @@ def show_stripe_return_status():
 
         if st.button("Return to registration form", type="primary"):
             st.session_state.pop("pending_checkout", None)
-            st.query_params.clear()
+            _clear_payment_return_query_params(competition_id=competition_id)
             st.rerun()
 
         st.stop()
@@ -402,7 +449,10 @@ def show_stripe_return_status():
             type="primary",
             key="back_to_registration_after_stripe",
         ):
-            _start_another_registration(stripe_return_order_id=order_id)
+            _start_another_registration(
+                stripe_return_order_id=order_id,
+                competition_id=competition_id,
+            )
 
         st.stop()
 
@@ -738,6 +788,7 @@ def _resume_persisted_payment(candidate: dict) -> None:
             customer_email=customer_email,
             description=description,
             public_app_url=public_app_url,
+            competition_id=competition_id,
             existing_session_id=existing_session_id,
             force_new=checkout_force_new(stripe_status),
         )
@@ -798,6 +849,7 @@ def _resume_persisted_payment(candidate: dict) -> None:
     st.session_state["pending_checkout"] = {
         "order_id": order_id,
         "registration_id": order_id,
+        "competition_id": competition_id,
         "payment_id": payment_id,
         "session_id": checkout.get("session_id", ""),
         "payment_url": checkout.get("payment_url", ""),
@@ -971,6 +1023,20 @@ _competition_by_id = {
 }
 _competition_ids = list(_competition_by_id.keys())
 
+# Preserve the selected competition in the URL so a browser refresh or a
+# Stripe round-trip that establishes a new Streamlit session can restore the
+# user's competition instead of silently falling back to the first open meet.
+_requested_competition_id = _query_param_text("competition_id")
+if (
+    _requested_competition_id
+    and _requested_competition_id in _competition_by_id
+    and not cart_has_items()
+):
+    st.session_state["selected_competition_id"] = _requested_competition_id
+
+if st.session_state.get("selected_competition_id") not in _competition_by_id:
+    st.session_state["selected_competition_id"] = _competition_ids[0]
+
 # A cart belongs to one competition. While it contains entries the competition
 # selector is locked so fee/event rules cannot change underneath the cart.
 get_cart()
@@ -981,6 +1047,13 @@ if (
     and _cart_locked_competition_id in _competition_by_id
 ):
     st.session_state["selected_competition_id"] = _cart_locked_competition_id
+    _remember_competition_context(_cart_locked_competition_id)
+
+
+def _sync_selected_competition_to_url() -> None:
+    _remember_competition_context(
+        str(st.session_state.get("selected_competition_id", "") or "")
+    )
 
 selected_competition_id = st.selectbox(
     "Competition",
@@ -988,7 +1061,9 @@ selected_competition_id = st.selectbox(
     format_func=lambda cid: _competition_by_id[cid].competition_name,
     key="selected_competition_id",
     disabled=cart_has_items(),
+    on_change=_sync_selected_competition_to_url,
 )
+_remember_competition_context(selected_competition_id)
 if cart_has_items():
     st.caption("Competition is locked while the cart contains entries.")
 selected_competition = _competition_by_id[selected_competition_id]
@@ -3246,6 +3321,7 @@ else:
                     ),
                     description=order_description,
                     public_app_url=public_app_url,
+                    competition_id=selected_competition_id,
                     existing_session_id=existing_session_id,
                     force_new=force_new_checkout,
                 )
@@ -3323,6 +3399,7 @@ else:
             st.session_state["pending_checkout"] = {
                 "order_id": order_id,
                 "registration_id": order_id,
+                "competition_id": selected_competition_id,
                 "payment_id": payment_id,
                 "session_id": checkout["session_id"],
                 "payment_url": checkout["payment_url"],

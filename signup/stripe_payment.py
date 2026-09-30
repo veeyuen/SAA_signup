@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
+from urllib.parse import quote
 
 import stripe
 
@@ -37,6 +38,7 @@ def get_or_create_registration_checkout(
     customer_email: str,
     description: str,
     public_app_url: str,
+    competition_id: str = "",
     existing_session_id: str = "",
     force_new: bool = False,
 ) -> dict:
@@ -49,6 +51,7 @@ def get_or_create_registration_checkout(
     """
     secret_key = str(secret_key or "").strip()
     registration_id = str(registration_id or "").strip()
+    competition_id = str(competition_id or "").strip()
     existing_session_id = str(existing_session_id or "").strip()
     currency = str(currency or "sgd").strip().lower()
     public_app_url = str(public_app_url or "").strip().rstrip("/")
@@ -97,11 +100,19 @@ def get_or_create_registration_checkout(
         raise ValueError("Checkout amount must be greater than zero.")
     unit_amount = int((amount_decimal * 100).to_integral_value())
 
+    return_context = f"&order_id={quote(registration_id, safe='')}"
+    if competition_id:
+        return_context += f"&competition_id={quote(competition_id, safe='')}"
+
     success_url = (
         f"{public_app_url}?payment_result=success"
         "&session_id={CHECKOUT_SESSION_ID}"
+        f"{return_context}"
     )
-    cancel_url = f"{public_app_url}?payment_result=cancelled"
+    cancel_url = (
+        f"{public_app_url}?payment_result=cancelled"
+        f"{return_context}"
+    )
 
     # The first attempt is stable per order. A genuine retry is stable per
     # previous session, preventing two replacement sessions from a double click.
