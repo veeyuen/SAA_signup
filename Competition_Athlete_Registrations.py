@@ -327,6 +327,13 @@ def _start_another_registration() -> None:
     st.session_state.pop("order_waiver_ok", None)
     st.session_state.pop("order_waiver_signer_name", None)
     st.session_state.pop("draft_order_id", None)
+
+    # Stripe's webhook may confirm the order while the user is on the return
+    # screen. Do not reuse a cached pre-webhook PAYMENT_STARTED snapshot when
+    # returning to registration; the next pending-payment check must re-read
+    # the authoritative transaction state.
+    _cached_resumable_payment_orders.clear()
+
     _queue_clear_athlete_fields()
     st.query_params.clear()
     st.rerun()

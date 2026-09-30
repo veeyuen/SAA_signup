@@ -1,4 +1,6 @@
+import ast
 import datetime as dt
+from pathlib import Path
 
 from signup.payment_recovery import (
     checkout_force_new,
@@ -11,6 +13,43 @@ from signup.pending_payment import (
     cancel_pending_registration,
     retarget_pending_checkout_session,
 )
+
+
+def test_back_to_registration_clears_resumable_payment_cache_before_rerun():
+    """A paid Stripe order must not reuse a stale PAYMENT_STARTED cache entry."""
+    app_path = Path(__file__).resolve().parents[1] / "Competition_Athlete_Registrations.py"
+    tree = ast.parse(app_path.read_text(encoding="utf-8"))
+
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_start_another_registration"
+    )
+
+    calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+    ]
+
+    clear_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Attribute)
+        and call.func.attr == "clear"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "_cached_resumable_payment_orders"
+    )
+    rerun_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Attribute)
+        and call.func.attr == "rerun"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "st"
+    )
+
+    assert clear_call.lineno < rerun_call.lineno
 
 
 def _order(**overrides):
