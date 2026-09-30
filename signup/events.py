@@ -52,8 +52,8 @@ def event_sort_key(event_name: str):
     return (1, float("inf"), upper)
 
 def allowed_events(gender: str, division_no):
-    # Retained for compatibility. Phase 1 event choices now come from
-    # COMPETITION_EVENTS via signup.pilot_config.
+    # Retained for compatibility. Event choices now come from EVENT_CONFIG
+    # via signup.pilot_config.
     if SPRINT_60M_ONLY_MODE:
         active_keys = {str(k).strip().lower() for k in DIVISIONS_60M.keys()}
         if str(division_no or "").strip().lower() in active_keys:

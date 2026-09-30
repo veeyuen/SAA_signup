@@ -2,7 +2,7 @@
 
 This module intentionally handles only relatively small configuration tables:
 USERS, ORGANIZATIONS, COMPETITIONS, COMPETITION_FEES, DIVISIONS and
-COMPETITION_EVENTS and EVENT_CONFIG. Transactional registration/payment storage remains separate.
+EVENT_CONFIG. Transactional registration/payment storage remains separate.
 """
 
 from __future__ import annotations
@@ -396,6 +396,12 @@ class PilotConfigRepository:
                 else pd.Timestamp.max.tz_localize(SINGAPORE_TZ)
             )
         )
+
+        # EVENT_CONFIG is now mandatory. Fail closed before presenting a
+        # competition that has no event-availability configuration.
+        for competition in out:
+            self.event_config_rows(competition.competition_id)
+
         return out
 
     def fee_for(
@@ -462,29 +468,19 @@ class PilotConfigRepository:
         )
 
 
-    def event_config_rows(self, competition_id: str) -> pd.DataFrame | None:
+    def event_config_rows(self, competition_id: str) -> pd.DataFrame:
         """Return validated/canonical EVENT_CONFIG rows for one competition.
 
         Configuration identifiers are compared case-insensitively and with
         surrounding whitespace ignored. Master-sheet spelling remains
         canonical: e.g. EVENT_CONFIG ``Open`` resolves to DIVISIONS ``OPEN``.
 
-        EVENT_CONFIG is opt-in per competition. If the worksheet is absent, or
-        it contains no rows for this competition, callers continue to use the
-        legacy COMPETITION_EVENTS table. Once rows exist for a competition, the
-        entire worksheet is validated strictly because it is user-maintainable
-        master data.
+        EVENT_CONFIG is the sole event-availability source. The worksheet must
+        exist, and every competition that can be registered must have at least
+        one EVENT_CONFIG row. The entire worksheet is validated strictly because
+        it is user-maintainable master data.
         """
-        try:
-            df = self.table("EVENT_CONFIG")
-        except PilotConfigError as exc:
-            text = str(exc).casefold()
-            if "worksheetnotfound" in text or "worksheet" in text and "not found" in text:
-                return None
-            raise
-
-        if df.empty and len(df.columns) == 0:
-            return None
+        df = self.table("EVENT_CONFIG")
 
         required = ["ACTIVE", "COMPETITION_ID", "DIVISION", "GENDER", "EVENT"]
         _require_columns(df, "EVENT_CONFIG", required)
@@ -503,12 +499,14 @@ class PilotConfigRepository:
             label="DIVISIONS.DIVISION_CODE",
         )
 
-        # Opt in when this competition has at least one configured row, using
-        # normalized identifiers so ACM5_2026 / acm5_2026 are equivalent.
+        # Every registrable competition must now be configured in EVENT_CONFIG.
+        # Matching remains normalized so ACM5_2026 / acm5_2026 are equivalent.
         target_competition_key = _config_key(competition_id)
         scoped_mask = df["COMPETITION_ID"].map(_config_key).eq(target_competition_key)
         if not scoped_mask.any():
-            return None
+            raise PilotConfigError(
+                f"EVENT_CONFIG has no rows for COMPETITION_ID={competition_id!r}."
+            )
 
         canonical_df = df.copy()
         seen = set()
@@ -583,10 +581,8 @@ class PilotConfigRepository:
         ].copy()
 
     def competition_event_rows(self, competition_id: str) -> pd.DataFrame:
-        """Return the effective event table, adapting EVENT_CONFIG when opted in."""
+        """Return the normalized event table derived exclusively from EVENT_CONFIG."""
         configured = self.event_config_rows(competition_id)
-        if configured is None:
-            return self.table("COMPETITION_EVENTS")
 
         rows = []
         for _, row in configured.iterrows():
@@ -623,7 +619,7 @@ class PilotConfigRepository:
         events = self.competition_event_rows(competition_id)
         _require_columns(
             events,
-            "COMPETITION_EVENTS",
+            "EVENT_CONFIG effective rows",
             [
                 "COMPETITION_ID",
                 "GENDER",

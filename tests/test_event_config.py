@@ -11,7 +11,7 @@ COMP_ID = "ACM5_2026"
 def competitions_df():
     return pd.DataFrame([
         {"COMPETITION_ID": COMP_ID},
-        {"COMPETITION_ID": "LEGACY"},
+        {"COMPETITION_ID": "NO_EVENT_CONFIG"},
     ])
 
 
@@ -24,12 +24,6 @@ def divisions_df():
         {"DIVISION_CODE": "Novice", "DIVISION_NAME": "Novice", "MIN_AGE": "", "MAX_AGE": "", "DISPLAY_ORDER": 50, "ACTIVE": "FALSE"},
         {"DIVISION_CODE": "Intermediate", "DIVISION_NAME": "Intermediate", "MIN_AGE": "", "MAX_AGE": "", "DISPLAY_ORDER": 60, "ACTIVE": "FALSE"},
         {"DIVISION_CODE": "Advance", "DIVISION_NAME": "Advance", "MIN_AGE": "", "MAX_AGE": "", "DISPLAY_ORDER": 70, "ACTIVE": "FALSE"},
-    ])
-
-
-def legacy_df():
-    return pd.DataFrame([
-        {"COMPETITION_ID": "LEGACY", "GENDER": "M", "DIVISION_CODE": "U15", "EVENT_CODE": "100", "EVENT_NAME": "100m", "ACTIVE": "TRUE"}
     ])
 
 
@@ -59,7 +53,6 @@ def repo(event_config=None):
     tables = {
         "COMPETITIONS": competitions_df(),
         "DIVISIONS": divisions_df(),
-        "COMPETITION_EVENTS": legacy_df(),
         "EVENT_CONFIG": event_config_df() if event_config is None else event_config,
     }
     r.table = lambda worksheet, fresh=False: tables[worksheet].copy()
@@ -192,7 +185,6 @@ def test_master_division_codes_cannot_collide_case_insensitively():
     tables = {
         "COMPETITIONS": competitions_df(),
         "DIVISIONS": divs,
-        "COMPETITION_EVENTS": legacy_df(),
         "EVENT_CONFIG": event_config_df(),
     }
     r.table = lambda worksheet, fresh=False: tables[worksheet].copy()
@@ -214,10 +206,13 @@ def test_inactive_special_division_master_rows_validate_but_are_not_age_eligible
     ) == [{"code": "OPEN", "label": "Open", "age": 26}]
 
 
-def test_legacy_competition_without_event_config_rows_uses_existing_table():
+def test_competition_without_event_config_rows_is_configuration_error():
     r = repo()
-    assert r.event_config_rows("LEGACY") is None
-    assert r.event_options("LEGACY", "Male", "U15") == [("100m", "100")]
+    with pytest.raises(
+        PilotConfigError,
+        match="EVENT_CONFIG has no rows for COMPETITION_ID='NO_EVENT_CONFIG'",
+    ):
+        r.competition_event_rows("NO_EVENT_CONFIG")
 
 
 

@@ -369,7 +369,7 @@ def validate_athlete_selection(
     if missing_events:
         result.issues.append(
             _config_issue(
-                "COMPETITION_EVENTS is missing required column(s): "
+                "EVENT_CONFIG effective rows are missing required column(s): "
                 + ", ".join(missing_events),
                 competition_id=competition_id,
                 athlete_name=athlete_name,
@@ -433,7 +433,7 @@ def validate_athlete_selection(
             if len(distinct_names) > 1:
                 result.issues.append(
                     _config_issue(
-                        f"COMPETITION_EVENTS maps event code {event_code!r} to multiple active names.",
+                        f"EVENT_CONFIG maps event code {event_code!r} to multiple active names.",
                         competition_id=competition_id,
                         athlete_name=athlete_name,
                         division_code=division_code,
@@ -454,7 +454,7 @@ def validate_athlete_selection(
             if len(distinct_codes) > 1:
                 result.issues.append(
                     _config_issue(
-                        f"COMPETITION_EVENTS maps event name {event_name!r} to multiple active codes.",
+                        f"EVENT_CONFIG maps event name {event_name!r} to multiple active codes.",
                         competition_id=competition_id,
                         athlete_name=athlete_name,
                         division_code=division_code,

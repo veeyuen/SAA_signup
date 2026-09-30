@@ -2056,18 +2056,9 @@ if athlete_form_visible:
         st.error(f"Configuration error: {exc}")
         st.stop()
 
-    # EVENT_CONFIG explicitly controls presentation with DISPLAY_ORDER. Legacy
-    # competitions retain the established application event sort.
-    try:
-        _uses_event_config = pilot_config.event_config_rows(selected_competition_id) is not None
-    except PilotConfigError as exc:
-        st.error(f"Configuration error: {exc}")
-        st.stop()
-    event_opts = (
-        event_opts_raw
-        if _uses_event_config
-        else sorted(event_opts_raw, key=lambda _x: _event_sort_key(_x[0]))
-    )
+    # EVENT_CONFIG is the sole event-availability source and controls
+    # presentation order through DISPLAY_ORDER.
+    event_opts = event_opts_raw
     event_names = [name for name, _code in event_opts]
 
     prev_selected = st.session_state.get("events_selected", [])

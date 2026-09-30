@@ -1,0 +1,24 @@
+SAA Phase 1 - Google Sheets configuration integration
+
+Project root:
+  /Users/veesheenyuen/code/veeyuen/SAA_signup
+
+1. Back up your current file:
+   cp signup_app_public_entry.py signup_app_public_entry.pre_phase1_backup.py
+
+2. Replace:
+   signup_app_public_entry.py
+
+3. Add:
+   signup/pilot_config.py
+
+4. secrets.toml must contain:
+   CONFIG_SHEET_URL = "<same workbook URL containing USERS, ORGANIZATIONS, COMPETITIONS, COMPETITION_FEES, DIVISIONS, EVENT_CONFIG>"
+
+5. Ensure your real login email exists as an ACTIVE row in USERS and its ORGANIZATION_ID points to one ACTIVE ORGANIZATIONS row.
+
+6. Run:
+   streamlit run signup_app_public_entry.py
+
+Phase 1 intentionally does not enable school/MOE invoice submission or final no-cost submission.
+Affiliate/Associate paid Stripe checkout uses COMPETITION_FEES rather than STRIPE_PRICE_PER_EVENT.
