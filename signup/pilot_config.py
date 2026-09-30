@@ -2,7 +2,7 @@
 
 This module intentionally handles only relatively small configuration tables:
 USERS, ORGANIZATIONS, COMPETITIONS, COMPETITION_FEES, DIVISIONS and
-COMPETITION_EVENTS. Transactional registration/payment storage remains separate.
+COMPETITION_EVENTS and EVENT_CONFIG. Transactional registration/payment storage remains separate.
 """
 
 from __future__ import annotations
@@ -429,6 +429,97 @@ class PilotConfigRepository:
             - ((check_date.month, check_date.day) < (birth.month, birth.day))
         )
 
+
+    def event_config_rows(self, competition_id: str) -> pd.DataFrame | None:
+        """Return validated EVENT_CONFIG rows for one competition, or None for legacy fallback.
+
+        EVENT_CONFIG is opt-in per competition. If the worksheet is absent, or it
+        contains no rows for this competition, callers continue to use the legacy
+        COMPETITION_EVENTS table. Once rows exist for a competition, the entire
+        worksheet is validated strictly because it is user-maintainable master data.
+        """
+        try:
+            df = self.table("EVENT_CONFIG")
+        except PilotConfigError as exc:
+            text = str(exc).casefold()
+            if "worksheetnotfound" in text or "worksheet" in text and "not found" in text:
+                return None
+            raise
+
+        if df.empty and len(df.columns) == 0:
+            return None
+
+        required = ["ACTIVE", "COMPETITION_ID", "DIVISION", "GENDER", "EVENT"]
+        _require_columns(df, "EVENT_CONFIG", required)
+
+        # Opt in only when this competition has at least one configured row.
+        scoped = df[df["COMPETITION_ID"].map(_clean).eq(_clean(competition_id))]
+        if scoped.empty:
+            return None
+
+        competitions = self.table("COMPETITIONS")
+        _require_columns(competitions, "COMPETITIONS", ["COMPETITION_ID"] )
+        valid_competition_ids = {_clean(v) for v in competitions["COMPETITION_ID"] if _clean(v)}
+
+        seen = set()
+        errors = []
+        for index, row in df.iterrows():
+            row_no = index + 2
+            values = {name: _clean(row.get(name)) for name in required}
+            missing = [name for name in required if not values[name]]
+            if missing:
+                errors.append(f"row {row_no} missing {', '.join(missing)}")
+                continue
+
+            active_raw = values["ACTIVE"].casefold()
+            if active_raw not in {"true", "false", "1", "0", "yes", "no", "y", "n", "active", "inactive"}:
+                errors.append(f"row {row_no} has invalid ACTIVE={values['ACTIVE']!r}")
+
+            if values["COMPETITION_ID"] not in valid_competition_ids:
+                errors.append(f"row {row_no} references unknown COMPETITION_ID={values['COMPETITION_ID']!r}")
+
+            display_raw = _clean(row.get("DISPLAY_ORDER"))
+            if display_raw and _as_int_or_none(display_raw) is None:
+                errors.append(f"row {row_no} has invalid DISPLAY_ORDER={display_raw!r}")
+
+            duplicate_key = (
+                values["COMPETITION_ID"].casefold(),
+                values["DIVISION"].casefold(),
+                _gender_key(values["GENDER"]),
+                values["EVENT"].casefold(),
+                _clean(row.get("EVENT_CLASS")).casefold(),
+            )
+            if duplicate_key in seen:
+                errors.append(f"row {row_no} duplicates an earlier EVENT_CONFIG row")
+            seen.add(duplicate_key)
+
+        if errors:
+            raise PilotConfigError("Invalid EVENT_CONFIG: " + "; ".join(errors))
+
+        return scoped.copy()
+
+    def competition_event_rows(self, competition_id: str) -> pd.DataFrame:
+        """Return the effective event table, adapting EVENT_CONFIG when opted in."""
+        configured = self.event_config_rows(competition_id)
+        if configured is None:
+            return self.table("COMPETITION_EVENTS")
+
+        rows = []
+        for _, row in configured.iterrows():
+            event_name = _clean(row.get("EVENT"))
+            event_class = _clean(row.get("EVENT_CLASS"))
+            rows.append({
+                "COMPETITION_ID": _clean(row.get("COMPETITION_ID")),
+                "GENDER": _clean(row.get("GENDER")),
+                "DIVISION_CODE": _clean(row.get("DIVISION")),
+                "EVENT_CODE": event_name if not event_class else f"{event_name}|{event_class}",
+                "EVENT_NAME": event_name,
+                "EVENT_CLASS": event_class,
+                "DISPLAY_ORDER": _as_int_or_none(row.get("DISPLAY_ORDER")),
+                "ACTIVE": "TRUE" if _as_bool(row.get("ACTIVE"), False) else "FALSE",
+            })
+        return pd.DataFrame(rows)
+
     def division_rows(
         self,
         competition_id: str,
@@ -445,7 +536,7 @@ class PilotConfigRepository:
         if athlete_age is None:
             return []
 
-        events = self.table("COMPETITION_EVENTS")
+        events = self.competition_event_rows(competition_id)
         _require_columns(
             events,
             "COMPETITION_EVENTS",
@@ -465,7 +556,7 @@ class PilotConfigRepository:
         )
         if _clean(gender):
             requested_gender = _gender_key(gender)
-            mask &= events["GENDER"].map(_gender_key).eq(requested_gender)
+            mask &= events["GENDER"].map(_gender_key).isin([requested_gender, "ANY"])
 
         offered_codes = []
         seen = set()
@@ -541,10 +632,10 @@ class PilotConfigRepository:
         if not _clean(gender) or not _clean(division_code):
             return []
 
-        df = self.table("COMPETITION_EVENTS")
+        df = self.competition_event_rows(competition_id)
         _require_columns(
             df,
-            "COMPETITION_EVENTS",
+            "effective event configuration",
             [
                 "COMPETITION_ID",
                 "GENDER",
@@ -559,10 +650,17 @@ class PilotConfigRepository:
 
         matches = df[
             df["COMPETITION_ID"].map(_clean).eq(_clean(competition_id))
-            & df["GENDER"].map(_gender_key).eq(requested_gender)
+            & df["GENDER"].map(_gender_key).isin([requested_gender, "ANY"])
             & df["DIVISION_CODE"].map(_clean).eq(_clean(division_code))
             & df["ACTIVE"].map(lambda x: _as_bool(x, False))
         ]
+
+        if "DISPLAY_ORDER" in matches.columns:
+            matches = matches.assign(
+                _DISPLAY_ORDER=matches["DISPLAY_ORDER"].map(
+                    lambda value: _as_int_or_none(value) if _as_int_or_none(value) is not None else 9999
+                )
+            ).sort_values(["_DISPLAY_ORDER", "EVENT_NAME"], kind="stable")
 
         out = []
         seen = set()

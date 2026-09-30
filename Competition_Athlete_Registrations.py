@@ -1877,7 +1877,18 @@ if athlete_form_visible:
         st.error(f"Configuration error: {exc}")
         st.stop()
 
-    event_opts = sorted(event_opts_raw, key=lambda _x: _event_sort_key(_x[0]))
+    # EVENT_CONFIG explicitly controls presentation with DISPLAY_ORDER. Legacy
+    # competitions retain the established application event sort.
+    try:
+        _uses_event_config = pilot_config.event_config_rows(selected_competition_id) is not None
+    except PilotConfigError as exc:
+        st.error(f"Configuration error: {exc}")
+        st.stop()
+    event_opts = (
+        event_opts_raw
+        if _uses_event_config
+        else sorted(event_opts_raw, key=lambda _x: _event_sort_key(_x[0]))
+    )
     event_names = [name for name, _code in event_opts]
 
     prev_selected = st.session_state.get("events_selected", [])
@@ -2202,7 +2213,7 @@ def _competition_rule_tables(*, fresh: bool = False):
     return (
         pilot_config.table("COMPETITIONS"),
         pilot_config.table("DIVISIONS"),
-        pilot_config.table("COMPETITION_EVENTS"),
+        pilot_config.competition_event_rows(selected_competition_id),
     )
 
 

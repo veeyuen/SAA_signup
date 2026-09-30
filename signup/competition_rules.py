@@ -397,7 +397,7 @@ def validate_athlete_selection(
         for row in event_records
         if _as_bool(row.get("ACTIVE"), False)
         and _key(row.get("COMPETITION_ID")) == _key(competition_id)
-        and _gender_key(row.get("GENDER")) == requested_gender
+        and _gender_key(row.get("GENDER")) in {requested_gender, "ANY"}
         and _key(row.get("DIVISION_CODE")) == _key(division_code)
     ]
 
