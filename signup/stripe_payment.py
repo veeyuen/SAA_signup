@@ -117,7 +117,7 @@ def get_or_create_registration_checkout(
     # The first attempt is stable per order. A genuine retry is stable per
     # previous session, preventing two replacement sessions from a double click.
     safe_basis = retry_basis.replace("/", "_")[-120:]
-    idempotency_key = f"saa-checkout-{registration_id}-{safe_basis}"
+    idempotency_key = f"saa-checkout-v2-{registration_id}-{safe_basis}"
 
     session = stripe.checkout.Session.create(
         mode="payment",
