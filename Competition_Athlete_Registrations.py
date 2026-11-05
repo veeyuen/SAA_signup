@@ -580,10 +580,14 @@ def _cancel_persisted_payment(order_id: str) -> None:
         pending_worksheet = get_pending_worksheet(
             google_client, pending_sheet_url, pending_worksheet_name
         )
-        cancel_pending_registration(
-            worksheet=pending_worksheet,
-            registration_id=order_id,
-        )
+        try:
+            cancel_pending_registration(
+                worksheet=pending_worksheet,
+                registration_id=order_id,
+            )
+        except RuntimeError as pending_exc:
+            if "No PendingPayments row exists" not in str(pending_exc):
+                raise
     except Exception as exc:
         st.error(
             "Stripe Checkout was expired, but PendingPayments could not be updated. "

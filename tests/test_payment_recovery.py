@@ -757,3 +757,19 @@ def test_list_rows_many_turns_429_into_actionable_quota_error():
         assert False, "Expected a quota error"
     except TransactionStoreError as exc:
         assert "Wait about 60 seconds" in str(exc)
+
+
+def test_cancel_pending_registration_allows_missing_legacy_pending_row():
+    from pathlib import Path
+
+    app_path = (
+        Path(__file__).resolve().parents[1]
+        / "Competition_Athlete_Registrations.py"
+    )
+    source = app_path.read_text(encoding="utf-8")
+
+    assert "except RuntimeError as pending_exc:" in source
+    assert (
+        '"No PendingPayments row exists" not in str(pending_exc)'
+        in source
+    )
