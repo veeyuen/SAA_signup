@@ -121,7 +121,7 @@ def get_or_create_registration_checkout(
 
     session = stripe.checkout.Session.create(
         mode="payment",
-        payment_method_types=["card", "paynow"],
+        allowed_payment_method_types=["card", "paynow"],
         client_reference_id=registration_id,
         customer_email=str(customer_email or "").strip() or None,
         metadata={"registration_id": registration_id},
